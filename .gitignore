@@ -1,0 +1,25 @@
+# Local database and anything derived from it. This holds real account rows and
+# real sales, so it never goes to a remote.
+data/*.db
+data/*.db-*
+data/outbox/
+data/*.eml
+
+# Secrets. Only the .example files are tracked.
+.env
+.env.local
+config.bat
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# A stale snapshot of the whole project from an earlier day. Not the live tree.
+QUANTIFY/
+
+# OS
+.DS_Store
+Thumbs.db

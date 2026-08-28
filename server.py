@@ -1,0 +1,1514 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import mimetypes
+import os
+import sqlite3
+import threading
+import time
+import traceback
+import uuid
+import webbrowser
+from datetime import date, datetime, timedelta, timezone
+from http import cookies
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+from quantify_app import ai, billing, costs, intraday, localtime, ordering, timezones, transactions
+from quantify_app.auth import (
+    auth_state,
+    begin_login,
+    clear_cookie_header,
+    complete_login,
+    confirm_email,
+    cookie_header,
+    create_owner,
+    create_session,
+    disable_totp,
+    enable_totp,
+    format_secret,
+    issue_recovery_codes,
+    onboarding_required,
+    otpauth_uri,
+    revoke_session,
+    session_from_token,
+    start_email_verification,
+)
+from quantify_app.connectors import (
+    process_square_webhook,
+    provider_readiness,
+    refresh_events,
+    refresh_weather,
+    sync_square_orders,
+)
+from quantify_app.database import connect, initialize
+from quantify_app.email_brief import (
+    build_email,
+    deliver_brief,
+    mail_provider,
+    preferences as email_preferences,
+    send_due_briefs,
+    send_verification_code,
+    update_preferences,
+)
+from quantify_app.explain import (
+    build_day_payload,
+    local_composition,
+    local_day_narrative,
+    local_day_review,
+)
+from quantify_app.intelligence import (
+    clear_override,
+    daily_brief,
+    forecast_range,
+    performance,
+    set_override,
+)
+from quantify_app.menu_intelligence import (
+    menu_intelligence_view,
+    parse_menu_text,
+    upsert_interpretation,
+)
+from quantify_app.item_analysis import item_profile
+from quantify_app.qr import svg as qr_svg
+from quantify_app.seed import seed_demo, seed_if_empty, seed_workspace
+
+ROOT = Path(__file__).resolve().parent
+WEB_ROOT = ROOT / "web"
+DB_PATH = Path(os.getenv("QUANTIFY_DB", ROOT / "data" / "quantify.db"))
+VERSION = "3.0.0"
+MAX_BODY_BYTES = 2_000_000
+
+
+def parse_date(value: str | None, fallback: date | None = None) -> date:
+    if not value:
+        if fallback is None:
+            raise ValueError("A date is required")
+        return fallback
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("Dates must look like 2026-08-11") from exc
+
+
+def _json(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    return dict(row) if row else None
+
+
+def _location(conn: sqlite3.Connection, location_id: str, organization_id: str | None = None) -> sqlite3.Row:
+    if organization_id:
+        row = conn.execute(
+            "SELECT * FROM locations WHERE id=? AND organization_id=? AND active=1",
+            (location_id, organization_id),
+        ).fetchone()
+    else:
+        row = conn.execute("SELECT * FROM locations WHERE id=? AND active=1", (location_id,)).fetchone()
+    if row is None:
+        raise ValueError("That location is not on this account")
+    return row
+
+
+def _integration_view(conn: sqlite3.Connection, location_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute("SELECT * FROM integrations WHERE location_id=? ORDER BY provider", (location_id,)).fetchall()
+    output = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["details"] = json.loads(item.get("details") or "{}")
+        except json.JSONDecodeError:
+            item["details"] = {}
+        output.append(item)
+    return output
+
+
+def _menu_import(conn: sqlite3.Connection, location_id: str, text: str, commit: bool) -> dict[str, Any]:
+    if len(text) > 150_000:
+        raise ValueError("That is more menu text than this can take at once")
+    parsed = parse_menu_text(text)
+    if not commit:
+        return {"preview": parsed, "count": len(parsed), "committed": False}
+    created = 0
+    updated = 0
+    for row in parsed:
+        existing = conn.execute(
+            "SELECT id FROM menu_items WHERE location_id=? AND lower(name)=lower(?)",
+            (location_id, row["name"]),
+        ).fetchone()
+        if existing:
+            item_id = existing["id"]
+            conn.execute(
+                "UPDATE menu_items SET category=?,price=CASE WHEN ?>0 THEN ? ELSE price END,active=1 WHERE id=?",
+                (row["category"], row["price"], row["price"], item_id),
+            )
+            updated += 1
+        else:
+            item_id = f"item-import-{uuid.uuid4().hex}"
+            conn.execute(
+                """INSERT INTO menu_items(id,location_id,pos_item_id,name,category,price,base_daily_qty,active)
+                   VALUES(?,?,?,?,?,?,1,1)""",
+                (item_id, location_id, None, row["name"], row["category"], row["price"]),
+            )
+            created += 1
+        upsert_interpretation(conn, item_id, row["name"], row["category"])
+    conn.commit()
+    return {"count": len(parsed), "created": created, "updated": updated, "committed": True}
+
+
+def _data_version(conn: sqlite3.Connection, organization_id: str, location_id: str | None) -> str:
+    """A short fingerprint of what this account's screens render.
+
+    The browser polls this. When it changes, the open screen refreshes itself.
+    Every part is scoped to the caller, so one account's activity never forces a
+    refresh in another, and the value carries no information across accounts.
+    """
+    scope = "SELECT id FROM locations WHERE organization_id=?"
+    parts: list[str] = [organization_id]
+    for sql in (
+        f"SELECT MAX(last_sync) AS a, COUNT(*) AS b FROM integrations WHERE location_id IN ({scope})",
+        f"SELECT MAX(date) AS a, COUNT(*) AS b FROM sales WHERE location_id IN ({scope})",
+        f"SELECT MAX(scored_at) AS a, COUNT(*) AS b FROM day_accuracy WHERE location_id IN ({scope})",
+        f"SELECT MAX(updated_at) AS a, COUNT(*) AS b FROM forecast_overrides WHERE location_id IN ({scope})",
+    ):
+        row = conn.execute(sql, (organization_id,)).fetchone()
+        parts.append(f"{row['a']}:{row['b']}" if row else "")
+    row = conn.execute(
+        f"""SELECT MAX(created_at) AS a FROM ai_generations
+            WHERE subject LIKE '%' OR subject IN (SELECT id FROM menu_items WHERE location_id IN ({scope}))""",
+        (organization_id,),
+    ).fetchone()
+    parts.append(str(row["a"] if row else ""))
+    if location_id:
+        parts.append(location_id)
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+_SHOWCASE: dict[str, Any] = {"at": 0.0, "value": None}
+
+
+def _sample_parts(conn: sqlite3.Connection, location_id: str) -> dict[str, list[str]]:
+    """What every item at one sample location is actually made of.
+
+    A stored composition wins when there is one, so anything the owner has
+    corrected shows through. When there is none, the same local writer that
+    would have written it is run here in memory.
+
+    Nothing is written back. This runs on a public, unauthenticated request, so
+    it must not take a write lock, and it must not reach the writing path: an
+    anonymous page view is not allowed to spend an API credit. Writing the local
+    text into `item_composition` would also be worse than useless, because
+    `/api/menu` only generates for items with no row, so one landing page visit
+    would pin the demo menu to the local text forever.
+    """
+    rows = conn.execute(
+        """SELECT m.id, m.name, i.normalized_name, i.item_family, i.confidence, c.components_json
+           FROM menu_items m
+           LEFT JOIN menu_interpretations i ON i.menu_item_id = m.id
+           LEFT JOIN item_composition c ON c.menu_item_id = m.id
+           WHERE m.location_id=? AND m.active=1""",
+        (location_id,),
+    ).fetchall()
+    parts: dict[str, list[str]] = {}
+    for row in rows:
+        components: list[dict[str, Any]] = []
+        if row["components_json"]:
+            try:
+                components = json.loads(row["components_json"]) or []
+            except json.JSONDecodeError:
+                components = []
+        if not components:
+            components = local_composition({
+                "raw_name": row["name"],
+                "normalized_name": row["normalized_name"] or row["name"],
+                "family": row["item_family"] or "menu-item",
+                "interpretation_confidence": float(row["confidence"] or 0),
+            })["components"]
+        parts[row["id"]] = [
+            str(part.get("name", "")).strip()
+            for part in components
+            if str(part.get("name", "")).strip()
+        ][:6]
+    return parts
+
+
+def _location_today(conn: sqlite3.Connection, location_id: str) -> date:
+    """The trading date this location is in, on its own clock.
+
+    A place that shuts at two in the morning is still working on yesterday at
+    one, so the date the interface defaults to has to come from the location
+    rather than from wherever the server happens to be running.
+    """
+    row = conn.execute(
+        "SELECT timezone,open_hour,close_hour FROM locations WHERE id=?", (location_id,)
+    ).fetchone()
+    if row is None:
+        return date.today()
+    try:
+        return intraday.trading_date(row, localtime.now(row["timezone"]))
+    except Exception:  # a bad zone must never stop a page loading
+        return date.today()
+
+
+def _trading_hours(data: dict[str, Any]) -> tuple[int, int]:
+    """Opening and closing hour, with a close after midnight stored past 24.
+
+    Keeping "closes at 2 AM" as 26 rather than 2 means every span in the product
+    stays a plain subtraction. A bar open 11 to 2 is a fifteen hour day, and
+    nothing downstream needs a special case for it.
+    """
+    try:
+        opens = int(data.get("open_hour", 7))
+    except (TypeError, ValueError):
+        opens = 7
+    try:
+        closes = int(data.get("close_hour", 21))
+    except (TypeError, ValueError):
+        closes = 21
+    opens = max(0, min(14, opens))
+    closes = max(0, min(28, closes))
+    if closes <= opens:
+        closes += 24
+    if closes - opens > 24:
+        closes = opens + 24
+    return opens, closes
+
+
+def _showcase(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Real numbers for the landing page, computed from the sample dataset.
+
+    Nothing here is a marketing figure typed into a template. It is the same
+    forecast and the same scored accuracy the product shows once you are in,
+    which is the only claim worth making on a landing page.
+    """
+    if _SHOWCASE["value"] is not None and time.time() - _SHOWCASE["at"] < 90:
+        return _SHOWCASE["value"]
+
+    # This endpoint is public, so it is restricted to the seeded sample
+    # locations. A real customer's name and revenue must never be reachable
+    # without signing in, whatever else changes around this function.
+    location = conn.execute(
+        """SELECT l.* FROM locations l
+           LEFT JOIN (SELECT location_id, COUNT(*) AS n FROM day_accuracy GROUP BY location_id) a
+             ON a.location_id = l.id
+           WHERE l.active=1 AND l.id IN ('loc-bakery', 'loc-pizza', 'loc-burger')
+           ORDER BY COALESCE(a.n, 0) DESC, l.name LIMIT 1"""
+    ).fetchone()
+    if location is None:
+        _SHOWCASE.update({"at": time.time(), "value": {"available": False}})
+        return _SHOWCASE["value"]
+
+    trend = transactions.accuracy_trend(conn, location["id"], days=45)
+    history = conn.execute(
+        "SELECT COUNT(DISTINCT date) AS days, MIN(date) AS first FROM sales WHERE location_id=?",
+        (location["id"],),
+    ).fetchone()
+    try:
+        brief = daily_brief(conn, location["id"], date.today(), week_days=2)
+        summary = brief["summary"]
+        comparison = brief["comparison"]
+        signal = (brief["context"]["signals"] or [{}])[0]
+        peak_hour_value = max((row["revenue"] for row in brief["service_curve"]), default=1) or 1
+        parts = _sample_parts(conn, location["id"])
+        forecast = {
+            "location": location["name"],
+            "concept": location["concept"],
+            "city": f"{location['city']}, {location['region']}",
+            "weekday": date.today().strftime("%A"),
+            "date_label": brief["date_label"],
+            "expected_sales": summary["expected_revenue"],
+            "normal_sales": comparison["sales"],
+            "difference_sales": summary["difference_sales"],
+            "difference_units": summary["difference_units"],
+            "expected_units": summary["expected_units"],
+            "normal_units": comparison["units"],
+            "expected_orders": summary["expected_orders"],
+            "average_order": summary["average_order"],
+            "peak_hour": summary["peak_hour"],
+            "peak_units": summary["peak_units"],
+            "peak_share": summary["peak_share_percent"],
+            "confidence": summary["confidence"],
+            "comparable_days": comparison["based_on_days"],
+            "headline": brief["headline"],
+            "top_reason": {"label": signal.get("label"), "detail": signal.get("detail"), "effect": signal.get("effect")},
+            "reasons": [
+                {"label": row["label"], "effect": row["effect"], "units": row["units"],
+                 "detail": row["detail"], "based_on": row.get("based_on", "")}
+                for row in brief["context"]["signals"][:3]
+            ],
+            "hours": [
+                {"label": row["label"], "share": round(row["revenue"] / peak_hour_value, 3),
+                 "revenue": row["revenue"], "units": row["units"]}
+                for row in brief["service_curve"]
+            ],
+            "items": [
+                {"name": row["name"], "expected": row["expected"], "normal": row["baseline"],
+                 "make": row.get("make", row["expected"]), "sell_out_percent": row.get("sell_out_percent"),
+                 "difference": row["vs_baseline_units"], "low": row["lower"], "high": row["upper"],
+                 "confidence": row["confidence"], "parts": parts.get(row["item_id"], [])}
+                for row in brief["items"][:6]
+            ],
+            "actions": [
+                {"title": row["title"], "detail": row["detail"], "metric": row["metric"]}
+                for row in brief["actions"][:3]
+            ],
+            "steps": [
+                {"text": "Reading this location's register history",
+                 "value": f"{history['days']} days" if history and history["days"] else "no history yet"},
+                {"text": f"Matching today against every past {date.today().strftime('%A')}",
+                 "value": f"{comparison['based_on_days']} found"},
+                {"text": f"Testing {signal.get('label', 'conditions').lower()} against what actually sold",
+                 "value": (f"{signal['units']:+g} items" if signal.get("units") else "no clear effect")},
+                {"text": "What is on nearby",
+                 "value": f"{len(brief['context']['material_events'])} of {brief['context']['event_candidates_reviewed']} matter"},
+                {"text": "Checking yesterday's call against the till",
+                 "value": f"{trend.get('average')}% right" if trend.get("average") else "not scored yet"},
+            ],
+            "week": [
+                {"date": row["date"], "sales": row["expected_revenue"], "change": row["change_percent"],
+                 "top_item": row["top_item"]}
+                for row in brief.get("week_ahead", [])[:6]
+            ],
+        }
+    except Exception:  # noqa: BLE001 - the landing page must never fail to load
+        forecast = None
+
+    days = transactions.day_list(conn, location["id"], limit=6)["days"]
+
+    value = {
+        "available": True,
+        "accuracy": trend.get("average"),
+        "days_scored": trend.get("days") or 0,
+        "within_ten": trend.get("within_ten"),
+        "series": [row["accuracy"] for row in (trend.get("series") or [])][-30:],
+        "history_days": int(history["days"] or 0) if history else 0,
+        "forecast": forecast,
+        "days": days,
+        "pricing": {"monthly": billing.PLANS["standard"]["monthly"], "annual_monthly": billing.PLANS["standard"]["annual_monthly"]},
+        "writer": ai.status()["state"],
+    }
+    _SHOWCASE.update({"at": time.time(), "value": value})
+    return value
+
+
+def _composition_for(conn: sqlite3.Connection, location_id: str, item_id: str, force: bool = False) -> dict[str, Any]:
+    item = conn.execute(
+        """SELECT m.id,m.name,m.category,m.price,i.normalized_name,i.item_family,i.daypart,i.confidence,i.inferred_json
+           FROM menu_items m LEFT JOIN menu_interpretations i ON i.menu_item_id=m.id
+           WHERE m.id=? AND m.location_id=?""",
+        (item_id, location_id),
+    ).fetchone()
+    if item is None:
+        raise ValueError("That menu item is not on this account")
+
+    siblings = [
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM menu_items WHERE location_id=? AND active=1 LIMIT 30",
+            (location_id,),
+        ).fetchall()
+    ]
+    payload = {
+        "raw_name": item["name"],
+        "normalized_name": item["normalized_name"] or item["name"],
+        "category": item["category"],
+        "price": float(item["price"]),
+        "family": item["item_family"] or "menu-item",
+        "daypart": item["daypart"] or "all-day",
+        "interpretation_confidence": float(item["confidence"] or 0),
+        "other_items_on_this_menu": siblings,
+    }
+    result = ai.generate(
+        conn,
+        task="item_composition",
+        subject=item_id,
+        payload=payload,
+        schema=ai.COMPOSITION_SCHEMA,
+        local_writer=local_composition,
+        force=force,
+    )
+    conn.execute(
+        """INSERT INTO item_composition(menu_item_id,summary,confidence,verify_note,components_json,writer,updated_at)
+           VALUES(?,?,?,?,?,?,?)
+           ON CONFLICT(menu_item_id) DO UPDATE SET
+             summary=excluded.summary, confidence=excluded.confidence, verify_note=excluded.verify_note,
+             components_json=excluded.components_json, writer=excluded.writer, updated_at=excluded.updated_at""",
+        (
+            item_id, result.get("summary", ""), result.get("confidence", "low"), result.get("verify_note", ""),
+            json.dumps(result.get("components", []), separators=(",", ":")),
+            result.get("_writer", "local"), datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        ),
+    )
+    conn.commit()
+    return {
+        "item_id": item_id,
+        "name": payload["normalized_name"],
+        "raw_name": item["name"],
+        "category": item["category"],
+        "price": payload["price"],
+        "summary": result.get("summary", ""),
+        "confidence": result.get("confidence", "low"),
+        "verify_note": result.get("verify_note", ""),
+        "components": result.get("components", []),
+        "writer": result.get("_writer", "local"),
+        "written_at": result.get("_written_at"),
+    }
+
+
+class QuantifyHandler(BaseHTTPRequestHandler):
+    server_version = "Quantify/3.0"
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        if os.getenv("QUANTIFY_QUIET", "0") != "1":
+            super().log_message(fmt, *args)
+
+    def _headers(self, content_type: str, content_length: int, status: int = 200, extra: dict[str, str] | None = None) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(content_length))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+            "script-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'",
+        )
+        self.send_header("Cache-Control", "no-store" if content_type.startswith("application/json") else "no-cache")
+        for key, value in (extra or {}).items():
+            self.send_header(key, value)
+        self.end_headers()
+
+    def json_response(self, payload: Any, status: int = 200, extra: dict[str, str] | None = None) -> None:
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+        self._headers("application/json; charset=utf-8", len(body), status, extra)
+        self.wfile.write(body)
+
+    def _cookie_token(self) -> str | None:
+        raw = self.headers.get("Cookie", "")
+        jar = cookies.SimpleCookie()
+        try:
+            jar.load(raw)
+        except cookies.CookieError:
+            return None
+        morsel = jar.get("quantify_session")
+        return morsel.value if morsel else None
+
+    def _client_ip(self) -> str:
+        # Forwarded addresses are only trusted when a known reverse proxy is the
+        # single path to this process.
+        if os.getenv("QUANTIFY_TRUST_PROXY", "0") == "1":
+            forwarded = self.headers.get("X-Forwarded-For", "").split(",", 1)[0].strip()
+            if forwarded:
+                return forwarded
+        return self.client_address[0]
+
+    def _public_origin(self) -> str:
+        scheme = self.headers.get("X-Forwarded-Proto", "http")
+        host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "localhost"
+        return f"{scheme}://{host}"
+
+    def _auth_bypass(self) -> dict[str, Any] | None:
+        if os.getenv("QUANTIFY_AUTH_BYPASS", "0") != "1":
+            return None
+        return {
+            "id": "bypass", "user_id": "bypass", "email": "demo@quantify.local",
+            "display_name": "Demo Owner", "organization_id": "org-demo", "csrf_token": "bypass",
+            "totp_enabled": False, "email_verified": True, "expires_at": "2099-01-01T00:00:00+00:00",
+        }
+
+    def _session(self, conn: sqlite3.Connection, required: bool = True) -> dict[str, Any] | None:
+        bypass = self._auth_bypass()
+        if bypass:
+            return bypass
+        session = session_from_token(conn, self._cookie_token())
+        if required and session is None:
+            raise PermissionError("Sign in to continue")
+        return session.as_dict() if session else None
+
+    def _csrf(self, session: dict[str, Any]) -> None:
+        if session.get("id") == "bypass":
+            return
+        token = self.headers.get("X-CSRF-Token", "")
+        if not token or token != session.get("csrf_token"):
+            raise PermissionError("Your session expired. Refresh the page and try again")
+
+    def _read_raw(self) -> bytes:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise ValueError("Invalid request length") from exc
+        if length < 0 or length > MAX_BODY_BYTES:
+            raise ValueError("That request is too large")
+        return self.rfile.read(length) if length else b""
+
+    def _read_json(self, raw: bytes | None = None) -> dict[str, Any]:
+        raw = self._read_raw() if raw is None else raw
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Request body must be valid JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("Request body must be a JSON object")
+        return parsed
+
+    def do_GET(self) -> None:  # noqa: N802
+        self._dispatch("GET")
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._dispatch("POST")
+
+    def do_PUT(self) -> None:  # noqa: N802
+        self._dispatch("PUT")
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        self._dispatch("PATCH")
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._dispatch("DELETE")
+
+    def _dispatch(self, method: str) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
+        try:
+            if path == "/api/health":
+                self.json_response({"ok": True, "version": VERSION, "time": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+                return
+            if path.startswith("/api/"):
+                self._api(method, path, query)
+                return
+            self.serve_static(path)
+        except PermissionError as exc:
+            self.json_response({"error": str(exc)}, 403)
+        except (ValueError, TypeError) as exc:
+            self.json_response({"error": str(exc)}, 400)
+        except RuntimeError as exc:
+            self.json_response({"error": str(exc)}, 502)
+        except Exception as exc:  # pragma: no cover - final safety boundary
+            traceback.print_exc()
+            detail = str(exc) if os.getenv("QUANTIFY_DEBUG", "0") == "1" else None
+            self.json_response({"error": "Something went wrong on our side", "detail": detail}, 500)
+
+    # -- API ---------------------------------------------------------------
+
+    def _api(self, method: str, path: str, query: dict[str, list[str]]) -> None:
+        if path == "/api/webhooks/square" and method == "POST":
+            raw = self._read_raw()
+            location_id = (query.get("location_id") or [os.getenv("QUANTIFY_SQUARE_INTERNAL_LOCATION", "")])[0]
+            if not location_id:
+                raise ValueError("The webhook is not mapped to a location yet")
+            public_url = os.getenv("SQUARE_WEBHOOK_NOTIFICATION_URL") or f"{self._public_origin()}{path}?location_id={location_id}"
+            with connect(DB_PATH) as conn:
+                self.json_response(process_square_webhook(
+                    conn, location_id, raw, self.headers.get("X-Square-HmacSha256-Signature"), public_url,
+                ))
+            return
+
+        if path == "/api/webhooks/stripe" and method == "POST":
+            raw = self._read_raw()
+            with connect(DB_PATH) as conn:
+                self.json_response(billing.apply_stripe_event(conn, json.loads(raw.decode("utf-8") or "{}")))
+            return
+
+        with connect(DB_PATH) as conn:
+            if self._public_routes(conn, method, path, query):
+                return
+
+            session = self._session(conn, required=True)
+            assert session is not None
+            if self._account_routes(conn, session, method, path, query):
+                return
+
+            # Confirming the email address is the one gate. Two-step sign in is
+            # offered in Settings and is the account holder's choice.
+            if not bool(session.get("email_verified")):
+                raise PermissionError("Confirm your email address to continue")
+
+            if method in {"POST", "PUT", "PATCH", "DELETE"}:
+                self._csrf(session)
+
+            if self._workspace_routes(conn, session, method, path, query):
+                return
+
+            location_id = (query.get("location_id") or [None])[0]
+            if not location_id:
+                raise ValueError("Choose a location first")
+            _location(conn, location_id, session["organization_id"])
+            if self._location_routes(conn, session, method, path, query, location_id):
+                return
+            self.json_response({"error": "Not found"}, 404)
+
+    def _public_routes(self, conn: sqlite3.Connection, method: str, path: str, query: dict[str, list[str]]) -> bool:
+        if path == "/api/auth/state" and method == "GET":
+            bypass = self._auth_bypass()
+            if bypass:
+                self.json_response({
+                    "setup_required": False, "authenticated": True, "user": bypass,
+                    "email_verification_required": False, "mfa_enabled": False,
+                    "onboarding_required": False,
+                })
+            else:
+                self.json_response(auth_state(conn, self._cookie_token()))
+            return True
+        if path == "/api/auth/setup" and method == "POST":
+            data = self._read_json()
+            owner = create_owner(conn, str(data.get("email", "")), str(data.get("display_name", "")), str(data.get("password", "")), self._client_ip())
+            session = create_session(conn, owner["user_id"], ip=self._client_ip(), user_agent=self.headers.get("User-Agent"))
+            issued = start_email_verification(conn, owner["user_id"], self._client_ip())
+            self.json_response(
+                {
+                    "authenticated": True,
+                    "email_verification_required": True,
+                    "user": {"email": owner["email"], "display_name": owner["display_name"]},
+                    "csrf_token": session["csrf_token"],
+                    "verification": self._deliver_code(owner["email"], issued),
+                },
+                201,
+                {"Set-Cookie": cookie_header(session["session_token"])},
+            )
+            return True
+        if path == "/api/auth/login" and method == "POST":
+            data = self._read_json()
+            result = begin_login(conn, str(data.get("email", "")), str(data.get("password", "")), self._client_ip())
+            token = result.pop("session_token", None)
+            self.json_response(result, extra={"Set-Cookie": cookie_header(token)} if token else None)
+            return True
+        if path == "/api/auth/verify" and method == "POST":
+            data = self._read_json()
+            result = complete_login(conn, str(data.get("challenge", "")), str(data.get("code", "")), self._client_ip(), self.headers.get("User-Agent"))
+            token = result.pop("session_token")
+            self.json_response(result, extra={"Set-Cookie": cookie_header(token)})
+            return True
+        if path == "/api/timezone" and method == "GET":
+            text = (query.get("q") or [""])[0]
+            self.json_response({"match": timezones.resolve(text), "suggestions": timezones.suggest(text)})
+            return True
+        if path == "/api/showcase" and method == "GET":
+            self.json_response(_showcase(conn))
+            return True
+        return False
+
+    def _deliver_code(self, email: str, issued: dict[str, Any]) -> dict[str, Any]:
+        """Send the confirmation code, and say plainly how it went out.
+
+        Until a mail provider is configured the message is written to
+        data/outbox and the code is handed straight back to the browser, which
+        is the only way an unlaunched product can let someone finish signing up.
+        The moment POSTMARK_SERVER_TOKEN or SMTP_HOST is set, the code stops
+        being returned and only arrives by email.
+        """
+        if issued.get("already_verified"):
+            return {"already_verified": True, "sent_to": email}
+        code = issued["code"]
+        # Decided before the send, from configuration alone. A configured
+        # provider that happens to fail must never fall back to showing the code.
+        unconfigured = mail_provider() == "outbox"
+        result = send_verification_code(ROOT, email, code, issued["expires_in_minutes"])
+        payload = {
+            "sent_to": email,
+            "provider": result["provider"],
+            "delivered": bool(result.get("delivered")),
+            "expires_in_minutes": issued["expires_in_minutes"],
+        }
+        if result["provider"] == "blocked":
+            raise PermissionError("That address cannot receive mail from Quantify")
+        if not unconfigured and not result.get("delivered"):
+            raise RuntimeError("The confirmation email could not be sent. Try again in a moment")
+        if unconfigured:
+            payload["preview_code"] = code
+            payload["preview_note"] = (
+                "No mail provider is connected yet, so the message was written to data/outbox "
+                "and the code is shown here. Set POSTMARK_SERVER_TOKEN or SMTP_HOST to send it for real."
+            )
+            payload["preview_path"] = result.get("path")
+        return payload
+
+    def _account_routes(self, conn: sqlite3.Connection, session: dict[str, Any], method: str, path: str, query: dict[str, list[str]]) -> bool:
+        if path == "/api/auth/email/status" and method == "GET":
+            self.json_response({
+                "email": session["email"],
+                "verified": bool(session.get("email_verified")),
+                "provider": mail_provider(),
+            })
+            return True
+        if path == "/api/auth/email/resend" and method == "POST":
+            self._csrf(session)
+            issued = start_email_verification(conn, session["user_id"], self._client_ip())
+            self.json_response(self._deliver_code(session["email"], issued))
+            return True
+        if path == "/api/auth/email/confirm" and method == "POST":
+            self._csrf(session)
+            data = self._read_json()
+            result = confirm_email(conn, session["user_id"], str(data.get("code", "")), self._client_ip())
+            result["onboarding_required"] = onboarding_required(conn, session["organization_id"])
+            self.json_response(result)
+            return True
+        if path == "/api/auth/mfa/disable" and method == "POST":
+            self._csrf(session)
+            data = self._read_json()
+            self.json_response(disable_totp(conn, session["user_id"], str(data.get("password", "")), self._client_ip()))
+            return True
+        if path == "/api/auth/mfa/setup" and method == "GET":
+            user = conn.execute("SELECT email,totp_secret,totp_enabled FROM users WHERE id=?", (session["user_id"],)).fetchone()
+            if user is None:
+                raise PermissionError("Account not found")
+            enabled = bool(user["totp_enabled"])
+            uri = otpauth_uri(user["email"], user["totp_secret"]) if not enabled else None
+            self.json_response({
+                "enabled": enabled,
+                "secret": None if enabled else user["totp_secret"],
+                "secret_grouped": None if enabled else format_secret(user["totp_secret"]),
+                "otpauth_uri": uri,
+                "qr_svg": qr_svg(uri) if uri else None,
+                "recovery_codes_remaining": conn.execute(
+                    "SELECT COUNT(*) AS n FROM recovery_codes WHERE user_id=? AND used_at IS NULL", (session["user_id"],)
+                ).fetchone()["n"],
+            })
+            return True
+        if path == "/api/auth/totp/enable" and method == "POST":
+            self._csrf(session)
+            data = self._read_json()
+            self.json_response(enable_totp(conn, session["user_id"], str(data.get("code", "")), self._client_ip()))
+            return True
+        if path == "/api/auth/recovery-codes" and method == "POST":
+            self._csrf(session)
+            codes = issue_recovery_codes(conn, session["user_id"], self._client_ip())
+            self.json_response({"codes": codes, "count": len(codes)})
+            return True
+        if path == "/api/auth/logout" and method == "POST":
+            self._csrf(session)
+            revoke_session(conn, self._cookie_token(), self._client_ip())
+            self.json_response({"ok": True}, extra={"Set-Cookie": clear_cookie_header()})
+            return True
+        return False
+
+    def _workspace_routes(self, conn: sqlite3.Connection, session: dict[str, Any], method: str, path: str, query: dict[str, list[str]]) -> bool:
+        organization_id = session["organization_id"]
+
+        if path == "/api/onboarding" and method == "GET":
+            organization = _json(conn.execute("SELECT * FROM organizations WHERE id=?", (organization_id,)).fetchone())
+            locations = [dict(row) for row in conn.execute(
+                "SELECT id,name,concept,city,region,timezone FROM locations WHERE organization_id=? AND active=1 ORDER BY name",
+                (organization_id,),
+            ).fetchall()]
+            self.json_response({
+                "required": onboarding_required(conn, organization_id),
+                "organization": organization,
+                "sample_locations": locations,
+                "owner": {"name": session["display_name"], "email": session["email"]},
+            })
+            return True
+
+        if path == "/api/onboarding" and method == "POST":
+            data = self._read_json()
+            company = str(data.get("company", "")).strip()
+            if len(company) < 2:
+                raise ValueError("Tell us the name of the business")
+            place = str(data.get("place", "")).strip()
+            resolved = timezones.resolve(place) if place else timezones.resolve("")
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            conn.execute(
+                """UPDATE organizations SET name=?,concept=?,location_count=?,primary_goal=?,pos_provider=?,onboarded_at=?
+                   WHERE id=?""",
+                (
+                    company, str(data.get("concept", ""))[:120], str(data.get("location_count", ""))[:40],
+                    str(data.get("goal", ""))[:120], str(data.get("pos", ""))[:60], now, organization_id,
+                ),
+            )
+            created_location = None
+            if data.get("add_location") and str(data.get("location_name", "")).strip():
+                location_id = f"loc-{uuid.uuid4().hex[:10]}"
+                conn.execute(
+                    """INSERT INTO locations(
+                          id,organization_id,name,concept,address,city,region,postal_code,
+                          latitude,longitude,timezone,open_hour,close_hour,currency,active)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'USD',1)""",
+                    (
+                        location_id, organization_id, str(data.get("location_name"))[:120],
+                        str(data.get("concept", "Restaurant"))[:60], str(data.get("address", ""))[:200],
+                        str(data.get("city", place))[:80], str(data.get("region", ""))[:40],
+                        str(data.get("postal_code", ""))[:16],
+                        float(data.get("latitude") or 40.7128), float(data.get("longitude") or -74.0060),
+                        resolved["timezone"], int(data.get("open_hour") or 7), int(data.get("close_hour") or 21),
+                    ),
+                )
+                conn.execute(
+                    """INSERT INTO email_preferences(location_id,owner_email,enabled,send_time,timezone,include_week_ahead,updated_at)
+                       VALUES(?,?,1,'05:30',?,1,?)""",
+                    (location_id, session["email"], resolved["timezone"], now),
+                )
+                created_location = location_id
+            billing.ensure_subscription(conn, organization_id)
+            conn.commit()
+            # A brand new workspace gets one sample location so the product is
+            # working the moment onboarding finishes, before any register is
+            # connected. It is labelled as sample data everywhere it appears.
+            has_location = conn.execute(
+                "SELECT 1 FROM locations WHERE organization_id=? AND active=1 LIMIT 1", (organization_id,)
+            ).fetchone()
+            sample_location = None
+            if not has_location:
+                sample_location = seed_workspace(
+                    conn, organization_id,
+                    concept=str(data.get("concept", "")),
+                    name=company,
+                    owner_email=session["email"],
+                )
+            opens, closes = _trading_hours(data)
+            target_location = created_location or sample_location
+            if target_location:
+                conn.execute(
+                    "UPDATE locations SET open_hour=?,close_hour=? WHERE id=? AND organization_id=?",
+                    (opens, closes, target_location, organization_id),
+                )
+                conn.commit()
+            self.json_response({
+                "ok": True, "timezone": resolved,
+                "location_id": target_location,
+                "sample_location": bool(sample_location),
+                "open_hour": opens, "close_hour": closes,
+            })
+            return True
+
+        if path == "/api/bootstrap" and method == "GET":
+            locations = [dict(row) for row in conn.execute(
+                "SELECT * FROM locations WHERE organization_id=? AND active=1 ORDER BY name", (organization_id,)
+            ).fetchall()]
+            organization = _json(conn.execute("SELECT * FROM organizations WHERE id=?", (organization_id,)).fetchone())
+            self.json_response({
+                "version": VERSION,
+                "organization": organization,
+                "locations": locations,
+                "default_location_id": locations[0]["id"] if locations else None,
+                "today": date.today().isoformat(),
+                "providers": provider_readiness(),
+                "writer": ai.status(),
+                "billing": {"connected": billing.connected(), "plan": billing.overview(conn, organization_id)["plan"]},
+                "user": {"name": session["display_name"], "email": session["email"]},
+            })
+            return True
+
+        if path == "/api/pulse" and method == "GET":
+            location_id = (query.get("location_id") or [None])[0]
+            if location_id:
+                _location(conn, location_id, organization_id)
+            self.json_response({
+                "version": _data_version(conn, organization_id, location_id),
+                "server_time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "scoring": SCORER.state(),
+                "reforecasting": REFORECASTER.state(),
+            })
+            return True
+
+        if path == "/api/billing" and method == "GET":
+            self.json_response(billing.overview(conn, organization_id))
+            return True
+        if path == "/api/billing/checkout" and method == "POST":
+            data = self._read_json()
+            self.json_response(billing.start_checkout(
+                conn, organization_id, session["email"], session["display_name"],
+                str(data.get("plan", "standard")), f"{self._public_origin()}/",
+            ))
+            return True
+        if path == "/api/billing/portal" and method == "POST":
+            self.json_response(billing.payment_portal(
+                conn, organization_id, session["email"], session["display_name"], f"{self._public_origin()}/",
+            ))
+            return True
+        if path == "/api/billing/plan" and method == "POST":
+            data = self._read_json()
+            self.json_response(billing.change_plan(conn, organization_id, str(data.get("plan", "standard"))))
+            return True
+        if path == "/api/billing/cancel/reason" and method == "POST":
+            data = self._read_json()
+            self.json_response(billing.record_cancellation_intent(
+                conn, organization_id, session["user_id"],
+                str(data.get("reason", "")), str(data.get("detail", "")), bool(data.get("wants_contact")),
+            ))
+            return True
+        if path == "/api/billing/cancel" and method == "POST":
+            data = self._read_json()
+            self.json_response(billing.cancel_plan(conn, organization_id, bool(data.get("immediate"))))
+            return True
+        if path == "/api/billing/resume" and method == "POST":
+            self.json_response(billing.resume_plan(conn, organization_id))
+            return True
+        return False
+
+    def _location_routes(
+        self, conn: sqlite3.Connection, session: dict[str, Any], method: str,
+        path: str, query: dict[str, list[str]], location_id: str,
+    ) -> bool:
+        # The default day is the one this location is actually in, not the one
+        # the server is in. A server in another zone would otherwise ask for
+        # tomorrow's brief all evening, and the opening call would never lock
+        # because its date would never match.
+        today = _location_today(conn, location_id)
+
+        if path == "/api/brief" and method == "GET":
+            target = parse_date((query.get("date") or [today.isoformat()])[0])
+            brief = daily_brief(conn, location_id, target, week_days=7)
+            # Before the doors open, what Quantify says is written down and
+            # cannot be changed. Every accuracy figure in the product is
+            # measured against that, so a forecast revised during service can
+            # never be reported as a forecast of that day.
+            intraday.lock_opening_call(conn, location_id, target, brief["items"])
+            brief["costs"] = costs.forecast_costs(conn, location_id, brief)
+            brief["intraday"] = intraday.day_state(conn, location_id, target, brief)
+            brief["writer"] = ai.status()
+            cached = ai.read_cache(conn, "day_narrative", f"{location_id}:{target.isoformat()}", ai.fingerprint(build_day_payload(brief)))
+            brief["narrative"] = cached
+            self.json_response(brief)
+            return True
+
+        if path == "/api/brief/narrative" and method == "GET":
+            target = parse_date((query.get("date") or [today.isoformat()])[0])
+            brief = daily_brief(conn, location_id, target, week_days=2)
+            payload = build_day_payload(brief)
+            subject = f"{location_id}:{target.isoformat()}"
+            key = f"day_narrative:{subject}"
+            if not ai.claim_inflight(key):
+                cached = ai.read_cache(conn, "day_narrative", subject, ai.fingerprint(payload))
+                self.json_response(cached or {"pending": True})
+                return True
+            try:
+                self.json_response(ai.generate(
+                    conn, "day_narrative", subject, payload, ai.DAY_NARRATIVE_SCHEMA, local_day_narrative,
+                    force=(query.get("refresh") or ["0"])[0] == "1",
+                ))
+            finally:
+                ai.release_inflight(key)
+            return True
+
+        if path == "/api/outlook" and method == "GET":
+            start = parse_date((query.get("start") or [today.isoformat()])[0])
+            days = int((query.get("days") or ["14"])[0])
+            self.json_response(forecast_range(conn, location_id, start, days))
+            return True
+
+        if path == "/api/accuracy" and method == "GET":
+            as_of = parse_date((query.get("as_of") or [today.isoformat()])[0])
+            days = int((query.get("days") or ["30"])[0])
+            result = performance(conn, location_id, as_of, days)
+            result["trend"] = transactions.accuracy_trend(conn, location_id, days=60)
+            self.json_response(result)
+            return True
+
+        if path == "/api/history/days" and method == "GET":
+            before = query.get("before")
+            start = query.get("start")
+            self.json_response(transactions.day_list(
+                conn, location_id,
+                with_costs=True,
+                before=parse_date(before[0]) if before else None,
+                start=parse_date(start[0]) if start else None,
+                limit=int((query.get("limit") or ["18"])[0]),
+            ))
+            return True
+
+        if path == "/api/history/orders" and method == "GET":
+            before = query.get("before")
+            start = query.get("start")
+            self.json_response(transactions.order_page(
+                conn, location_id,
+                before_date=parse_date(before[0]) if before else None,
+                start=parse_date(start[0]) if start else None,
+                skip=int((query.get("skip") or ["0"])[0]),
+                limit=int((query.get("limit") or ["40"])[0]),
+            ))
+            return True
+
+        if path == "/api/history/day" and method == "GET":
+            target = parse_date((query.get("date") or [(today - timedelta(days=1)).isoformat()])[0])
+            detail = transactions.day_detail(conn, location_id, target)
+            subject = f"{location_id}:{target.isoformat()}"
+            payload = transactions.review_payload(detail)
+            detail["review"] = ai.generate(conn, "day_review", subject, payload, ai.DAY_REVIEW_SCHEMA, local_day_review)
+            self.json_response(detail)
+            return True
+
+        if path == "/api/item" and method == "GET":
+            item_id = (query.get("item_id") or [""])[0]
+            target = parse_date((query.get("date") or [today.isoformat()])[0])
+            self.json_response(item_profile(conn, location_id, item_id, target))
+            return True
+
+        if path == "/api/menu" and method == "GET":
+            view = menu_intelligence_view(conn, location_id)
+            # Work out what every item is made of the first time the menu is
+            # opened. Nobody should have to press a button to be told what a
+            # cheeseburger contains.
+            missing = [
+                row["id"] for row in view["items"]
+                if not conn.execute("SELECT 1 FROM item_composition WHERE menu_item_id=?", (row["id"],)).fetchone()
+            ]
+            for item_id in missing[:40]:
+                try:
+                    _composition_for(conn, location_id, item_id)
+                except Exception:  # noqa: BLE001 - one bad item must not blank the page
+                    if os.getenv("QUANTIFY_DEBUG", "0") == "1":
+                        traceback.print_exc()
+            stored = {
+                row["menu_item_id"]: dict(row)
+                for row in conn.execute(
+                    """SELECT c.* FROM item_composition c JOIN menu_items m ON m.id=c.menu_item_id
+                       WHERE m.location_id=?""",
+                    (location_id,),
+                ).fetchall()
+            }
+            for item in view["items"]:
+                record = stored.get(item["id"])
+                item["composition"] = {
+                    "summary": record["summary"],
+                    "confidence": record["confidence"],
+                    "verify_note": record["verify_note"],
+                    "components": json.loads(record["components_json"] or "[]"),
+                    "writer": record["writer"],
+                } if record else None
+            view["writer"] = ai.status()
+            self.json_response(view)
+            return True
+
+        if path == "/api/menu/composition" and method == "GET":
+            item_id = (query.get("item_id") or [""])[0]
+            self.json_response(_composition_for(conn, location_id, item_id))
+            return True
+
+        if path == "/api/menu/composition" and method == "PUT":
+            data = self._read_json()
+            item_id = str(data.get("item_id", ""))
+            owned = conn.execute(
+                "SELECT 1 FROM menu_items WHERE id=? AND location_id=?", (item_id, location_id)
+            ).fetchone()
+            if owned is None:
+                raise ValueError("That menu item is not at this location")
+            components = [
+                {
+                    "name": str(row.get("name", ""))[:80],
+                    "role": str(row.get("role", "other"))[:24],
+                    "quantity": str(row.get("quantity", ""))[:48],
+                    "share": max(0, min(100, int(row.get("share") or 0))),
+                    "confidence": "high",
+                }
+                for row in (data.get("components") or []) if str(row.get("name", "")).strip()
+            ]
+            conn.execute(
+                """INSERT INTO item_composition(menu_item_id,summary,confidence,verify_note,components_json,writer,updated_at)
+                   VALUES(?,?,?,?,?,?,?)
+                   ON CONFLICT(menu_item_id) DO UPDATE SET
+                     summary=excluded.summary, confidence=excluded.confidence, verify_note=excluded.verify_note,
+                     components_json=excluded.components_json, writer=excluded.writer, updated_at=excluded.updated_at""",
+                (
+                    item_id, str(data.get("summary", ""))[:400], "high",
+                    "Confirmed by you.",
+                    json.dumps(components, separators=(",", ":")), "owner",
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                ),
+            )
+            conn.commit()
+            self.json_response({"ok": True, "components": len(components)})
+            return True
+
+        if path == "/api/menu/composition" and method == "POST":
+            data = self._read_json()
+            self.json_response(_composition_for(conn, location_id, str(data.get("item_id", "")), force=True))
+            return True
+
+        if path == "/api/menu/import" and method == "POST":
+            data = self._read_json()
+            self.json_response(_menu_import(conn, location_id, str(data.get("text", "")), bool(data.get("commit", False))))
+            return True
+
+        if path == "/api/ordering" and method == "GET":
+            days = max(1, min(14, int((query.get("days") or ["3"])[0])))
+            start = parse_date((query.get("start") or [today.isoformat()])[0])
+            self.json_response(ordering.order_plan(conn, location_id, start, days))
+            return True
+
+        if path == "/api/costs" and method == "GET":
+            self.json_response(costs.cost_view(conn, location_id))
+            return True
+
+        if path == "/api/costs" and method == "PUT":
+            self.json_response(costs.save_cost_settings(conn, location_id, self._read_json()))
+            return True
+
+        if path == "/api/setup" and method == "GET":
+            location = dict(_location(conn, location_id, session["organization_id"]))
+            self.json_response({
+                "location": location,
+                "timezone": timezones.resolve(location["timezone"]),
+                "integrations": _integration_view(conn, location_id),
+                "providers": provider_readiness(),
+                "email": email_preferences(conn, location_id),
+                "menu": menu_intelligence_view(conn, location_id)["summary"],
+                "writer": ai.status(),
+                "security": {
+                    "mfa_enabled": bool(session["totp_enabled"]),
+                    "session_expires_at": session["expires_at"],
+                    "recovery_codes_remaining": conn.execute(
+                        "SELECT COUNT(*) AS n FROM recovery_codes WHERE user_id=? AND used_at IS NULL", (session["user_id"],)
+                    ).fetchone()["n"],
+                },
+                "order_source": transactions.order_source(conn, location_id),
+            })
+            return True
+
+        if path == "/api/location" and method in {"POST", "PUT"}:
+            data = self._read_json()
+            current = _location(conn, location_id, session["organization_id"])
+            resolved = timezones.resolve(str(data.get("timezone") or data.get("place") or current["timezone"]), fallback=current["timezone"])
+            conn.execute(
+                "UPDATE locations SET name=?,concept=?,city=?,region=?,timezone=?,open_hour=?,close_hour=? WHERE id=?",
+                (
+                    str(data.get("name") or current["name"])[:120],
+                    str(data.get("concept") or current["concept"])[:80],
+                    str(data.get("city") or current["city"])[:80],
+                    str(data.get("region") or current["region"])[:40],
+                    resolved["timezone"],
+                    *_trading_hours({
+                        "open_hour": data.get("open_hour", current["open_hour"]),
+                        "close_hour": data.get("close_hour", current["close_hour"]),
+                    }),
+                    location_id,
+                ),
+            )
+            conn.commit()
+            self.json_response({"ok": True, "timezone": resolved})
+            return True
+
+        if path == "/api/email/preview" and method == "GET":
+            target = parse_date((query.get("date") or [today.isoformat()])[0])
+            built = build_email(conn, location_id, target)
+            self.json_response({"subject": built["subject"], "html": built["html"], "text": built["text"]})
+            return True
+
+        if path == "/api/email/preferences" and method in {"POST", "PUT"}:
+            data = self._read_json()
+            location = _location(conn, location_id, session["organization_id"])
+            resolved = timezones.resolve(str(data.get("timezone", location["timezone"])), fallback=location["timezone"])
+            self.json_response({
+                **update_preferences(
+                    conn, location_id, str(data.get("owner_email", "")), bool(data.get("enabled", True)),
+                    str(data.get("send_time", "05:30")), resolved["timezone"], bool(data.get("include_week_ahead", True)),
+                ),
+                "timezone_match": resolved,
+            })
+            return True
+
+        if path == "/api/email/send-test" and method == "POST":
+            data = self._read_json()
+            target = parse_date(str(data.get("date") or today.isoformat()))
+            # Only addresses already on this account. Otherwise anyone who signs
+            # up can send Quantify-branded mail to a stranger.
+            allowed = {session["email"].lower(), (email_preferences(conn, location_id)["owner_email"] or "").lower()}
+            requested = str(data.get("recipient") or "").strip().lower()
+            recipient = requested if requested in allowed and requested else None
+            if requested and recipient is None:
+                raise ValueError("Test emails only go to an address already on this account")
+            self.json_response(deliver_brief(conn, ROOT, location_id, target, recipient))
+            return True
+
+        if path == "/api/forecast/override" and method in {"POST", "PATCH"}:
+            data = self._read_json()
+            self.json_response(set_override(
+                conn, location_id, str(data.get("item_id", "")), parse_date(str(data.get("date", ""))),
+                int(data.get("quantity", -1)), str(data.get("reason", "")),
+            ))
+            return True
+
+        if path == "/api/forecast/override" and method == "DELETE":
+            data = self._read_json()
+            clear_override(conn, location_id, str(data.get("item_id", "")), parse_date(str(data.get("date", ""))))
+            self.json_response({"ok": True})
+            return True
+
+        if path.startswith("/api/integrations/") and path.endswith("/sync") and method == "POST":
+            provider = path.split("/")[3]
+            data = self._read_json()
+            if provider == "weather":
+                self.json_response(refresh_weather(conn, location_id, days=int(data.get("days", 16)), backfill_days=int(data.get("backfill_days", 1095))))
+            elif provider == "events":
+                self.json_response(refresh_events(conn, location_id, days=int(data.get("days", 90)), backfill_days=int(data.get("backfill_days", 1095))))
+            elif provider in {"pos", "square"}:
+                self.json_response(sync_square_orders(conn, location_id, int(data.get("days", 1095))))
+            else:
+                raise ValueError("That connector is not available in this build")
+            return True
+
+        if path == "/api/demo/reset" and method == "POST":
+            # seed_demo() truncates every account in the database, so it is not
+            # something a route should ever do. Kept behind an explicit flag and
+            # refused outright once more than one account exists.
+            if os.getenv("QUANTIFY_ALLOW_DEMO_RESET", "0") != "1":
+                raise PermissionError("Sample data reset is switched off. Use: python server.py --reset")
+            accounts = int(conn.execute("SELECT COUNT(*) AS n FROM users WHERE active=1").fetchone()["n"])
+            if accounts > 1:
+                raise PermissionError("This database has more than one account, so the sample reset is refused")
+            seed_demo(conn, today=date.today())
+            self.json_response({"ok": True})
+            return True
+
+        return False
+
+    def serve_static(self, request_path: str) -> None:
+        relative = request_path.lstrip("/") or "index.html"
+        if request_path == "/favicon.ico":
+            relative = "assets/favicon.svg"
+        target = (WEB_ROOT / relative).resolve()
+        try:
+            target.relative_to(WEB_ROOT.resolve())
+        except ValueError:
+            self.json_response({"error": "Not found"}, 404)
+            return
+        if not target.is_file():
+            target = WEB_ROOT / "index.html"
+        content = target.read_bytes()
+        content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        if content_type.startswith("text/") or content_type in {"application/javascript", "application/json", "image/svg+xml"}:
+            content_type += "; charset=utf-8"
+        self._headers(content_type, len(content), 200)
+        self.wfile.write(content)
+
+
+class BackgroundScorer:
+    """Scores closed days against what the model said, a chunk at a time.
+
+    This runs behind the interface so the accuracy record fills itself in
+    without anyone pressing a button, and so the first page load is never
+    waiting on a backtest.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._status = {"running": False, "scored": 0, "location": None, "finished": False}
+        self._stop = threading.Event()
+
+    def state(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._status)
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def run(self) -> None:
+        while not self._stop.wait(2.0):
+            try:
+                with connect(DB_PATH) as conn:
+                    work = next(transactions.iter_scoring_targets(conn, chunk=14), None)
+                    if work is None:
+                        with self._lock:
+                            self._status.update({"running": False, "finished": True, "location": None})
+                        self._stop.wait(120)
+                        continue
+                    location_id, start, end = work
+                    with self._lock:
+                        self._status.update({"running": True, "finished": False, "location": location_id})
+                    scored = transactions.score_range(conn, location_id, start, end)
+                    with self._lock:
+                        self._status["scored"] = self._status.get("scored", 0) + scored
+            except Exception:
+                if os.getenv("QUANTIFY_DEBUG", "0") == "1":
+                    traceback.print_exc()
+                self._stop.wait(30)
+
+
+class Reforecaster:
+    """Revises the running day at the top of every service hour.
+
+    Nothing is refitted here. What the model knows about Tuesdays has not
+    changed since this morning. What has changed is whether this Tuesday is
+    running to the shape a Tuesday has at this location, and that is the only
+    thing the revision uses.
+
+    The morning call is never touched. It is written once before the doors open
+    and every accuracy figure in the product is measured against it, so a day
+    that was called badly stays called badly on the record no matter how well
+    the revisions caught up.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._status = {"revisions": 0, "at": None, "locations": 0}
+        self._stop = threading.Event()
+
+    def state(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._status)
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def run(self) -> None:
+        # Every four minutes, so a completed hour is picked up within a few
+        # minutes of finishing without the loop being busy.
+        while not self._stop.wait(240):
+            try:
+                with connect(DB_PATH) as conn:
+                    rows = conn.execute("SELECT id FROM locations WHERE active=1").fetchall()
+                    written = 0
+                    for row in rows:
+                        try:
+                            written += intraday.catch_up(conn, row["id"])
+                        except Exception:
+                            if os.getenv("QUANTIFY_DEBUG", "0") == "1":
+                                traceback.print_exc()
+                    with self._lock:
+                        self._status = {
+                            "revisions": self._status.get("revisions", 0) + written,
+                            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            "locations": len(rows),
+                        }
+            except Exception:
+                if os.getenv("QUANTIFY_DEBUG", "0") == "1":
+                    traceback.print_exc()
+                self._stop.wait(60)
+
+
+SCORER = BackgroundScorer()
+REFORECASTER = Reforecaster()
+
+
+def _scheduler(stop: threading.Event) -> None:
+    while not stop.wait(45):
+        try:
+            with connect(DB_PATH) as conn:
+                send_due_briefs(conn, ROOT)
+        except Exception:
+            if os.getenv("QUANTIFY_DEBUG", "0") == "1":
+                traceback.print_exc()
+
+
+def _remove_account(conn: sqlite3.Connection, email: str) -> None:
+    email = email.strip().lower()
+    row = conn.execute(
+        "SELECT id,display_name,organization_id FROM users WHERE email=?", (email,)
+    ).fetchone()
+    if row is None:
+        print(f"\nNo account here uses {email}.\n")
+        return
+    others = int(conn.execute(
+        "SELECT COUNT(*) AS n FROM users WHERE organization_id=? AND id<>?",
+        (row["organization_id"], row["id"]),
+    ).fetchone()["n"])
+    conn.execute("DELETE FROM users WHERE id=?", (row["id"],))
+    if not others and row["organization_id"] != "org-demo":
+        # The workspace existed only for this account, so it goes too.
+        conn.execute("DELETE FROM organizations WHERE id=?", (row["organization_id"],))
+    conn.commit()
+    print(f"\nRemoved {email} ({row['display_name']}).")
+    print("Sessions, codes, and the workspace created for it are gone with it.\n")
+
+
+def _accounts_report(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """SELECT u.email,u.display_name,u.email_verified,u.totp_enabled,u.last_login_at,o.name AS org
+           FROM users u JOIN organizations o ON o.id=u.organization_id
+           WHERE u.active=1 ORDER BY u.created_at""",
+    ).fetchall()
+    if not rows:
+        print("\nNo accounts yet. Open the site and use Create account.\n")
+        return
+    print(f"\n{len(rows)} account(s) on this database:\n")
+    for row in rows:
+        flags = []
+        flags.append("email confirmed" if row["email_verified"] else "email not confirmed")
+        if row["totp_enabled"]:
+            flags.append("two-step on")
+        print(f"  {row['email']}")
+        print(f"    {row['display_name']}, {row['org']}")
+        print(f"    {', '.join(flags)}, last signed in {row['last_login_at'] or 'never'}")
+    print("\nForgotten the password? Run:  python server.py --set-password EMAIL\n")
+
+
+def _set_password(conn: sqlite3.Connection, email: str) -> None:
+    import getpass
+    from quantify_app.auth import hash_password, validate_password
+
+    email = email.strip().lower()
+    row = conn.execute("SELECT id,display_name FROM users WHERE email=? AND active=1", (email,)).fetchone()
+    if row is None:
+        print(f"\nNo account here uses {email}. Run --accounts to see what does exist.\n")
+        return
+    password = os.getenv("QUANTIFY_NEW_PASSWORD") or getpass.getpass("New password (12+ characters): ")
+    try:
+        validate_password(password)
+    except ValueError as exc:
+        print(f"\n{exc}.\n")
+        return
+    digest, salt = hash_password(password)
+    conn.execute(
+        "UPDATE users SET password_hash=?,password_salt=?,email_verified=1 WHERE id=?",
+        (digest, salt, row["id"]),
+    )
+    conn.execute("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL",
+                 (datetime.now(timezone.utc).isoformat(timespec="seconds"), row["id"]))
+    conn.commit()
+    print(f"\nPassword updated for {email}. Every other session was signed out.\n")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run Quantify")
+    parser.add_argument("--host", default=os.getenv("QUANTIFY_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.getenv("QUANTIFY_PORT", "8787")))
+    parser.add_argument("--reset", action="store_true", help="Rebuild the sample dataset and clear all accounts")
+    parser.add_argument("--open", action="store_true")
+    parser.add_argument("--accounts", action="store_true", help="List the accounts on this database and exit")
+    parser.add_argument("--set-password", metavar="EMAIL", help="Set a new password for an account and exit")
+    parser.add_argument("--remove-account", metavar="EMAIL", help="Delete an account and exit")
+    args = parser.parse_args()
+
+    initialize(DB_PATH)
+    if args.accounts:
+        with connect(DB_PATH) as conn:
+            _accounts_report(conn)
+        return
+    if args.set_password:
+        with connect(DB_PATH) as conn:
+            _set_password(conn, args.set_password)
+        return
+    if args.remove_account:
+        with connect(DB_PATH) as conn:
+            _remove_account(conn, args.remove_account)
+        return
+
+    with connect(DB_PATH) as conn:
+        if args.reset:
+            seed_demo(conn, today=date.today())
+        else:
+            seed_if_empty(conn, today=date.today())
+
+    stop = threading.Event()
+    if os.getenv("QUANTIFY_DISABLE_SCHEDULER", "0") != "1":
+        threading.Thread(target=_scheduler, args=(stop,), name="quantify-email", daemon=True).start()
+        threading.Thread(target=SCORER.run, name="quantify-scorer", daemon=True).start()
+        threading.Thread(target=REFORECASTER.run, name="quantify-reforecast", daemon=True).start()
+
+    server = ThreadingHTTPServer((args.host, args.port), QuantifyHandler)
+    writer = ai.status()
+    print("\nQuantify is running.")
+    print(f"  Open        http://{args.host}:{args.port}")
+    print(f"  Database    {DB_PATH}")
+    print(f"  Written by  {writer['model'] or 'Quantify (no AI key set)'}")
+    print("  The daily email and the accuracy scorer run while this window is open.\n")
+    if args.open:
+        threading.Timer(0.7, lambda: webbrowser.open(f"http://{args.host}:{args.port}")).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping Quantify.")
+    finally:
+        stop.set()
+        SCORER.stop()
+        REFORECASTER.stop()
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

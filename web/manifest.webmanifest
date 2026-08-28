@@ -1,0 +1,14 @@
+{
+  "name": "Quantify",
+  "short_name": "Quantify",
+  "description": "Know what tomorrow will sell, and how sure to be about it.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f7f5",
+  "theme_color": "#f7f7f5",
+  "icons": [
+    {"src": "/assets/favicon.svg", "sizes": "any", "type": "image/svg+xml"},
+    {"src": "/assets/quantify-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "/assets/quantify-512.png", "sizes": "512x512", "type": "image/png"}
+  ]
+}

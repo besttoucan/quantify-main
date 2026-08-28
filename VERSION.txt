@@ -1,0 +1,7 @@
+Quantify 3.0.0
+Build date: 2026-08-11
+Runtime: Python 3.11 or newer, SQLite, browser-native JavaScript, no build step
+Product: item-level demand forecasting with a measured accuracy record,
+         order history, menu composition, and a morning brief
+Writing:  Claude Opus 5 when a key is present, Quantify's own writer otherwise
+Payments: Stripe

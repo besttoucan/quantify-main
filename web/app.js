@@ -1,0 +1,3350 @@
+(() => {
+  "use strict";
+
+  const root = document.getElementById("app");
+  const layer = document.getElementById("layer");
+  const toastNode = document.getElementById("toast");
+
+  const S = {
+    auth: null,
+    boot: null,
+    locationId: localStorage.getItem("quantify.location") || "",
+    view: localStorage.getItem("quantify.view") || "today",
+    date: new Date().toISOString().slice(0, 10),
+    data: null,
+    historyTab: "days",
+    settingsTab: "location",
+    open: new Set(),
+    pulse: { version: null, checkedAt: null, live: false },
+    history: { days: [], nextBefore: null, hasMore: true, loading: false, range: "all", costs: null },
+    costs: null,
+    tour: null,
+    order: { days: 3, edits: {}, extras: [] },
+    orders: { rows: [], nextDate: null, nextSkip: 0, hasMore: true, loading: false, range: "all" },
+    challenge: "",
+    setup: null,
+    onboarding: { step: 0, values: {}, tz: null },
+    cancelFlow: null,
+    narrativeTried: "",
+  };
+
+  /* ---------- helpers ---------- */
+  const e = (v) => String(v ?? "")
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+
+  const money = (v, precise) => new Intl.NumberFormat("en-US", {
+    style: "currency", currency: "USD",
+    minimumFractionDigits: precise ? 2 : 0, maximumFractionDigits: precise ? 2 : 0,
+  }).format(Number(v || 0));
+  const num = (v) => new Intl.NumberFormat("en-US").format(Math.round(Number(v || 0)));
+  const pct = (v) => `${Number(v) > 0 ? "+" : ""}${Math.round(Number(v || 0))}%`;
+  const noun = (n, one, many) => `${num(n)} ${Math.abs(Math.round(Number(n || 0))) === 1 ? one : (many || one + "s")}`;
+
+  const dObj = (iso) => new Date(`${iso}T12:00:00`);
+  const dShort = (iso) => new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(dObj(iso));
+  const dMed = (iso) => new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric" }).format(dObj(iso));
+  const dLong = (iso) => new Intl.DateTimeFormat("en-US", { weekday: "long", month: "long", day: "numeric" }).format(dObj(iso));
+  const weekday = (iso) => new Intl.DateTimeFormat("en-US", { weekday: "long" }).format(dObj(iso));
+  const clock = (t) => {
+    const [h, m] = String(t || "").split(":");
+    const hour = Number(h);
+    return `${((hour % 12) || 12)}:${m} ${hour < 12 ? "AM" : "PM"}`;
+  };
+  const addDays = (iso, n) => {
+    const d = dObj(iso); d.setDate(d.getDate() + n);
+    return d.toISOString().slice(0, 10);
+  };
+  const todayISO = () => new Date().toISOString().slice(0, 10);
+
+  const ICONS = {
+    today: '<path d="M3 8h18M7 3v3M17 3v3M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/>',
+    forecast: '<path d="M3 17l5-6 4 3 4-6 5 5"/><path d="M3 21h18"/>',
+    history: '<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v4l3 2"/>',
+    menu: '<path d="M4 5h16M4 12h16M4 19h10"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 7.5 19a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3 13.5H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 7.5a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/>',
+    chevR: '<path d="M9 5l7 7-7 7"/>',
+    chevL: '<path d="M15 5l-7 7 7 7"/>',
+    chevD: '<path d="M5 9l7 7 7-7"/>',
+    close: '<path d="M18 6 6 18M6 6l12 12"/>',
+    check: '<path d="M20 6 9 17l-5-5"/>',
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 16v-5M12 8h.01"/>',
+    refresh: '<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/>',
+    prev: '<path d="M15 18l-6-6 6-6"/>',
+    next: '<path d="M9 6l6 6-6 6"/>',
+    copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
+    external: '<path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>',
+    empty: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 4v16"/>',
+    spark: '<path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/>',
+  };
+  const icon = (name, cls = "ico") =>
+    `<svg class="ico ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
+
+  // `hold` is for messages somebody has to actually read and act on, like being
+  // told a person is going to call them. Those stay up long enough to be read
+  // twice and carry their own dismiss.
+  function toast(message, kind = "ok", hold = false) {
+    toastNode.innerHTML = `${icon(kind === "error" ? "info" : "check")}<span>${e(message)}</span>`
+      + (hold ? `<button class="toast-x" data-do="close-toast" aria-label="Dismiss">${icon("close")}</button>` : "");
+    toastNode.className = `toast show ${kind === "error" ? "error" : ""} ${hold ? "hold" : ""}`;
+    clearTimeout(toastNode._t);
+    toastNode._t = setTimeout(() => { toastNode.className = "toast"; }, hold ? 16000 : 3800);
+  }
+
+  const wordmark = (cls = "") => `<span class="wordmark ${cls}">Quantify</span>`;
+
+  function booting(message) {
+    root.innerHTML = `<main class="boot">${wordmark("lg")}<div class="bar"><i></i></div><p>${e(message)}</p></main>`;
+  }
+
+  function fatal(error) {
+    root.innerHTML = `<main class="boot">${wordmark("lg")}
+      <div class="card" style="max-width:440px"><div class="card-body" style="text-align:center">
+        <h2 style="font-size:16px">Quantify could not load</h2>
+        <p class="lede" style="margin-top:8px">${e(error.message || error)}</p>
+        <div class="btn-row" style="justify-content:center;margin-top:16px"><button class="btn primary" data-do="retry">Try again</button></div>
+      </div></div></main>`;
+  }
+
+  /* ---------- routing ---------- */
+  const NEWLINE = String.fromCharCode(10);
+
+  const pathNow = () => window.location.pathname.replace(/\/+$/, "") || "/";
+
+  // If the history API is ever blocked, a redirect can bounce forever. This
+  // counts rapid consecutive redirects and falls back to the landing page rather
+  // than spinning.
+  const nav = { count: 0, at: 0 };
+
+  function go(path, replace = false) {
+    const target = path.replace(/\/+$/, "") || "/";
+    const now = Date.now();
+    nav.count = now - nav.at < 400 ? nav.count + 1 : 1;
+    nav.at = now;
+    if (nav.count > 6) { nav.count = 0; return renderLanding(); }
+    if (pathNow() === target) return boot();
+    window.history[replace ? "replaceState" : "pushState"]({}, "", target);
+    window.scrollTo(0, 0);
+    return boot();
+  }
+  window.addEventListener("popstate", () => { closeLayer(); boot(); });
+
+  /* ---------- boot ---------- */
+  async function boot() {
+    const path = pathNow();
+    const inApp = path === "/app" || path.startsWith("/app/");
+    if (inApp) booting("Opening your workspace");
+    try {
+      S.auth = await API.get("/api/auth/state");
+      if (S.auth.user?.csrf_token) API.setCsrf(S.auth.user.csrf_token);
+      const signedIn = !!S.auth.authenticated;
+
+      // Anyone already signed in goes straight to their dashboard. The marketing
+      // pages are for people who do not have an account yet.
+      const home = () => (S.auth.email_verification_required ? "/verify" : "/app");
+      if (signedIn && (path === "/login" || path === "/signup")) return go(home(), true);
+      if (path === "/signup") { leaveApp(); return renderCreateAccount(); }
+      if (path === "/login") { leaveApp(); return renderSignIn(); }
+      if (path === "/verify") {
+        leaveApp();
+        if (!signedIn) return go("/login", true);
+        if (!S.auth.email_verification_required) return go("/app", true);
+        return renderConfirmEmail();
+      }
+
+      if (inApp) {
+        if (!signedIn) return go("/login", true);
+        if (S.auth.email_verification_required) return go("/verify", true);
+        if (S.auth.onboarding_required) { leaveAuth(); return await startOnboarding(); }
+        leaveAuth();
+        return await loadWorkspace();
+      }
+
+      if (signedIn && path === "/") return go("/app", true);
+      leaveApp();
+      return await renderLanding();
+    } catch (error) {
+      fatal(error);
+    }
+  }
+
+  function leaveApp() {
+    clearInterval(startPulse._t);
+    clearInterval(startPulse._clock);
+  }
+
+  async function loadWorkspace() {
+    S.boot = await API.get("/api/bootstrap");
+    const known = S.boot.locations.some((row) => row.id === S.locationId);
+    if (!known) S.locationId = S.boot.default_location_id || "";
+    localStorage.setItem("quantify.location", S.locationId);
+    await loadView();
+    startPulse();
+    // First arrival gets the tutorial, once. It waits for the real screen so
+    // every stop lands on this location's own numbers.
+    if (tourEligible()) setTimeout(() => startTour(true), 550);
+  }
+
+  /* ---------- landing ---------- */
+  // The example dashboard is the product running on the sample dataset, not a
+  // picture of it. Every figure comes from /api/showcase, which computes them
+  // with the same code the real screens use.
+  const demoTabs = { tab: "today", day: null };
+
+  async function renderLanding() {
+    let show = { available: false };
+    try { show = await API.get("/api/showcase"); } catch (_) { /* the page still works */ }
+    S.show = show;
+    const f = show.forecast;
+    const accuracy = show.accuracy ? `${show.accuracy}%` : null;
+
+    root.innerHTML = `<div class="site">
+      <header class="site-nav">
+        <div class="site-nav-inner">
+          <a href="/" data-link="/">${wordmark()}</a>
+          <nav class="site-links">
+            <a href="#try" data-scroll="try">See it working</a>
+            <a href="#how" data-scroll="how">How it works</a>
+            <a href="#proof" data-scroll="proof">Accuracy</a>
+            <a href="#pricing" data-scroll="pricing">Pricing</a>
+          </nav>
+          <div class="site-cta">
+            <a class="btn ghost" href="/login" data-link="/login">Sign in</a>
+            <a class="btn accent" href="/signup" data-link="/signup">Create account</a>
+          </div>
+        </div>
+      </header>
+
+      <section class="hero">
+        <div class="hero-copy fade-up">
+          <span class="pill">For any business, small and big</span>
+          <h1>Know how much of each thing to make tomorrow.</h1>
+          <p>Quantify reads what your register has already sold and works out how many of each item tomorrow needs. It gives you a number per item, what that number rests on, and how far off it has been before.</p>
+          <div class="hero-actions">
+            <a class="btn accent lg" href="/signup" data-link="/signup">Create account</a>
+            <a class="btn lg" href="#try" data-scroll="try">See it working first</a>
+          </div>
+        </div>
+        <div class="hero-panel fade-up" style="animation-delay:.1s">
+          <div class="auth-grid"></div>
+          <div class="demo-card">
+            <div class="demo-bar"><div class="dots"><i></i><i></i><i></i></div><span>${e(f?.location || "Juniper Bakehouse")}, ${e(f?.weekday || "today")}</span></div>
+            <div class="demo-body" id="demo-body"></div>
+          </div>
+          <div class="auth-shield"></div>
+        </div>
+      </section>
+
+      <section class="band" id="try">
+        <div class="band-head">
+          <span class="eyebrow">The dashboard</span>
+          <h2>Click through it.</h2>
+          <p>Running on a sample bakery's two years of sales.</p>
+        </div>
+        <div data-lift>${screenFrame(show)}</div>
+      </section>
+
+      <section class="band tinted" id="how">
+        <div class="band-head">
+          <span class="eyebrow">How it works</span>
+          <h2>Three things, in order.</h2>
+        </div>
+        <div class="cards3">
+          ${[
+            ["01", "It reads what you already sell", "Connect the register and Quantify pulls up to three years of item-level orders, including the hour each landed in. It reads abbreviated till labels like DBL CHZ BRGR and works out what they are. Nothing to type."],
+            ["02", "It tests the world against your own numbers", "Weather, holidays, pay cycles, long weekends, what is on nearby. Each one is checked against your own sales, and ignored if it never moved them."],
+            ["03", "It tells you when it was wrong", "Every closed day is compared against what was forecast for it the day before. That score is on screen, per day and per item."],
+          ].map(([n, t, d], i) => `<article class="card"><div class="card-body">
+            <div class="stepnum">${n}</div><h3>${t}</h3><p>${d}</p></div></article>`).join("")}
+        </div>
+      </section>
+
+      <section class="band" id="proof">
+        <div class="band-head">
+          <span class="eyebrow">Accuracy</span>
+          <h2>${accuracy ? `${accuracy} right, item by item, over the last ${num(show.days_scored)} closed days.` : "Every forecast is scored against what actually sold."}</h2>
+          <p>Accuracy is counted item by item, not on the day's total, because two items that miss in opposite directions still leave you short on one and throwing away the other.</p>
+        </div>
+        <div class="card"><div class="card-body">
+          ${show.series && show.series.length ? `
+            ${sparkline(show.series)}
+            <div class="proof-stats">
+              <div><b>${accuracy}</b><span>Average accuracy, measured per item</span></div>
+              <div><b>${show.within_ten}%</b><span>Days landing inside 10%</span></div>
+              <div><b>${num(show.days_scored)}</b><span>Closed days replayed and scored</span></div>
+            </div>`
+          : `<p class="lede">Still scoring the sample days. The figures appear here shortly.</p>`}
+        </div></div>
+      </section>
+
+      <section class="band" id="pricing">
+        <div class="band-head">
+          <span class="eyebrow">Pricing</span>
+          <h2>${money(show.pricing?.monthly || 79)} per location, per month.</h2>
+          <p>${money(show.pricing?.annual_monthly || 69)} a month paid yearly. Cancel from the account page in two clicks, with no phone call.</p>
+        </div>
+        <div class="card" data-lift><div class="card-body pricing-body">
+          <div class="planlist">
+            ${["Register history and ongoing sync", "Fourteen days of item-level forecasting", "Weather, calendar, and nearby activity", "Order history and per-day accuracy", "What each item is made of", "The morning email", "Unlimited people on the account"]
+              .map((t) => `<div>${icon("check")}<span>${t}</span></div>`).join("")}
+          </div>
+          <div class="pricing-cta">
+            <a class="btn accent lg block" href="/signup" data-link="/signup">Create account</a>
+            <p class="small muted" style="margin-top:10px;text-align:center">No card needed to look around.</p>
+          </div>
+        </div></div>
+      </section>
+
+      <footer class="site-foot">
+        <div class="site-foot-inner">
+          ${wordmark()}
+          <p>Demand forecasting for anyone who has to decide how much to make.</p>
+          <div class="site-foot-links">
+            <a href="/login" data-link="/login">Sign in</a>
+            <a href="/signup" data-link="/signup">Create account</a>
+          </div>
+        </div>
+      </footer>
+    </div>`;
+    runDemo();
+    watchScroll();
+  }
+
+  // A working slice of the product, inside a browser frame.
+  function screenFrame(show) {
+    const f = show.forecast;
+    if (!f) return `<div class="card"><div class="empty">${icon("empty")}<b>Sample data is still building</b><span>Give it a moment and refresh.</span></div></div>`;
+    return `<div class="screen">
+      <div class="screen-bar">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <span class="screen-url">${e(f.location.toLowerCase().replace(/[^a-z]+/g, ""))}.quantify.app</span>
+      </div>
+      <div class="screen-body">
+        <div class="screen-rail">
+          ${[["today", "Today"], ["forecast", "Forecast"], ["history", "History"], ["menu", "Menu"]].map(([k, l]) =>
+            `<button class="screen-nav ${demoTabs.tab === k ? "on" : ""}" data-demo-tab="${k}">${l}</button>`).join("")}
+          <div class="screen-rail-foot">
+            <b>${e(f.location)}</b><span>${e(f.city)}</span>
+          </div>
+        </div>
+        <div class="screen-main" id="screen-main">${screenPanel(show)}</div>
+      </div>
+    </div>`;
+  }
+
+  function screenPanel(show) {
+    const f = show.forecast;
+    if (demoTabs.tab === "today") {
+      const peak = Math.max(...f.hours.map((h) => h.share), 0.01);
+      return `<div class="screen-scroll fade-in">
+        <div class="screen-head">
+          <div><h4>${e(f.date_label)}</h4><p>${e(f.headline)}</p></div>
+          <span class="tag up dot">${f.confidence}% sure</span>
+        </div>
+        <div class="screen-tiles">
+          ${[
+            ["Expected sales", money(f.expected_sales), `${money(f.normal_sales)} on a normal ${f.weekday}`, `${f.difference_sales >= 0 ? "+" : "-"}${money(Math.abs(f.difference_sales))}`, f.difference_sales >= 0],
+            ["Items to make", num(f.expected_units), `${num(f.normal_units)} on a normal ${f.weekday}`, `${f.difference_units >= 0 ? "+" : ""}${num(f.difference_units)}`, f.difference_units >= 0],
+            ["Busiest hour", f.peak_hour || "Not set", `${num(f.peak_units)} items in that hour`, `${f.peak_share}% of the day`, true],
+            ["Orders", num(f.expected_orders), `${money(f.average_order, true)} average order`, `${num(f.comparable_days)} days of evidence`, true],
+          ].map(([label, value, versus, delta, up]) => `
+            <div class="screen-tile">
+              <span class="eyebrow">${label}</span><b>${e(value)}</b>
+              <small>${e(versus)}</small>
+              <em class="${up ? "up" : "down"}">${e(delta)}</em>
+            </div>`).join("")}
+        </div>
+        <div class="screen-split">
+          <div class="screen-block">
+            <div class="screen-block-head">What to do</div>
+            ${f.actions.map((a, i) => `<div class="screen-action">
+              <span class="mark">${i + 1}</span>
+              <div><b>${e(a.title)}</b><p>${e(a.detail)}</p></div>
+              <span class="metric">${e(a.metric)}</span></div>`).join("")}
+          </div>
+          <div class="screen-block">
+            <div class="screen-block-head">Why today looks this way</div>
+            ${f.reasons.map((r) => `<div class="screen-reason">
+              <div><b>${e(r.label)}</b><span class="effect-chip ${r.effect >= 0 ? "up" : "down"}">${pct(r.effect)} · ${r.units >= 0 ? "+" : ""}${num(r.units)} items</span></div>
+              <p>${e(r.detail)}</p>
+              <small>${e(r.based_on)}</small></div>`).join("")}
+          </div>
+        </div>
+        <div class="screen-block">
+          <div class="screen-block-head">Through the day</div>
+          <div class="screen-hours">${f.hours.map((h) => `
+            <div class="screen-hour" title="${e(h.label)}: ${money(h.revenue)}, ${num(h.units)} items">
+              <div class="bar"><i style="height:${Math.max(4, (h.share / peak) * 100)}%"></i></div>
+              <span>${e(h.label.replace(" ", ""))}</span>
+              <small>${num(h.units)}</small>
+            </div>`).join("")}</div>
+        </div>
+        <div class="screen-block">
+          <div class="screen-block-head">What to make</div>
+          <table class="screen-table"><thead><tr>
+            <th>Item</th><th class="right">Make</th><th class="right">Will sell</th><th class="right">Normal</th><th class="right">Likely range</th><th class="right">Sure</th></tr></thead><tbody>
+            ${f.items.map((it) => `<tr>
+              <td><b>${e(it.name)}</b></td>
+              <td class="right plan">${num(it.make ?? it.expected)}</td>
+              <td class="right">${num(it.expected)}</td>
+              <td class="right">${num(it.normal)} <em class="${it.difference >= 0 ? "up" : "down"}">${it.difference >= 0 ? "+" : ""}${num(it.difference)}</em></td>
+              <td class="right muted">${num(it.low)} to ${num(it.high)}</td>
+              <td class="right">${it.confidence}%</td></tr>`).join("")}
+          </tbody></table>
+        </div>
+      </div>`;
+    }
+
+    if (demoTabs.tab === "forecast") {
+      const week = f.week.length ? f.week : [];
+      return `<div class="screen-scroll fade-in">
+        <div class="screen-head"><div><h4>The next days</h4></div></div>
+        <table class="screen-table"><thead><tr>
+          <th>Day</th><th class="right">Expected</th><th>Biggest line</th><th class="right">vs normal</th></tr></thead><tbody>
+          ${week.map((d) => `<tr>
+            <td><b>${e(dMed(d.date))}</b></td>
+            <td class="right plan">${money(d.sales)}</td>
+            <td class="muted">${e(d.top_item || "Core menu")}</td>
+            <td class="right ${d.change >= 0 ? "up" : "down"}">${pct(d.change)}</td></tr>`).join("")}
+        </tbody></table>
+        <p class="screen-note">Days further out are less certain, and the confidence figure reflects that.</p>
+      </div>`;
+    }
+
+    if (demoTabs.tab === "history") {
+      return `<div class="screen-scroll fade-in">
+        <div class="screen-head"><div><h4>Closed days</h4><p>What the register rang, next to what Quantify said the day before.</p></div></div>
+        <table class="screen-table"><thead><tr>
+          <th>Day</th><th class="right">Rang up</th><th class="right">Items</th><th class="right">Orders</th><th class="right">Forecast</th></tr></thead><tbody>
+          ${(show.days || []).map((d) => d.closed ? `<tr class="muted"><td><b>${e(dMed(d.date))}</b></td><td colspan="4">Closed. Nothing was recorded on this date.</td></tr>` : `<tr>
+            <td><b>${e(dMed(d.date))}</b></td>
+            <td class="right plan">${money(d.sales)}</td>
+            <td class="right">${num(d.units)}</td>
+            <td class="right">${num(d.orders)}</td>
+            <td class="right">${d.accuracy === null ? '<span class="muted">scoring</span>' :
+              `<b class="${d.accuracy >= 90 ? "up" : d.accuracy >= 80 ? "" : "down"}">${d.accuracy}%</b>
+               <em class="muted">called ${num(d.predicted_units)}</em>`}</td></tr>`).join("")}
+        </tbody></table>
+      </div>`;
+    }
+
+    return `<div class="screen-scroll fade-in">
+      <div class="screen-head"><div><h4>What each item is made of</h4></div></div>
+      <table class="screen-table"><thead><tr>
+        <th>Item</th><th class="right">Making today</th><th>What goes into it</th></tr></thead><tbody>
+        ${f.items.map((it) => `<tr>
+          <td><b>${e(it.name)}</b></td>
+          <td class="right plan">${num(it.expected)}</td>
+          <td class="muted">${it.parts && it.parts.length ? e(it.parts.join(', ')) : 'No recipe on file yet'}</td></tr>`).join("")}
+      </tbody></table>
+      <p class="screen-note">Estimated from the till label until you confirm the recipe.</p>
+    </div>`;
+  }
+
+  // Motion tied to scroll position rather than to a one-shot trigger, so
+  // scrolling back up genuinely runs it backwards. Only three things on the
+  // page move: the product panel, which lifts and settles as it comes up; the
+  // pricing card, which does the same at the end; and the section rules, which
+  // draw themselves across. Everything else stays still on purpose.
+  let scrollNodes = [];
+  let scrollFrame = 0;
+
+  function paintScroll() {
+    scrollFrame = 0;
+    const view = window.innerHeight || 800;
+    for (const node of scrollNodes) {
+      const box = node.getBoundingClientRect();
+      // 0 as the element's top enters from below, 1 once it has travelled a
+      // third of the viewport past centre. Clamped, so it holds at both ends.
+      const raw = (view - box.top) / (view * 0.62);
+      const p = raw < 0 ? 0 : raw > 1 ? 1 : raw;
+      const eased = p * p * (3 - 2 * p);
+      node.style.setProperty("--p", eased.toFixed(4));
+    }
+  }
+
+  function onScroll() {
+    if (scrollFrame) return;
+    scrollFrame = requestAnimationFrame(paintScroll);
+  }
+
+  function watchScroll() {
+    scrollNodes = Array.from(document.querySelectorAll("[data-lift]"));
+    window.removeEventListener("scroll", onScroll);
+    window.removeEventListener("resize", onScroll);
+    if (!scrollNodes.length) return;
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      scrollNodes.forEach((node) => node.style.setProperty("--p", "1"));
+      return;
+    }
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll, { passive: true });
+    paintScroll();
+  }
+
+  function sparkline(series) {
+    const W = 900, H = 120, P = 8;
+    const lo = Math.max(60, Math.min(...series) - 4);
+    const hi = 100;
+    const x = (i) => P + (i * (W - P * 2)) / Math.max(1, series.length - 1);
+    const y = (v) => H - P - ((v - lo) / (hi - lo)) * (H - P * 2);
+    const line = series.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
+    const area = `${line} L${x(series.length - 1).toFixed(1)} ${H - P} L${P} ${H - P} Z`;
+    return `<div class="spark"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Daily forecast accuracy">
+      <path d="${area}" fill="var(--accent-soft)"/>
+      <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>
+      <line x1="${P}" y1="${y(90)}" x2="${W - P}" y2="${y(90)}" stroke="var(--line-2)" stroke-dasharray="4 4"/>
+    </svg><div class="spark-key"><span>Oldest of ${series.length} scored days</span><span>The dashed line is 90%</span><span>Most recent</span></div></div>`;
+  }
+
+  /* ---------- auth panel ---------- */
+  // The panel on the right runs once, settles, and stays put. It is decoration
+  // with a job: it shows what the product does before anyone has an account.
+  // It never loops, never restarts when the form beside it changes, and cannot
+  // be selected or clicked.
+  // Every figure in the panel comes from the live showcase payload, so the
+  // title bar and the body can never disagree about what day it is.
+  const demo = { step: 0, done: false, timer: null, mounted: false };
+
+  function demoSteps() {
+    const f = (S.show || {}).forecast;
+    if (!f || !f.steps) return [];
+    return f.steps.map((row) => ({ txt: row.text, num: row.value }));
+  }
+
+  function authFrame(inner) {
+    // The shell is mounted once. Every later screen swaps only the form, so the
+    // panel on the right is never torn down and rebuilt.
+    const slot = document.getElementById("auth-slot");
+    if (slot) { slot.innerHTML = inner; return; }
+    root.innerHTML = `<main class="auth">
+      <section class="auth-left">
+        <a href="/" data-link="/">${wordmark()}</a>
+        <div class="auth-form" id="auth-slot">${inner}</div>
+      </section>
+      <section class="auth-right" aria-hidden="true">
+        <div class="auth-grid"></div>
+        <div class="auth-stage">
+          <div class="demo-card">
+            <div class="demo-bar"><div class="dots"><i></i><i></i><i></i></div><span id="demo-title"></span></div>
+            <div class="demo-body" id="demo-body"></div>
+          </div>
+        </div>
+        <div class="auth-shield"></div>
+      </section>
+    </main>`;
+    runDemo();
+  }
+
+  function leaveAuth() {
+    clearInterval(demo.timer);
+    demo.timer = null;
+  }
+
+  // Rows are added to the DOM once and never touched again. Rebuilding the
+  // panel on every tick is what made it look like it was reloading itself.
+  function demoRow(step, index) {
+    const node = document.createElement("div");
+    node.className = "demo-step done enter";
+    node.innerHTML = `<span class="k">${icon("check")}</span>
+      <span class="txt">${e(step.txt)}</span><span class="num">${e(step.num)}</span>`;
+    node.style.setProperty("--i", String(index));
+    return node;
+  }
+
+  function demoSummary() {
+    const f = (S.show || {}).forecast;
+    if (!f) return null;
+    const node = document.createElement("div");
+    node.className = "demo-out enter";
+    const peak = (f.hours || []).reduce((best, row) => (row.share > (best ? best.share : 0) ? row : best), null);
+    node.innerHTML = `
+      <div class="line"><span>Expected sales</span><b>${money(f.expected_sales)}</b></div>
+      <div class="line"><span>Against a normal ${e(f.weekday)}</span><b>${money(f.normal_sales)}</b></div>
+      <div class="line"><span>Difference</span><b>${f.difference_sales >= 0 ? "+" : ""}${money(f.difference_sales)}, about ${Math.abs(f.difference_units)} ${Math.abs(f.difference_units) === 1 ? "item" : "items"}</b></div>
+      <div class="line"><span>Busiest hour</span><b>${e(f.peak_hour)}, ${f.peak_share}% of the day</b></div>
+      <div class="demo-hours">${(f.hours || []).map((row) => {
+        const height = Math.max(6, Math.round((row.share / Math.max(0.01, peak ? peak.share : 1)) * 100));
+        return `<i class="${peak && row.label === peak.label ? "peak" : ""}" style="height:${height}%"></i>`;
+      }).join("")}</div>`;
+    return node;
+  }
+
+  function runDemo() {
+    const host = document.getElementById("demo-body");
+    const title = document.getElementById("demo-title");
+    const f = (S.show || {}).forecast;
+    if (title && f) title.textContent = `${f.location}, ${f.weekday}`;
+    if (!host) return;
+    const steps = demoSteps();
+    if (!steps.length) return;
+    // Already played. Leave every node exactly where it is.
+    if (demo.mounted && host.childElementCount) return;
+    host.innerHTML = "";
+    demo.step = 0;
+    demo.mounted = true;
+    if (demo.timer) { clearInterval(demo.timer); demo.timer = null; }
+    const advance = () => {
+      if (demo.step >= steps.length) {
+        clearInterval(demo.timer);
+        demo.timer = null;
+        const summary = demoSummary();
+        if (summary) host.appendChild(summary);
+        demo.done = true;
+        return;
+      }
+      host.appendChild(demoRow(steps[demo.step], demo.step));
+      demo.step += 1;
+    };
+    advance();
+    demo.timer = setInterval(advance, 900);
+  }
+
+  function renderCreateAccount() {
+    authFrame(`
+      <h1>Create your account</h1>
+      <p>Takes a minute. You will see real forecasts on sample data straight away, before connecting anything.</p>
+      <form id="f-create">
+        <label class="field"><span>Your name</span><input name="display_name" autocomplete="name" required minlength="2" placeholder="Jordan Lee"></label>
+        <label class="field"><span>Work email</span><input name="email" type="email" autocomplete="email" required placeholder="you@yourrestaurant.com">
+          <small>We send a six-digit code here to confirm it is yours.</small></label>
+        <label class="field"><span>Password</span><input name="password" type="password" autocomplete="new-password" required minlength="12" placeholder="At least 12 characters">
+          <small>Twelve characters or more, mixing letters, a number, and a symbol.</small></label>
+        <button class="btn accent lg block" type="submit">Create account</button>
+      </form>
+      <p class="auth-alt">Already have an account? <a href="/login" data-link="/login">Sign in</a></p>`);
+  }
+
+  function renderSignIn() {
+    authFrame(`
+      <h1>Sign in</h1>
+      <p>Welcome back.</p>
+      <form id="f-signin">
+        <label class="field"><span>Email</span><input name="email" type="email" autocomplete="username" required></label>
+        <label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label>
+        <button class="btn accent lg block" type="submit">Continue</button>
+      </form>
+      <p class="auth-alt">No account yet? <a href="/signup" data-link="/signup">Create one</a></p>`);
+  }
+
+  function renderSignInCode() {
+    authFrame(`
+      <h1>Enter your code</h1>
+      <p>Open your authenticator app and type the six digits showing now. A backup code works here too.</p>
+      <form id="f-code">
+        <label class="field"><span>Six-digit code</span><input class="code-input" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="9" required autofocus></label>
+        <button class="btn accent lg block" type="submit">Sign in</button>
+        <button class="btn ghost block" type="button" data-do="back-signin">Back</button>
+      </form>`);
+  }
+
+  function renderConfirmEmail(info) {
+    const v = info || S.verification || {};
+    authFrame(`
+      <h1>Confirm your email</h1>
+      <p>We sent a six-digit code to <b>${e(v.sent_to || S.auth?.user?.email || "your inbox")}</b>. Type it below.</p>
+      ${v.preview_code ? `
+        <div class="notice" style="margin-top:18px">
+          <div class="eyebrow">Not sending real email yet</div>
+          <p>${e(v.preview_note || "")}</p>
+          <div class="keybox" style="margin-top:10px"><code style="font-size:19px;letter-spacing:.28em">${e(v.preview_code)}</code>
+            <button class="icon-btn" type="button" data-do="copy" data-copy="${e(v.preview_code)}" title="Copy code">${icon("copy")}</button></div>
+        </div>` : ""}
+      <form id="f-confirm-email">
+        <label class="field"><span>Six-digit code</span>
+          <input class="code-input" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required autofocus
+                 value="${e(v.preview_code || "")}"></label>
+        <button class="btn accent lg block" type="submit">Confirm and continue</button>
+      </form>
+      <p class="auth-alt">Nothing came through? <button type="button" data-do="resend-code">Send it again</button></p>`);
+  }
+
+  /* ---------- onboarding ---------- */
+  const ONB_STEPS = ["Business", "Where", "How you work", "Ready"];
+
+  async function startOnboarding() {
+    const info = await API.get("/api/onboarding");
+    S.onboarding = {
+      step: 0,
+      values: {
+        company: info.organization?.name && info.organization.name !== "Quantify Demo Group" && info.organization.name !== "Your company"
+          ? info.organization.name : "",
+        concept: "",
+        location_count: "1",
+        goals: [],
+        pos: "Square",
+        place: "",
+        open_hour: 7,
+        close_hour: 21,
+      },
+      tz: null,
+      suggestions: [],
+      sample: info.sample_locations || [],
+      owner: info.owner,
+    };
+    renderOnboarding();
+  }
+
+  // Whatever is typed survives a re-render. Choosing an option must never wipe
+  // the name someone already entered.
+  function captureOnboarding() {
+    const form = document.getElementById("f-onb");
+    if (!form) return;
+    for (const [name, value] of new FormData(form).entries()) {
+      S.onboarding.values[name] = value;
+    }
+  }
+
+  const CONCEPTS = [
+    "Bakery or cafe", "Coffee shop", "Pizza", "Burgers and grill", "Fast casual",
+    "Full service restaurant", "Deli or sandwiches", "Bar and kitchen", "Juice or smoothies",
+    "Ice cream or dessert", "Food truck", "Ghost kitchen", "Grocery or corner shop",
+    "Something else",
+  ];
+
+  const GOALS = [
+    ["Cut waste", "Stop prepping what goes in the bin at close."],
+    ["Stop selling out", "Make enough of the good stuff to last the day."],
+    ["Staff the right hours", "See which hours actually need another pair of hands."],
+    ["Plan orders", "Buy to what will sell instead of to last week."],
+    ["Understand the swings", "Work out why some days are nothing like the others."],
+  ];
+
+  function hourLabel(hour) {
+    const h = ((hour % 24) + 24) % 24;
+    const suffix = h < 12 ? "AM" : "PM";
+    const shown = h % 12 === 0 ? 12 : h % 12;
+    return `${shown} ${suffix}${hour >= 24 ? " next day" : ""}`;
+  }
+
+  function hourOptions(selected, from = 0, to = 24) {
+    let out = "";
+    for (let hour = from; hour <= to; hour += 1) {
+      out += `<option value="${hour}" ${Number(selected) === hour ? "selected" : ""}>${hourLabel(hour)}</option>`;
+    }
+    return out;
+  }
+
+  function renderOnboarding() {
+    const { step, values, tz, suggestions } = S.onboarding;
+    const progress = ((step + 1) / ONB_STEPS.length) * 100;
+    let body = "";
+
+    if (step === 0) {
+      body = `<h1>What is the business called?</h1>
+        <p>This is the name on your morning email and on anything you export.</p>
+        <form id="f-onb">
+          <label class="field"><span>Business name</span>
+            <input name="company" required minlength="2" value="${e(values.company || "")}" placeholder="Juniper Bakehouse" autofocus autocomplete="organization"></label>
+          <label class="field"><span>What do you serve?</span>
+            <select name="concept">
+              ${CONCEPTS.map((v) => `<option ${values.concept === v ? "selected" : ""}>${v}</option>`).join("")}
+            </select></label>
+          <label class="field"><span>How many locations?</span>
+            <div class="chipset">
+              ${["1", "2 to 5", "6 to 20", "More than 20"].map((v) => `
+                <button type="button" class="chip ${values.location_count === v ? "on" : ""}" data-pick="location_count" data-value="${v}">${v}</button>`).join("")}
+            </div></label>
+          <div class="onb-actions"><span class="spacer"></span><button class="btn accent lg" type="submit">Continue</button></div>
+        </form>`;
+    } else if (step === 1) {
+      body = `<h1>Where is it?</h1>
+        <p>Quantify needs this to pull the right weather and the right local calendar, and to send your morning email at your local time. A city, a state, or a ZIP code is enough.</p>
+        <form id="f-onb" autocomplete="off">
+          <label class="field"><span>City, state, or ZIP</span>
+            <div class="typeahead">
+              <input type="text" name="place" id="place-input" data-typeahead required
+                     value="${e(values.place || "")}" placeholder="Start typing a town"
+                     autocomplete="off" autofocus>
+              ${suggestions && suggestions.length ? `<div class="ta-list">
+                ${suggestions.map((s) => `
+                  <button type="button" class="ta-item" data-place="${e(s.place)}" data-tz="${e(s.timezone)}">
+                    <b>${e(s.place)}</b><small>${e(s.label)}</small></button>`).join("")}
+              </div>` : ""}
+            </div>
+            <div id="tz-hint" data-tz-hint>${tzHint(tz)}</div></label>
+          <div class="onb-actions">
+            <button class="btn" type="button" data-do="onb-back">Back</button>
+            <span class="spacer"></span><button class="btn accent lg" type="submit">Continue</button></div>
+        </form>`;
+    } else if (step === 2) {
+      const goals = values.goals || [];
+      body = `<h1>What do you want out of it?</h1>
+        <p>Pick as many as apply. This only changes what Quantify puts first; everything is there either way.</p>
+        <form id="f-onb">
+          <div class="field">
+            <div class="optionlist">
+              ${GOALS.map(([label, detail]) => `
+                <button type="button" class="option ${goals.includes(label) ? "on" : ""}" data-toggle-goal="${e(label)}">
+                  <span class="box">${icon("check")}</span>
+                  <span><b>${label}</b><small>${detail}</small></span>
+                </button>`).join("")}
+            </div>
+          </div>
+          <div class="field pair">
+            <label><span>What time do you open?</span>
+              <select name="open_hour">${hourOptions(values.open_hour ?? 7, 0, 14)}</select></label>
+            <label><span>What time do you close?</span>
+              <select name="close_hour">${hourOptions(values.close_hour ?? 21, 14, 28)}</select></label>
+          </div>
+          <p class="field-note">Quantify only forecasts the hours you are open, so an hour either side matters. You can change this later in Settings.</p>
+          <label class="field"><span>What register do you run?</span>
+            <select name="pos">
+              ${["Square", "Toast", "Clover", "Lightspeed", "SpotOn", "Revel", "Shopify POS", "Something else", "Not sure yet"]
+                .map((v) => `<option ${values.pos === v ? "selected" : ""}>${v}</option>`).join("")}
+            </select>
+            <small>Square connects today. Until yours is plugged in, Quantify runs on sample data so you can see how it behaves.</small></label>
+          <div class="onb-actions">
+            <button class="btn" type="button" data-do="onb-back">Back</button>
+            <span class="spacer"></span><button class="btn accent lg" type="submit">Continue</button></div>
+        </form>`;
+    } else {
+      const where = tz?.matched && tz.confident ? tz.matched : (values.place || "not set");
+      body = `<h1>That is everything</h1>
+        <p>Quantify is ready. Here is what it has, and where to look first.</p>
+        <div class="summary">
+          ${[
+            ["Business", values.company || "Your company"],
+            ["Serves", values.concept || "Not set"],
+            ["Where", where],
+            ["Open", `${hourLabel(Number(values.open_hour ?? 7))} to ${hourLabel(Number(values.close_hour ?? 21))}`],
+            ["Register", values.pos || "Not set"],
+            ["Focus", (values.goals || []).join(", ") || "Everything"],
+          ].map(([k, v]) => `<div><span>${k}</span><b>${e(v)}</b></div>`).join("")}
+        </div>
+        <div class="onb-next">
+          ${[
+            ["Today", "What to make, why, and how sure to be."],
+            ["Forecast", "The next fourteen days in one list."],
+            ["History", "Every order, and how close each call was."],
+            ["Menu", "What each item is made of."],
+          ].map(([t, d]) => `<div class="onb-next-item"><b>${t}</b><span>${d}</span></div>`).join("")}
+        </div>
+        <div class="onb-actions">
+          <button class="btn" type="button" data-do="onb-back">Back</button>
+          <span class="spacer"></span>
+          <button class="btn accent lg" type="button" data-do="onb-finish">Open Quantify</button>
+        </div>`;
+    }
+
+    root.innerHTML = `<div class="onb">
+      <div class="onb-top">${wordmark()}
+        <div class="onb-progress"><span>Step ${step + 1} of ${ONB_STEPS.length}</span>
+          <div class="track"><i style="width:${progress}%"></i></div></div>
+      </div>
+      <div class="onb-body"><div class="onb-card fade-up">${body}</div></div>
+    </div>`;
+
+    const input = document.getElementById("place-input");
+    if (input) {
+      const cursor = input.value.length;
+      input.setSelectionRange?.(cursor, cursor);
+    }
+  }
+
+  // Painted in place rather than through a re-render, so the caret never jumps
+  // while somebody is typing. `holder` is whichever .typeahead the input lives
+  // in, so the same code serves onboarding and every settings field.
+  function paintSuggestions(holder, rows) {
+    if (!holder) return;
+    const existing = holder.querySelector(".ta-list");
+    if (existing) existing.remove();
+    if (!rows || !rows.length) return;
+    holder.insertAdjacentHTML("beforeend", `<div class="ta-list">
+      ${rows.map((s) => `
+        <button type="button" class="ta-item" data-place="${e(s.place)}" data-tz="${e(s.timezone)}">
+          <b>${e(s.place)}</b><small>${e(s.label)}</small></button>`).join("")}
+    </div>`);
+  }
+
+  // A field with data-typeahead offers places as you type. Delegated from the
+  // document, so it keeps working through every re-render and on every screen
+  // that wants it, rather than being bound once to one element.
+  let placeTimer = 0;
+  function askPlaces(input) {
+    clearTimeout(placeTimer);
+    placeTimer = setTimeout(async () => {
+      const holder = input.closest(".typeahead");
+      const value = input.value.trim();
+      const hint = holder && holder.parentElement
+        ? holder.parentElement.querySelector("[data-tz-hint]") : null;
+      if (value.length < 2) {
+        paintSuggestions(holder, []);
+        if (hint) hint.innerHTML = "";
+        return;
+      }
+      try {
+        const result = await API.get(`/api/timezone?q=${encodeURIComponent(value)}`);
+        // Somebody may have typed on since this request went out.
+        if (input.value.trim() !== value) return;
+        paintSuggestions(holder, result.suggestions || []);
+        if (hint) hint.innerHTML = tzHint(result.match);
+        if (input.id === "place-input") {
+          S.onboarding.tz = result.match;
+          S.onboarding.suggestions = result.suggestions || [];
+        }
+      } catch (_) { /* still typing */ }
+    }, 200);
+  }
+
+  document.addEventListener("input", (event) => {
+    const input = event.target.closest("[data-typeahead]");
+    if (!input) return;
+    if (input.id === "place-input") S.onboarding.values.place = input.value.trim();
+    askPlaces(input);
+  });
+
+  // Clicking away closes any open list without swallowing the click.
+  document.addEventListener("pointerdown", (event) => {
+    if (event.target.closest(".typeahead")) return;
+    document.querySelectorAll(".ta-list").forEach((node) => node.remove());
+  }, true);
+
+  function tzHint(tz) {
+    if (!tz) return "";
+    if (!tz.confident) {
+      return `<span class="tz-hint unknown">${icon("info")} We could not place that yet. Keep typing, or use a city or ZIP code.</span>`;
+    }
+    const label = tz.label.toLowerCase();
+    if (tz.matched === "time zone name" || tz.matched === "time zone") {
+      return `<span class="tz-hint">${icon("check")} Running on ${e(label)}.</span>`;
+    }
+    return `<span class="tz-hint">${icon("check")} Read as ${e(tz.matched)}, so ${e(label)}.</span>`;
+  }
+
+  const debounce = (fn, ms) => {
+    let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+  };
+
+  /* ---------- shell ---------- */
+  const NAV = [
+    ["today", "Today", "today"],
+    ["forecast", "Forecast", "forecast"],
+    ["ordering", "Order", "menu"],
+    ["history", "History", "history"],
+    ["menu", "Menu", "menu"],
+  ];
+
+  function shell(title, subtitle, tools, body) {
+    const location = S.boot.locations.find((row) => row.id === S.locationId) || S.boot.locations[0] || {};
+    const since = S.pulse.checkedAt ? Math.round((Date.now() - S.pulse.checkedAt) / 1000) : null;
+    return `<div class="app">
+      <aside class="rail">
+        <div class="rail-head">${wordmark()}</div>
+        <nav class="rail-nav">
+          ${NAV.map(([key, label, ico]) => `
+            <button class="nav-item ${S.view === key ? "active" : ""}" data-view="${key}">
+              <i>${icon(ico)}</i><span>${label}</span></button>`).join("")}
+        </nav>
+        <div class="rail-label">Workspace</div>
+        <nav class="rail-nav">
+          <button class="nav-item ${S.view === "settings" ? "active" : ""}" data-view="settings"><i>${icon("settings")}</i><span>Settings</span></button>
+        </nav>
+        <div class="rail-foot">
+          <button class="locpick" data-do="switch-location">
+            <span><b>${e(location.name || "Choose a location")}</b><span>${e([location.city, location.region].filter(Boolean).join(", "))}</span></span>
+            ${icon("chevD")}
+          </button>
+          <div class="rail-status">
+            <span class="pulse-dot ${S.pulse.live ? "" : "stale"}"></span>
+            <span id="pulse-text">${S.pulse.live ? (since !== null && since > 3 ? `Updated ${since}s ago` : "Live") : "Connecting"}</span>
+          </div>
+        </div>
+      </aside>
+      <div class="main">
+        <header class="topbar">
+          <div class="topbar-title"><h1>${e(title)}</h1>${subtitle ? `<p>${subtitle}</p>` : ""}</div>
+          <div class="topbar-tools">${tools || ""}</div>
+        </header>
+        <main class="content">${body}</main>
+      </div>
+    </div>`;
+  }
+
+  function dateTools(includeToday = true) {
+    return `<div class="datectl">
+      <button class="icon-btn" data-day="-1" title="Previous day">${icon("prev")}</button>
+      <input type="date" id="date-picker" value="${e(S.date)}" aria-label="Date">
+      <button class="icon-btn" data-day="1" title="Next day">${icon("next")}</button>
+    </div>${includeToday && S.date !== todayISO() ? `<button class="btn sm" data-do="today">Today</button>` : ""}`;
+  }
+
+  /* ---------- data loading ---------- */
+  async function loadView(silent = false) {
+    if (!silent) root.innerHTML = shell(viewTitle(), "", "", skeleton());
+    const q = `location_id=${encodeURIComponent(S.locationId)}`;
+    try {
+      if (S.view === "today") S.data = await API.get(`/api/brief?${q}&date=${S.date}`);
+      if (S.view === "forecast") S.data = await API.get(`/api/outlook?${q}&start=${S.date}&days=14`);
+      if (S.view === "menu") S.data = await API.get(`/api/menu?${q}`);
+      if (S.view === "ordering") S.data = await API.get(`/api/ordering?${q}&start=${S.date}&days=${S.order.days}`);
+      if (S.view === "history") await loadHistory(silent);
+      if (S.view === "settings") {
+        const [setup, billing] = await Promise.all([API.get(`/api/setup?${q}`), API.get("/api/billing")]);
+        S.data = { setup, billing };
+      }
+      render();
+      if (S.view === "today") maybeFetchNarrative();
+    } catch (error) {
+      if (error.status === 403) return boot();
+      fatal(error);
+    }
+  }
+
+  async function loadHistory(silent) {
+    const q = `location_id=${encodeURIComponent(S.locationId)}`;
+    if (S.historyTab === "accuracy") {
+      S.data = await API.get(`/api/accuracy?${q}&as_of=${todayISO()}&days=45`);
+      return;
+    }
+    if (S.historyTab === "days") {
+      if (!silent) S.history = { days: [], nextBefore: null, hasMore: true, loading: false, range: S.history.range, costs: S.history.costs };
+      const start = rangeStart(S.history.range);
+      const page = await API.get(`/api/history/days?${q}&limit=18${start ? `&start=${start}` : ""}`);
+      if (silent) {
+        // A background refresh must not throw away pages the reader scrolled to.
+        const fresh = new Set(page.days.map((row) => row.date));
+        S.history.days = page.days.concat(S.history.days.filter((row) => !fresh.has(row.date)));
+      } else {
+        S.history.days = page.days;
+        S.history.nextBefore = page.next_before;
+        S.history.hasMore = page.has_more;
+      }
+      S.history.costs = page.costs || S.history.costs || null;
+      S.data = { source: page.source };
+      return;
+    }
+    if (!silent) S.orders = { rows: [], nextDate: null, nextSkip: 0, hasMore: true, loading: false, range: S.orders.range };
+    const start = rangeStart(S.orders.range);
+    const page = await API.get(`/api/history/orders?${q}&limit=40${start ? `&start=${start}` : ""}`);
+    if (silent) {
+      const fresh = new Set(page.orders.map((row) => row.id));
+      S.orders.rows = page.orders.concat(S.orders.rows.filter((row) => !fresh.has(row.id)));
+    } else {
+      S.orders.rows = page.orders;
+      S.orders.nextDate = page.next_before_date;
+      S.orders.nextSkip = page.next_skip;
+      S.orders.hasMore = page.has_more;
+    }
+    S.data = { source: page.source };
+  }
+
+  function rangeStart(range) {
+    const now = new Date();
+    if (range === "month") { now.setDate(now.getDate() - 30); return now.toISOString().slice(0, 10); }
+    if (range === "quarter") { now.setDate(now.getDate() - 90); return now.toISOString().slice(0, 10); }
+    if (range === "year") { now.setFullYear(now.getFullYear() - 1); return now.toISOString().slice(0, 10); }
+    return null;
+  }
+
+  async function maybeFetchNarrative() {
+    const key = `${S.locationId}:${S.date}`;
+    if (S.data?.narrative || S.narrativeTried === key) return;
+    S.narrativeTried = key;
+    try {
+      const result = await API.get(`/api/brief/narrative?location_id=${encodeURIComponent(S.locationId)}&date=${S.date}`);
+      if (result && !result.pending && S.view === "today") {
+        S.data.narrative = result;
+        render(true);
+      }
+    } catch (_) { /* the built-in writer already filled the page */ }
+  }
+
+  function viewTitle() {
+    if (S.view === "today") return dLong(S.date);
+    if (S.view === "forecast") return "Next fourteen days";
+    if (S.view === "history") return "History";
+    if (S.view === "menu") return "Menu";
+    return "Settings";
+  }
+
+  function skeleton() {
+    return `<div class="stack">
+      <div class="skel" style="height:150px;border-radius:13px"></div>
+      <div class="tiles">${[1, 2, 3, 4].map(() => `<div class="skel" style="height:118px;border-radius:13px"></div>`).join("")}</div>
+      <div class="skel" style="height:280px;border-radius:13px"></div>
+    </div>`;
+  }
+
+  function render(preserve = false) {
+    const y = window.scrollY;
+    if (S.view === "today") renderToday();
+    if (S.view === "forecast") renderForecast();
+    if (S.view === "history") renderHistory();
+    if (S.view === "menu") renderMenu();
+    if (S.view === "ordering") renderOrdering();
+    if (S.view === "settings") renderSettings();
+    if (preserve) window.scrollTo(0, y);
+    if (S.view === "history" && S.historyTab !== "accuracy") watchScroll();
+  }
+
+  /* ---------- today ---------- */
+  function renderToday() {
+    const b = S.data;
+    const s = b.summary;
+    const cmp = b.comparison;
+    const n = b.narrative;
+    const dir = s.revenue_change_percent >= 0 ? "up" : "down";
+    const writer = b.writer || {};
+
+    const headline = n?.headline || b.headline;
+    const summaryText = n?.summary || defaultSummary(b);
+    const confidenceNote = n?.confidence_note || `Built from ${noun(cmp.based_on_days, "comparable " + weekday(b.date))} inside ${noun(b.trust.history_days, "day")} of this location's own sales.`;
+
+    const body = `<div class="stack">
+      <section class="headline">
+        <div class="headline-main">
+          <div class="headline-meta">
+            <span class="tag ${dir} dot">${e(s.demand_level)}</span>
+            <span class="tag plain">${e(b.data_health.pos_freshness === "current" ? "Register data is current" : `Register data is ${b.data_health.pos_freshness}`)}</span>
+          </div>
+          <h2>${e(headline)}</h2>
+          <p class="sum">${e(summaryText)}</p>
+        </div>
+        <aside class="headline-side">
+          <div>
+            <div class="eyebrow">How sure</div>
+            <div class="trust-score"><b>${s.confidence}%</b><span>${confidenceWord(s.confidence)}</span></div>
+          </div>
+          <div class="trust-bar"><i style="width:${Math.max(6, s.confidence)}%"></i></div>
+          <p>${e(confidenceNote)}</p>
+        </aside>
+      </section>
+
+      <section class="tiles" id="daytiles">
+        ${tile("Expected sales", money(s.expected_revenue),
+          `<b>${money(cmp.sales)}</b> on ${e(cmp.label)}. ${diffPhrase(s.difference_sales, "money")}`,
+          `Averaged over ${noun(cmp.based_on_days, weekday(b.date))} at this location`)}
+        ${b.costs ? tile("Expected to keep", money(b.costs.gross_profit),
+          `<b>${money(b.costs.cogs)}</b> in food and <b>${money(b.costs.labour)}</b> in wages come out of that${b.costs.other ? `, plus <b>${money(b.costs.other)}</b> in fixed costs` : ""}.`,
+          `About ${b.costs.margin_percent}% of what you ring, on the costs you have set`)
+        : tile("Items to make", num(s.expected_units),
+          `<b>${num(cmp.units)}</b> on ${e(cmp.label)}. ${diffPhrase(s.difference_units, "items")}`,
+          `Across ${noun(b.items.length, "menu item")} currently on sale`)}
+        ${tile("Items to make", num(s.expected_units),
+          `<b>${num(cmp.units)}</b> on ${e(cmp.label)}. ${diffPhrase(s.difference_units, "items")}`,
+          `Across ${noun(b.items.length, "menu item")} currently on sale`)}
+        ${tile("Busiest hour", s.peak_hour || "Not set",
+          `<b>${money(s.peak_revenue)}</b> and ${noun(s.peak_units, "item")} in that hour alone.`,
+          `${s.peak_share_percent}% of the day lands in one hour`)}
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h2>What to do</h2></div></div>
+        <div class="actions">${(n?.actions?.length ? n.actions : b.actions).map((row, i) => `
+          <div class="action ${row.type || ""}">
+            <span class="mark">${row.type === "watch" ? "!" : (i + 1)}</span>
+            <div><b>${e(row.title)}</b><p>${e(row.detail)}</p></div>
+            <span class="metric">${e(row.metric)}</span>
+          </div>`).join("")}</div>
+      </section>
+
+      ${liveCard(b)}
+
+      <section class="card" id="whytoday">
+        <div class="card-head"><div><h2>Why today looks this way</h2></div></div>
+        <div class="reasons">${reasonRows(b, n)}</div>
+        ${weatherFoot(b)}
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h2>Through the day</h2>
+          <p>Expected sales by hour. The dashed outline behind each bar is a normal ${e(weekday(b.date))}.</p></div></div>
+        <div class="card-body">${hourChart(b)}</div>
+      </section>
+
+      <section class="card" id="itemtable">
+        <div class="card-head"><div><h2>What to make</h2>
+          <p>Lean toward the top of the range on anything cheap to make and quick to sell.</p></div>
+          <div class="spacer"></div></div>
+        <div class="tablewrap">${itemTable(b)}</div>
+      </section>
+
+      ${b.material_pressure.length ? `<section class="card">
+        <div class="card-head"><div><h2>What that means for prep</h2>
+          <p>Portions across the whole menu, grouped by what the kitchen holds.</p></div></div>
+        <div class="tablewrap"><table class="dt" style="min-width:520px"><thead><tr>
+          <th>Group</th><th class="num right">Today</th><th class="num right">Normal ${e(weekday(b.date))}</th>
+          <th class="num right">Difference</th><th>Driven by</th></tr></thead><tbody>
+          ${b.material_pressure.slice(0, 7).map((row) => `<tr>
+            <td class="name"><b>${e(row.family)}</b></td>
+            <td class="num right plan">${num(row.demand_index)}</td>
+            <td class="num right">${num(row.baseline_index)}</td>
+            <td class="num right ${row.change_units >= 0 ? "up" : "down"}">${row.change_units >= 0 ? "+" : ""}${num(row.change_units)}</td>
+            <td class="muted small">${e(topItemForFamily(b, row.family))}</td>
+          </tr>`).join("")}
+        </tbody></table></div>
+      </section>` : ""}
+
+      <section class="card">
+        <div class="card-head"><div><h2>Next six days</h2><p>Open any day to see the full plan for it.</p></div></div>
+        <div class="week">${b.week_ahead.map((day) => `
+          <button class="weekday" data-open-date="${day.date}">
+            <span class="d">${e(dMed(day.date))}</span>
+            <span class="v">${money(day.expected_revenue)}</span>
+            <span class="n ${day.change_percent >= 0 ? "up" : "down"}">${pct(day.change_percent)} vs normal</span>
+            <span class="n muted">${e(day.top_item || "")}</span>
+          </button>`).join("")}</div>
+      </section>
+
+      
+    </div>`;
+
+    root.innerHTML = shell(dLong(S.date), `${e((S.boot.locations.find((l) => l.id === S.locationId) || {}).name || "")}`,
+      `${dateTools()}<button class="btn sm" data-do="preview-email">Preview email</button>`, body);
+  }
+
+  // Which item contributes most to a prep group, so the row says why it moved.
+  function topItemForFamily(brief, family) {
+    const key = family.toLowerCase();
+    const hit = brief.items
+      .filter((row) => (row.family || "").replace(/-/g, " ").toLowerCase().includes(key.split(" ")[0]))
+      .sort((a, b) => b.expected - a.expected)[0];
+    return hit ? `${num(hit.expected)} ${hit.name.toLowerCase()}` : "the menu mix";
+  }
+
+  function confidenceWord(score) {
+    if (score >= 80) return "sure";
+    if (score >= 65) return "fairly sure";
+    return "wide range";
+  }
+
+  function defaultSummary(b) {
+    const s = b.summary; const cmp = b.comparison;
+    if (Math.abs(s.revenue_change_percent) < 4) {
+      return `Plan for ${money(s.expected_revenue)} and ${noun(s.expected_units, "item")}. A normal ${weekday(b.date)} here runs ${money(cmp.sales)}, so today sits inside the usual spread.`;
+    }
+    const more = s.difference_sales >= 0;
+    return `Plan for ${money(s.expected_revenue)} against ${money(cmp.sales)} on ${cmp.label}. That is ${money(Math.abs(s.difference_sales))} ${more ? "more" : "less"} and about ${noun(Math.abs(s.difference_units), "item")} ${more ? "more" : "fewer"} across the menu.`;
+  }
+
+  function diffPhrase(value, kind) {
+    const v = Number(value || 0);
+    if (Math.abs(v) < (kind === "money" ? 1 : 1)) return "Level with it.";
+    const word = v > 0 ? "more" : "less";
+    return kind === "money"
+      ? `<span class="${v > 0 ? "up" : "down"}">${money(Math.abs(v))} ${word}</span> today.`
+      : `<span class="${v > 0 ? "up" : "down"}">${num(Math.abs(v))} ${v > 0 ? "more" : "fewer"}</span> today.`;
+  }
+
+  function tile(label, value, versus, basis) {
+    return `<div class="tile">
+      <span class="eyebrow">${e(label)}</span>
+      <span class="value">${e(value)}</span>
+      <span class="versus">${versus}</span>
+      <span class="basis">${e(basis)}</span>
+    </div>`;
+  }
+
+  function reasonRows(b, n) {
+    const written = n?.factors || [];
+    if (written.length) {
+      return written.map((row, i) => {
+        const signal = b.context.signals[i];
+        return `<div class="reason">
+          <div class="reason-top"><b>${e(row.heading)}</b>
+            ${signal ? `<span class="effect-chip ${signal.effect >= 0 ? "up" : "down"}">${pct(signal.effect)} · ${signal.units >= 0 ? "+" : ""}${num(signal.units)} items</span>` : ""}
+            <span class="tag plain">${e(row.confidence)} confidence</span></div>
+          <p>${e(row.explanation)}</p>
+          <div class="basis">${icon("info")}<span>${e(row.based_on)}</span></div>
+        </div>`;
+      }).join("");
+    }
+    if (!b.context.signals.length) {
+      return `<div class="reason"><div class="reason-top"><b>Nothing unusual</b></div>
+        <p>No outside condition moved today's number far enough to mention. The forecast is this location's own ${e(weekday(b.date))} pattern.</p>
+        <div class="basis">${icon("info")}<span>${e(noun(b.comparison.based_on_days, "comparable " + weekday(b.date)))}</span></div></div>`;
+    }
+    return b.context.signals.map((row) => `<div class="reason">
+      <div class="reason-top"><b>${e(row.label)}</b>
+        <span class="effect-chip ${row.effect >= 0 ? "up" : "down"}">${pct(row.effect)} · ${row.units >= 0 ? "+" : ""}${num(row.units)} items · ${row.sales >= 0 ? "+" : "-"}${money(Math.abs(row.sales))}</span></div>
+      <p>${e(row.detail)}</p>
+      ${row.based_on ? `<div class="basis">${icon("info")}<span>${e(row.based_on)}</span></div>` : ""}
+    </div>`).join("");
+  }
+
+  function weatherFoot(b) {
+    const w = b.context.weather;
+    const events = b.context.material_events || [];
+    const parts = [
+      `Weather: ${w.condition}, high ${w.high}°, low ${w.low}°${w.precipitation_mm ? `, ${w.precipitation_mm} mm rain` : ""}${w.snowfall_cm ? `, ${w.snowfall_cm} cm snow` : ""}.`,
+      `Register history: ${num(b.data_health.history_days)} trading days through ${b.data_health.latest_sale_date ? dShort(b.data_health.latest_sale_date) : "not available"}.`,
+      `Nearby listings checked: ${num(b.context.event_candidates_reviewed)}${events.length ? `, ${events.length} close enough and big enough to matter` : ", none big enough to matter"}.`,
+    ];
+    return `<div class="card-foot">${parts.map(e).join(" ")}</div>`;
+  }
+
+  function hourChart(b) {
+    const rows = b.service_curve || [];
+    if (!rows.length) return `<p class="muted small">No hourly pattern yet for this location.</p>`;
+    const live = b.intraday && b.intraday.in_service ? b.intraday : null;
+    const byslot = {};
+    (live ? live.hours : []).forEach((h) => { byslot[h.slot] = h; });
+    const max = Math.max(...rows.map((r) => Number(r.revenue)), ...(live ? live.hours.map((h) => h.rung_sales) : []), 1);
+    const peak = rows.reduce((best, row) => (Number(row.revenue) > Number(best.revenue) ? row : best), rows[0]);
+    const normalScale = b.summary.baseline_revenue / Math.max(1, b.summary.expected_revenue);
+    return `<div class="hours">${rows.map((row) => {
+      const slot = row.slot ?? row.hour;
+      const h = Math.max(3, (Number(row.revenue) / max) * 100);
+      const state = byslot[slot];
+      const rung = state && state.state === "done" ? Math.max(2, (state.rung_sales / max) * 100) : null;
+      const title = state && state.state === "done"
+        ? `${row.label}: rang ${money(state.rung_sales)} against ${money(row.revenue)} called`
+        : `${row.label}: ${money(row.revenue)} called, ${row.units} items`;
+      return `<div class="hourcol ${row.hour === peak.hour ? "peak" : ""} ${state ? state.state : ""}" title="${e(title)}">
+        <div class="track"><i class="ghost" style="height:${Math.max(3, h * normalScale)}%"></i><i style="height:${h}%"></i>${
+          rung === null ? "" : `<i class="rung" style="height:${rung}%"></i>`}</div>
+        <span>${e(row.label.replace(" ", ""))}</span>
+      </div>`;
+    }).join("")}</div>
+    <div class="hour-legend">
+      ${live
+        ? `<span>The filled bar is what has rung. The outline is what was called this morning.</span>`
+        : `<span>Busiest hour <b>${e(peak.label)}</b>, about <b>${money(peak.revenue)}</b> and <b>${peak.units} items</b></span>`}
+      <span>Opens <b>${hourLabel(Number(b.location.open_hour))}</b>, closes <b>${hourLabel(Number(b.location.close_hour))}</b></span>
+    </div>`;
+  }
+
+  // Where the day is actually running, and what that has changed. The morning
+  // call is always shown beside the revision, because the record is scored on
+  // the morning call and the operator should be able to see both.
+  function liveCard(b) {
+    const live = b.intraday;
+    if (!live || !live.in_service) return "";
+    const r = live.revision;
+    if (!r) {
+      return `<section class="card live">
+        <div class="card-head"><div><h2>Where the day is running</h2>
+          <p>${live.locked_local
+            ? `Called at ${e(live.locked_local)} this morning, before service.`
+            : ``}</p></div></div>
+        <div class="card-body"><p class="lede">Not enough of the day has finished to say anything yet.</p></div>
+      </section>`;
+    }
+    const ahead = r.difference_units >= 0;
+    const pace = r.sold_units - r.called_by_now_units;
+    return `<section class="card live">
+      <div class="card-head"><div><h2>Where the day is running</h2>
+        <p>Read at ${e(r.label)}, with ${r.expected_share_percent}% of a normal ${e(weekday(b.date))} behind us.</p></div>
+        ${live.locked_local ? `<span class="tag plain">called at ${e(live.locked_local)}</span>` : ""}</div>
+      <div class="card-body">
+        <p class="lede">The register has rung <b>${num(r.sold_units)}</b> items and <b>${money(r.sold_sales)}</b>.
+          By now a day like the one we called would have rung <b>${num(r.called_by_now_units)}</b>, so we are
+          <b class="${pace >= 0 ? "up" : "down"}">${pace >= 0 ? "+" : ""}${num(pace)}</b> against that.</p>
+        <div class="live-split">
+          <div><span>Called this morning</span><b>${num(r.opening_units)} items</b><small>${money(r.opening_sales)}</small></div>
+          <div><span>Where it looks like finishing</span><b>${num(r.revised_units)} items</b><small>${money(r.revised_sales)}</small></div>
+          <div><span>Change</span><b class="${ahead ? "up" : "down"}">${ahead ? "+" : ""}${num(r.difference_units)} items</b>
+            <small>${ahead ? "+" : ""}${money(r.difference_sales)}</small></div>
+        </div>
+        ${r.items.length ? `<table class="dt" style="margin-top:14px"><thead><tr>
+          <th>Item</th><th class="num right">Called</th><th class="num right">Sold so far</th>
+          <th class="num right">Now expecting</th><th class="num right">Change</th></tr></thead><tbody>
+          ${r.items.map((row) => `<tr class="clickable" data-item-sheet="${e(row.item_id)}">
+            <td class="name"><b>${e(row.name)}</b></td>
+            <td class="num right">${num(row.opening)}</td>
+            <td class="num right">${num(row.sold_so_far)}</td>
+            <td class="num right plan">${num(row.revised)}</td>
+            <td class="num right ${row.difference >= 0 ? "up" : "down"}">${row.difference >= 0 ? "+" : ""}${num(row.difference)}</td>
+          </tr>`).join("")}
+        </tbody></table>` : `<p class="small muted" style="margin-top:12px">Nothing has moved by enough to be worth changing.</p>`}
+      </div>
+    </section>`;
+  }
+
+  function itemTable(b) {
+    const max = Math.max(...b.items.map((row) => row.upper), 1);
+    return `<table class="dt"><thead><tr>
+      <th>Item</th><th class="num right">Make</th><th class="num right">Will sell</th><th class="num right">Normal</th>
+      <th>Range</th><th class="num right">How sure</th><th></th></tr></thead><tbody>
+      ${b.items.map((item) => `
+        <tr class="clickable" data-item-sheet="${e(item.item_id)}">
+          <td class="name"><b>${e(item.name)}</b><small>${e(item.category)}${item.override ? " · you adjusted this" : ""}</small></td>
+          <td class="num right plan">${num(item.make ?? item.expected)}<div class="small muted">${item.sell_out_percent !== null && item.sell_out_percent !== undefined ? `${item.sell_out_percent}% you still run out` : ""}</div></td>
+          <td class="num right">${num(item.expected)}</td>
+          <td class="num right">${num(item.baseline)}<div class="small ${item.vs_baseline_units >= 0 ? "up" : "down"}">${item.vs_baseline_units >= 0 ? "+" : ""}${num(item.vs_baseline_units)}</div></td>
+          <td><div class="rangebar">
+            <div class="line"><i style="left:${(item.lower / max) * 100}%;width:${Math.max(3, ((item.upper - item.lower) / max) * 100)}%"></i><b style="left:${(item.expected / max) * 100}%"></b></div>
+            <span>${num(item.lower)} to ${num(item.upper)}</span></div></td>
+          <td class="num right">${item.confidence}%</td>
+          <td class="right"><button class="btn sm ghost" data-do="adjust" data-item="${e(item.item_id)}" data-name="${e(item.name)}" data-qty="${item.make ?? item.expected}">Adjust</button></td>
+        </tr>`).join("")}
+    </tbody></table>`;
+  }
+
+  /* ---------- forecast ---------- */
+  function renderForecast() {
+    const d = S.data;
+    const body = `<div class="stack">
+      <section class="card">
+        <div class="card-head"><div><h2>Fourteen days from ${e(dMed(d.start_date))}</h2>
+          <p>Open one to work the day.</p></div></div>
+        <div class="outlook-head"><span>Day</span><span>Expected</span><span>Biggest line</span><span>Against normal</span><span>Busiest</span></div>
+        ${d.days.map((day) => `
+          <button class="outlook-row" data-open-date="${day.date}">
+            <span><b>${e(dMed(day.date))}</b><small>${e(day.weather.condition)}, ${day.weather.high}°</small></span>
+            <span class="money"><b>${money(day.expected_revenue)}</b><small>${num(day.expected_units)} items</small></span>
+            <span><b>${e(day.top_surges[0] ? `${day.top_surges[0].name}, ${day.top_surges[0].vs_baseline_units >= 0 ? "+" : ""}${day.top_surges[0].vs_baseline_units} vs normal` : `${num(day.top_item_units)} ${(day.top_item || "items").toLowerCase()}`)}</b><small>${e(day.occasion_name || day.signals[0]?.detail || "Normal trading pattern")}</small></span>
+            <span class="money ${day.revenue_change_percent >= 0 ? "up" : "down"}"><b>${pct(day.revenue_change_percent)}</b><small class="muted">${day.confidence}% sure</small></span>
+            <span><b>${e(day.peak_hour || "Not set")}</b><small>${e(day.demand_level)}</small></span>
+          </button>`).join("")}
+      </section>
+      <p class="small muted" style="padding:0 2px">Days further out lean more on this location's own repeating pattern, because the weather and event data for them is still provisional. The confidence figure on each row already accounts for that.</p>
+    </div>`;
+    root.innerHTML = shell("Next fourteen days", "", dateTools(), body);
+  }
+
+  /* ---------- history ---------- */
+  const RANGES = [["all", "All time"], ["year", "Past year"], ["quarter", "90 days"], ["month", "30 days"]];
+
+  function renderHistory() {
+    const tabs = `<div class="seg">
+      ${[["days", "By day"], ["orders", "Orders"], ["accuracy", "Track record"]].map(([k, l]) =>
+        `<button class="${S.historyTab === k ? "on" : ""}" data-htab="${k}">${l}</button>`).join("")}
+    </div>`;
+    let body = "";
+    if (S.historyTab === "days") body = historyDays();
+    else if (S.historyTab === "orders") body = historyOrders();
+    else body = historyAccuracy();
+    root.innerHTML = shell("History", "Closed days, orders, and how close each call was", tabs, body);
+  }
+
+  function rangeBar(current, attr) {
+    return `<div class="seg">${RANGES.map(([k, l]) =>
+      `<button class="${current === k ? "on" : ""}" data-${attr}="${k}">${l}</button>`).join("")}</div>`;
+  }
+
+  function historyDays() {
+    const days = S.history.days;
+    return `<div class="stack">
+      <section class="card">
+        <div class="card-head">
+          <div><h2>Closed days</h2></div>
+          <div class="spacer"></div>${rangeBar(S.history.range, "drange")}
+        </div>
+        <div id="dayrows">${days.length ? `<div class="dayrow head">
+            <span class="when">Day</span><span class="cell">Rang up</span>
+            <span class="cell">${S.history.costs ? "Kept" : "Items"}</span>
+            <span class="cell">${S.history.costs ? "Cost to run" : "Average order"}</span>
+            <span class="accmeter">How close the call was</span><span class="chev"></span>
+          </div>` : ""}
+        ${days.length ? days.map(dayRow).join("") : emptyState("No trading days in this range", "Pick a wider range, or connect the register to bring history in.")}</div>
+        ${S.history.hasMore ? `<div class="loadmore"><button class="btn sm" data-do="more-days">${S.history.loading ? "Loading" : "Load more"}</button></div>` : ""}
+        <div class="scroll-sentinel" id="sentinel"></div>
+      </section>
+      ${costsFoot(S.history.costs)}
+      <p class="small muted" style="padding:0 2px">${S.data?.source === "register" ? "Orders come straight from the connected register." : "This location has daily and hourly totals but not line-level receipts, so individual orders are reconstructed from those totals. They add up exactly, and they are replaced by real receipts the moment a register is connected."}</p>
+    </div>`;
+  }
+
+  function dayRow(day) {
+    if (day.closed) {
+      return `<div class="dayrow closed">
+        <span class="when"><b>${e(dMed(day.date))}</b><small>${e(day.weekday)}</small></span>
+        <span class="closed-note" style="grid-column:2 / -1">
+          <b>Closed</b><span>${e(day.note)}</span></span>
+      </div>`;
+    }
+    const acc = day.accuracy;
+    const cls = acc === null ? "" : acc >= 90 ? "" : acc >= 80 ? "mid" : "low";
+    const c = day.costs;
+    return `<button class="dayrow" data-day-detail="${day.date}">
+      <span class="when"><b>${e(dMed(day.date))}</b><small>${e(day.weekday)}</small></span>
+      <span class="cell"><b>${money(day.sales)}</b><small>${num(day.orders)} orders</small></span>
+      <span class="cell">${c
+        ? `<b>${money(c.gross_profit)}</b><small>kept, about ${c.margin_percent}%</small>`
+        : `<b>${num(day.units)}</b><small>items sold</small>`}</span>
+      <span class="cell">${c
+        ? `<b>${money(c.cogs + c.labour + c.other)}</b><small>food and wages</small>`
+        : `<b>${money(day.average_order, true)}</b><small>average order</small>`}</span>
+      <span class="accmeter">
+        ${acc === null
+          ? `<span class="small muted">Not scored yet</span><span class="line"><i class="skel" style="width:100%"></i></span>`
+          : `<span class="top"><b>${acc}% per item</b><small>day total ${num(day.predicted_units)} called, ${num(day.units)} sold</small></span>
+             <span class="line"><i class="${cls}" style="width:${Math.max(4, acc)}%"></i></span>`}
+      </span>
+      <span class="chev">${icon("chevR")}</span>
+    </button>`;
+  }
+
+  function costsFoot(summary) {
+    if (!summary) return "";
+    const w = summary.wage;
+    return `<p class="small muted" style="padding:0 2px">${summary.configured
+        ? `It uses the wage and the costs you entered.`
+        : `Nobody has entered your real costs yet, so it is using ${e(w.detail)} and no fixed costs at all.`}
+      <a href="/app" data-stab="costs">Put your own numbers in</a> and every figure here follows them.</p>`;
+  }
+
+  function historyOrders() {
+    const rows = S.orders.rows;
+    return `<div class="stack">
+      <section class="card">
+        <div class="card-head">
+          <div><h2>Orders</h2><p>Every ticket, newest first. ${num(rows.length)} loaded so far.</p></div>
+          <div class="spacer"></div>${rangeBar(S.orders.range, "orange")}
+        </div>
+        ${rows.length ? `<div class="orderrow head">
+            <span>Time</span><span>What they ordered</span><span class="ch">Channel</span><span class="pay">Payment</span><span class="amt">Total</span>
+          </div>` : ""}
+        ${rows.length ? rows.map(orderRow).join("") : emptyState("No orders in this range", "Widen the range or connect the register.")}
+        ${S.orders.hasMore ? `<div class="loadmore"><button class="btn sm" data-do="more-orders">${S.orders.loading ? "Loading" : "Load more"}</button></div>` : ""}
+        <div class="scroll-sentinel" id="sentinel"></div>
+      </section>
+    </div>`;
+  }
+
+  function orderRow(order) {
+    const names = order.lines.map((l) => `${l.quantity > 1 ? l.quantity + "x " : ""}${l.name}`).join(", ");
+    return `<div class="orderrow">
+      <span class="t">${e(clock(order.time))}<div class="small muted">${e(dShort(order.date))}</div></span>
+      <span class="what"><b>${e(names)}</b><small>${order.number} · ${noun(order.item_count, "item")}</small></span>
+      <span class="ch"><span class="tag plain">${e(order.channel)}</span></span>
+      <span class="pay small muted">${e(order.payment)}</span>
+      <span class="amt">${money(order.total, true)}<div class="small muted" style="font-weight:400">${money(order.subtotal, true)} + tax</div></span>
+    </div>`;
+  }
+
+  function historyAccuracy() {
+    const d = S.data;
+    const trend = d.trend || { series: [], average: null, days: 0 };
+    return `<div class="stack">
+      <section class="tiles">
+        ${tile("Forecast accuracy", `${d.summary.forecast_accuracy}%`,
+          `Measured on <b>${noun(d.summary.days_evaluated, "closed day")}</b> against what the registers rang.`,
+          "")}
+        ${tile("Days within 10%", trend.within_ten !== null ? `${trend.within_ten}%` : "Scoring",
+          `<b>${noun(trend.days, "day")}</b> scored so far. Best ${trend.best ?? 0}%, worst ${trend.worst ?? 0}%.`,
+          `A day inside 10% almost never changes what a kitchen preps`)}
+        ${tile("Items tracked", num(d.summary.items_evaluated),
+          `Every item that sold in the window has its own score.`,
+          "")}
+        ${tile("Average error", `${d.summary.wape}%`,
+          `On a ${money(d.daily.length ? d.daily[d.daily.length - 1].revenue : 0)} day that is roughly <b>${money((d.summary.wape / 100) * (d.daily.length ? d.daily[d.daily.length - 1].revenue : 0))}</b>.`,
+          "")}
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h2>Called against sold</h2>
+          <p>Solid is what sold. Dashed is what Quantify said the day before.</p></div></div>
+        <div class="card-body">${lineChart(d.daily)}</div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h2>Where it misses</h2>
+          <p>Worst first. An item that keeps missing the same way usually means a recipe, a portion, or a price changed.</p></div></div>
+        <div class="tablewrap"><table class="dt"><thead><tr>
+          <th>Item</th><th class="num right">Accuracy</th><th class="num right">Average miss</th><th class="num right">Units tested</th><th></th></tr></thead><tbody>
+          ${d.item_accuracy.slice(0, 14).map((row) => `<tr>
+            <td class="name"><b>${e(row.name)}</b></td>
+            <td class="num right">${row.accuracy}%</td>
+            <td class="num right ${row.wape > 25 ? "down" : ""}">${row.wape}%</td>
+            <td class="num right">${num(row.actual_units)}</td>
+            <td><div class="accmeter"><span class="line"><i class="${row.accuracy >= 90 ? "" : row.accuracy >= 80 ? "mid" : "low"}" style="width:${Math.max(4, row.accuracy)}%"></i></span></div></td>
+          </tr>`).join("")}
+        </tbody></table></div>
+        
+      </section>
+    </div>`;
+  }
+
+  function lineChart(rows) {
+    if (!rows || !rows.length) return `<p class="muted small">No closed days in this window yet.</p>`;
+    const W = 900, H = 240, P = 34;
+    const max = Math.max(...rows.flatMap((r) => [Number(r.actual), Number(r.predicted)]), 1) * 1.08;
+    const x = (i) => P + (i * (W - P * 2)) / Math.max(1, rows.length - 1);
+    const y = (v) => H - P - (Number(v) / max) * (H - P * 2);
+    const line = (key) => rows.map((r, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(r[key]).toFixed(1)}`).join(" ");
+    const grids = [0, 0.5, 1].map((f) => {
+      const yy = H - P - f * (H - P * 2);
+      return `<line class="grid" x1="${P}" y1="${yy}" x2="${W - P}" y2="${yy}"/>
+        <text class="axis-label" x="${P - 6}" y="${yy + 3}" text-anchor="end">${num(max * f)}</text>`;
+    }).join("");
+    const ticks = rows.filter((_, i) => i % Math.ceil(rows.length / 7) === 0)
+      .map((r) => `<text class="axis-label" x="${x(rows.indexOf(r))}" y="${H - P + 16}" text-anchor="middle">${dShort(r.date)}</text>`).join("");
+    return `<div class="linechart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Predicted against actual item units">
+      ${grids}${ticks}
+      <path class="predicted" d="${line("predicted")}"/>
+      <path class="actual" d="${line("actual")}"/>
+    </svg>
+    <div class="chart-key"><span><i class="k-actual"></i>Sold</span><span><i class="k-pred"></i>Called</span></div></div>`;
+  }
+
+  /* ---------- menu ---------- */
+  function renderMenu() {
+    const d = S.data;
+    const sum = d.summary;
+    const writer = d.writer || {};
+    const body = `<div class="stack">
+      <section class="tiles">
+        ${tile("Items on sale", num(sum.total), "", `Pulled from the register catalogue`)}
+        ${tile("Read confidently", `${num(sum.high_confidence)} of ${num(sum.total)}`, `Matched from the till label.`, "")}
+        ${tile("Worth a glance", num(sum.review_optional), `Short or unusual till labels.`, "")}
+        ${tile("Parts identified", num(d.items.reduce((n, row) => n + (row.composition?.components?.length || 0), 0)), `Across ${noun(d.items.length, "item")}.`, `Estimated from the till label until a recipe is uploaded`)}
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <div><h2>What each item is made of</h2>
+            <p>Open an item to see what it takes to make.</p></div>
+          <div class="spacer"></div>
+        </div>
+        <div id="menulist">${d.items.map(menuRow).join("")}</div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h2>Add items by hand</h2>
+          <p>Paste a menu, a supplier list, or anything a scanner gave you. One item per line, price at the end.</p></div></div>
+        <div class="card-body">
+          <textarea id="menu-text" rows="6" placeholder="Double cheeseburger, Burgers, 15.50&#10;Pep slice, Slices, 4.25&#10;Iced lat lg, Drinks, 6.00"></textarea>
+          <div class="btn-row" style="margin-top:12px">
+            <button class="btn" data-do="menu-preview">Show me what it reads</button>
+            <button class="btn accent" data-do="menu-import">Add these items</button>
+          </div>
+          <div id="menu-preview-out"></div>
+        </div>
+        <div class="card-foot">For anything the register does not carry.</div>
+      </section>
+    </div>`;
+    root.innerHTML = shell("Menu", `${d.items.length} items`, "", body);
+  }
+
+  function menuRow(item) {
+    const open = S.open.has(item.id);
+    const comp = item.composition;
+    const low = Number(item.confidence) < 0.68;
+    return `<div class="exp ${open ? "open" : ""}">
+      <button class="exp-head" data-expand="${e(item.id)}">
+        <span class="chev">${icon("chevR")}</span>
+        <span><b>${e(item.normalized_name)}</b><small>${e(item.category)}${item.raw_name !== item.normalized_name ? ` · rings up as "${e(item.raw_name)}"` : ""}</small></span>
+        <span class="small muted">${comp ? `${comp.components.length} parts` : "not read yet"}</span>
+        <span class="small muted tnum">${money(item.price, true)}</span>
+      </button>
+      ${open ? `<div class="exp-body">
+        ${comp ? `
+          <p class="lede" style="margin-top:12px">${e(comp.summary)}</p>
+          <table class="dt parts"><thead><tr>
+            <th>Part</th><th>Role</th><th class="num right">Per ${e(item.production_unit || "unit")}</th>
+            <th class="num right">Share of cost</th><th class="num right">How sure</th></tr></thead><tbody>
+            ${comp.components.map((c) => `<tr>
+              <td class="name"><b>${e(c.name)}</b></td>
+              <td class="muted">${e(c.role)}</td>
+              <td class="num right">${e(c.quantity || "not stated")}</td>
+              <td class="num right">${c.share}%</td>
+              <td class="num right ${c.confidence === "low" ? "down" : ""}">${e(c.confidence)}</td>
+            </tr>`).join("")}
+          </tbody></table>
+          <p class="form-note" style="margin-top:10px">${e(comp.verify_note)}</p>
+          <div class="btn-row" style="margin-top:12px">
+            <button class="btn sm accent" data-item-sheet="${e(item.id)}">See how it sells</button>
+            <button class="btn sm" data-do="recompose" data-item="${e(item.id)}">Read it again</button>
+            <button class="btn sm ghost" data-do="edit-composition" data-item="${e(item.id)}">Correct it</button>
+          </div>`
+        : `<div style="padding:14px 0"><p class="lede">Still reading this one. Check back in a moment.</p></div>`}
+      </div>` : ""}
+    </div>`;
+  }
+
+  /* ---------- ordering ---------- */
+  // Two kinds of line and they are never mixed. A forecast line has a recipe
+  // behind it, so the quantity comes from what the forecast says will be made.
+  // Anything the recipe cannot speak for is said out loud at the top rather
+  // than quietly folded in.
+  const ORDER_WINDOWS = [["2", "2 days"], ["3", "3 days"], ["5", "5 days"], ["7", "a week"]];
+
+  function orderQty(line) {
+    const key = line.name.toLowerCase();
+    const edit = S.order.edits[key];
+    return edit === undefined ? line.typical : edit;
+  }
+
+  function renderOrdering() {
+    const d = S.data;
+    if (!d || !d.ready) {
+      return root.innerHTML === "" ? null : (root.innerHTML = shell(
+        "Order", "", "",
+        emptyState("Nothing to order yet", "Once the register has some history, this becomes the list of what to buy."),
+      ));
+    }
+    const c = d.counts;
+    const forecastLines = d.lines.filter((row) => row.orderable);
+    const shares = d.lines.filter((row) => !row.orderable);
+    const changed = Object.keys(S.order.edits).length;
+
+    const tools = `<div class="seg">${ORDER_WINDOWS.map(([k, l]) =>
+      `<button class="${String(S.order.days) === k ? "on" : ""}" data-owin="${k}">${l}</button>`).join("")}</div>`;
+
+    const body = `<div class="stack">
+      <section class="card">
+        <div class="card-body">
+          <p class="lede">Enough for <b>${e(dMed(d.start))}</b> through <b>${e(dMed(d.end))}</b>,
+            worked from what the forecast says you will make on each of those days.</p>
+          <p class="lede" style="margin-top:8px">This covers <b>${num(c.covered)}</b> of your
+            <b>${num(c.menu_items)}</b> menu items.${c.uncovered
+              ? ` The other ${num(c.uncovered)} have no recipe on file, so nothing they use is counted below.`
+              : ""}</p>
+        </div>
+      </section>
+
+      <section class="card" id="orderlines">
+        <div class="card-head"><div><h2>What to buy</h2>
+          <p>Change any number. Nothing here is fixed.</p></div>
+          <div class="spacer"></div>
+          ${changed ? `<button class="btn sm ghost" data-do="order-reset">Undo my changes</button>` : ""}</div>
+        <div class="tablewrap"><table class="dt" style="min-width:660px"><thead><tr>
+          <th>Ingredient</th><th class="num right">Needed</th><th>What drives it</th>
+          <th class="num right">Order</th></tr></thead><tbody>
+          ${forecastLines.map((line) => {
+            const key = line.name.toLowerCase();
+            const qty = orderQty(line);
+            const moved = S.order.edits[key] !== undefined && S.order.edits[key] !== line.typical;
+            const cover = line.typical > 0 ? (qty / line.typical) * d.days : 0;
+            return `<tr>
+              <td class="name"><b>${e(line.name)}</b><small>${e(line.role || "")}${
+                line.has_range ? ` · anywhere from ${num(line.low)} to ${num(line.high)}` : ""}</small></td>
+              <td class="num right">${num(line.typical)} <span class="muted">${e(line.unit)}</span></td>
+              <td class="small muted">${line.driven_by.map((x) =>
+                `${e(x.item)} ${x.share_percent}%`).join(", ")}</td>
+              <td class="num right">
+                <div class="qty">
+                  <button class="qstep" data-oadj="${e(key)}" data-step="-1" aria-label="Less">-</button>
+                  <input class="qin" data-oqty="${e(key)}" type="number" min="0" value="${qty}">
+                  <button class="qstep" data-oadj="${e(key)}" data-step="1" aria-label="More">+</button>
+                </div>
+                ${moved ? `<div class="small muted" style="margin-top:4px">${
+                  cover >= d.days ? `${Math.round(cover * 10) / 10} days of cover` : `covers ${Math.round(cover * 10) / 10} days`}</div>` : ""}
+              </td>
+            </tr>`;
+          }).join("")}
+        </tbody></table></div>
+        <div class="card-body" style="border-top:1px solid var(--line)">
+          <div class="btn-row">
+            <button class="btn sm" data-do="order-add">Add something else</button>
+            <button class="btn accent" data-do="order-copy">Copy the list</button>
+          </div>
+          <p class="small muted" style="margin-top:10px">Quantities are in the unit each recipe speaks.
+            Once you tell us how you buy each one, cases and packs go here instead.
+            <a href="/app" data-stab="suppliers">Set that up</a></p>
+        </div>
+      </section>
+
+      ${S.order.extras.length ? `<section class="card">
+        <div class="card-head"><div><h2>Also on the list</h2></div></div>
+        <div class="tablewrap"><table class="dt"><tbody>
+          ${S.order.extras.map((row, i) => `<tr>
+            <td class="name"><b>${e(row.name)}</b><small>added by you</small></td>
+            <td class="num right">${e(row.qty)}</td>
+            <td class="right"><button class="btn sm ghost" data-odrop="${i}">Remove</button></td>
+          </tr>`).join("")}
+        </tbody></table></div>
+      </section>` : ""}
+
+      ${d.backlog.length ? `<section class="card">
+        <div class="card-head"><div><h2>Worth adding a recipe for</h2>
+          <p>Each one moves that much of your ordering from guesswork onto the forecast.</p></div></div>
+        <div class="tablewrap"><table class="dt"><tbody>
+          ${d.backlog.map((row) => `<tr class="clickable" data-item-sheet="${e(row.item_id)}">
+            <td class="name"><b>${e(row.name)}</b><small>about ${num(row.monthly_units)} a month</small></td>
+            <td class="num right">${money(row.monthly_value)}<div class="small muted">a month</div></td>
+          </tr>`).join("")}
+        </tbody></table></div>
+      </section>` : ""}
+
+      ${shares.length ? `<details class="context-disclosure" style="margin:0 2px">
+        <summary>${shares.length} things measured as a share rather than a count</summary>
+        <div class="context-detail">
+          ${shares.map((row) => `<p><b>${e(row.name)}</b>: ${num(row.typical)} ${e(row.unit)}. ${e(row.note)}</p>`).join("")}
+        </div></details>` : ""}
+    </div>`;
+    root.innerHTML = shell("Order", `${e(dMed(d.start))} through ${e(dMed(d.end))}`, tools, body);
+  }
+
+  function orderAdjust(key, step) {
+    const line = (S.data.lines || []).find((row) => row.name.toLowerCase() === key);
+    if (!line) return;
+    const now = orderQty(line);
+    const grain = line.typical >= 100 ? 10 : line.typical >= 20 ? 5 : 1;
+    S.order.edits[key] = Math.max(0, Math.round((now + step * grain) * 10) / 10);
+    render();
+  }
+
+  function orderCopy() {
+    const d = S.data;
+    const rows = d.lines.filter((row) => row.orderable).map((line) =>
+      `${line.name}: ${orderQty(line)} ${line.unit}`);
+    S.order.extras.forEach((row) => rows.push(`${row.name}: ${row.qty}`));
+    const text = `Order for ${dMed(d.start)} to ${dMed(d.end)}\n\n` + rows.join("\n");
+    navigator.clipboard?.writeText(text).then(
+      () => toast("Copied. Paste it into an email or a text to your rep."),
+      () => toast("Could not copy on this browser", "error"),
+    );
+  }
+
+  /* ---------- settings ---------- */
+  const SETTINGS_TABS = [
+    ["location", "Location"],
+    ["costs", "What things cost"],
+    ["connections", "Data connections"],
+    ["email", "Daily email"],
+    ["account", "Account & security"],
+  ];
+
+  function renderSettings() {
+    const body = `<div class="settings">
+      <nav class="settings-nav">${SETTINGS_TABS.map(([k, l]) =>
+        `<button class="${S.settingsTab === k ? "on" : ""}" data-stab="${k}">${l}</button>`).join("")}</nav>
+      <div class="settings-body">${settingsPanel()}</div>
+    </div>`;
+    root.innerHTML = shell("Settings", "", "", body);
+  }
+
+  function settingsPanel() {
+    const { setup, billing } = S.data;
+    if (S.settingsTab === "costs") return settingsCosts();
+    if (S.settingsTab === "location") return settingsLocation(setup);
+    if (S.settingsTab === "connections") return settingsConnections(setup);
+    if (S.settingsTab === "email") return settingsEmail(setup);
+    return settingsAccount(setup, billing);
+  }
+
+  function settingsLocation(setup) {
+    const l = setup.location;
+    const tz = setup.timezone;
+    return `<section class="card">
+      <div class="card-head"><div><h2>${e(l.name)}</h2><p>The time zone sets when the morning email lands.</p></div></div>
+      <div class="card-body">
+        <form id="f-location" class="form-grid">
+          <div class="form-grid two">
+            <label class="field"><span>Name</span><input name="name" value="${e(l.name)}" required></label>
+            <label class="field"><span>What you serve</span><input name="concept" value="${e(l.concept)}"></label>
+          </div>
+          <div class="form-grid two">
+            <label class="field"><span>City</span>
+              <div class="typeahead">
+                <input type="text" name="city" data-typeahead value="${e(l.city)}"
+                       placeholder="Start typing a town" autocomplete="off">
+              </div></label>
+            <label class="field"><span>State</span>
+              <input type="text" name="region" value="${e(l.region)}" placeholder="NY"></label>
+          </div>
+          <label class="field"><span>Time zone</span>
+            <div class="typeahead">
+              <input type="text" name="timezone" id="tz-input" data-typeahead value="${e(l.timezone)}"
+                     placeholder="White Plains, California, 10583, or Eastern" autocomplete="off">
+            </div>
+            <div id="tz-hint" data-tz-hint>${tzHint(tz)}</div>
+            <small>A town, a state, a ZIP code, or a time zone.</small></label>
+          <div class="form-grid two">
+            <label class="field"><span>Opens</span><select name="open_hour">${hourOptions(l.open_hour, 0, 14)}</select></label>
+            <label class="field"><span>Closes</span><select name="close_hour">${hourOptions(l.close_hour, 14, 28)}</select>
+              <small>Past midnight is fine. A bar open 11 AM to 2 AM is a fifteen hour day.</small></label>
+          </div>
+          <div class="btn-row"><button class="btn accent" type="submit">Save</button></div>
+        </form>
+      </div>
+    </section>`;
+  }
+
+  const PERIODS = [["day", "every day"], ["week", "every week"], ["month", "every month"]];
+
+  function settingsCosts() {
+    const c = S.costs;
+    if (!c) return `<section class="card"><div class="card-body">${skeleton()}</div></section>`;
+    const s = c.settings;
+    const w = c.wage;
+    const ex = c.example;
+    return `<div class="stack-tight">
+      <section class="card">
+        <div class="card-head"><div><h2>What an hour of work costs</h2>
+          <p>${e(w.detail)}</p></div></div>
+        <div class="card-body">
+          <form id="f-costs" class="form-grid">
+            <div class="form-grid two">
+              <label class="field"><span>What you pay an hour</span>
+                <input name="hourly_wage" type="number" step="0.25" min="0" value="${s.hourly_wage || w.state_minimum}">
+                <small>Leave it at the local minimum if you want, but most kitchens pay above it.</small></label>
+              <label class="field"><span>Payroll on top</span>
+                <input name="payroll_load_percent" type="number" step="0.5" min="0" max="60" value="${s.payroll_load_percent}">
+                <small>Payroll tax, unemployment, workers' comp. 18% is typical. At ${money(s.hourly_wage || w.state_minimum, true)} an hour that makes an hour cost ${money(w.loaded, true)}.</small></label>
+            </div>
+            <div class="form-grid two">
+              <label class="field"><span>Orders one person handles an hour</span>
+                <input name="orders_per_person_per_hour" type="number" step="0.5" min="1" max="40" value="${s.orders_per_person_per_hour}">
+                <small>Counter, kitchen, expo and clean down together. Six is normal for table service, higher for a coffee counter.</small></label>
+              <label class="field"><span>Fewest people on at once</span>
+                <input name="min_staff" type="number" step="1" min="1" max="30" value="${s.min_staff}">
+                <small>Charged for every hour you are open, even the quiet ones.</small></label>
+            </div>
+            <div class="form-grid two">
+              <label class="field"><span>Hours of prep before you open</span>
+                <input name="prep_hours" type="number" step="0.5" min="0" max="12" value="${s.prep_hours}"></label>
+              <label class="field"><span>Hours of clean down after you close</span>
+                <input name="close_hours" type="number" step="0.5" min="0" max="12" value="${s.close_hours}"></label>
+            </div>
+            <label class="field"><span>What food costs, as a share of the price</span>
+              <input name="default_cost_share" type="number" step="1" min="1" max="95" value="${Math.round(s.default_cost_share * 100)}">
+              <small>Used for anything not given its own figure below.</small></label>
+            <div class="btn-row"><button class="btn accent" type="submit">Save</button></div>
+          </form>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h2>What food costs by category</h2>
+          <p>Change any of these and the profit on every day follows.</p></div></div>
+        <div class="tablewrap"><table class="dt"><thead><tr>
+          <th>Category</th><th class="num right">Items</th><th class="num right">Share of price</th><th class="num right">On a typical one</th></tr></thead><tbody>
+          ${c.categories.map((row) => `<tr>
+            <td class="name"><b>${e(row.category)}</b><small>${row.set_by_owner ? "your figure" : `estimated from what these items are, across ${num(row.items)} of them`}</small></td>
+            <td class="num right">${num(row.items)}</td>
+            <td class="num right"><input class="mini" data-cost-category="${e(row.category)}" type="number" step="1" min="1" max="95" value="${row.percent}"></td>
+            <td class="num right">${money(row.average_price * row.percent / 100, true)}</td>
+          </tr>`).join("")}
+        </tbody></table></div>
+        <div class="card-foot">Change a figure and press save below. This changes profit, not the forecast.</div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h2>Everything else you pay for</h2>
+          <p>Rent, insurance, the card machine, the linen service, the thing only you pay for.</p></div></div>
+        <div class="card-body">
+          <div id="cost-lines">${(c.recurring.length ? c.recurring : [{ name: "", amount: "", period: "month" }])
+            .map(costLine).join("")}</div>
+          <div class="btn-row" style="margin-top:12px">
+            <button class="btn sm" data-do="add-cost-line">Add another</button>
+            <button class="btn accent" data-do="save-costs">Save everything on this page</button>
+          </div>
+          ${c.recurring_daily ? `<p class="small muted" style="margin-top:12px">That comes to <b>${money(c.recurring_daily)}</b> a day, charged whether you trade or not.</p>` : ""}
+        </div>
+      </section>
+
+      ${ex ? `<section class="card">
+        <div class="card-head"><div><h2>What this does to a real day</h2>
+          <p>${e(dMed(ex.date))}, worked through with the numbers above.</p></div></div>
+        <div class="tablewrap"><table class="dt"><tbody>
+          <tr><td class="name"><b>Rang up</b></td><td class="num right"><b>${money(ex.revenue)}</b></td></tr>
+          <tr><td class="name"><b>Food and packaging</b><small>${ex.cogs_percent}% of what was rung</small></td><td class="num right">${money(-ex.cogs)}</td></tr>
+          <tr><td class="name"><b>Wages</b><small>${ex.staff_hours} staff hours at ${money(ex.loaded_wage, true)}, peak of ${ex.busiest_staff} people</small></td><td class="num right">${money(-ex.labour)}</td></tr>
+          ${ex.other ? `<tr><td class="name"><b>Everything else</b><small>one day's share of what you listed</small></td><td class="num right">${money(-ex.other)}</td></tr>` : ""}
+        </tbody><tfoot><tr><td><b>Kept</b><small>about ${ex.margin_percent}% of what was rung</small></td>
+          <td class="num right"><b>${money(ex.gross_profit)}</b></td></tr></tfoot></table></div>
+        <div class="card-foot">Built from the settings on this page, not from your books.</div>
+      </section>` : ""}
+    </div>`;
+  }
+
+  function costLine(row) {
+    return `<div class="costline">
+      <input class="cl-name" placeholder="What it is" value="${e(row.name || "")}">
+      <input class="cl-amount" type="number" step="1" min="0" placeholder="0" value="${row.amount || ""}">
+      <select class="cl-period">${PERIODS.map(([k, l]) =>
+        `<option value="${k}" ${row.period === k ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <button class="icon-btn" type="button" data-do="drop-cost-line">${icon("close")}</button>
+    </div>`;
+  }
+
+  async function loadCosts() {
+    S.costs = await API.get(`/api/costs?location_id=${encodeURIComponent(S.locationId)}`);
+    render();
+  }
+
+  async function saveCosts() {
+    const form = document.getElementById("f-costs");
+    const body = form ? Object.fromEntries(new FormData(form).entries()) : {};
+    body.categories = Array.from(document.querySelectorAll("[data-cost-category]")).map((node) => ({
+      category: node.dataset.costCategory, percent: Number(node.value),
+    }));
+    body.recurring = Array.from(document.querySelectorAll(".costline")).map((node) => ({
+      name: node.querySelector(".cl-name").value.trim(),
+      amount: Number(node.querySelector(".cl-amount").value),
+      period: node.querySelector(".cl-period").value,
+    })).filter((row) => row.name && row.amount > 0);
+    try {
+      S.costs = await API.send(`/api/costs?location_id=${encodeURIComponent(S.locationId)}`, "PUT", body);
+      toast("Saved");
+      render();
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  function settingsConnections(setup) {
+    const byProvider = Object.fromEntries(setup.integrations.map((row) => [row.provider, row]));
+    const posProvider = setup.providers.find((p) => p.provider.toLowerCase() === "square");
+    return `<div class="stack-tight">
+      <section class="card">
+        <div class="card-head"><div><h2>Where the numbers come from</h2>
+          <p>Up to three years of history on connect, then it keeps up as orders come in.</p></div></div>
+        <div class="conn">
+          <span class="badge ${byProvider.pos?.status === "connected" ? "on" : ""}">POS</span>
+          <div><b>${e(posProvider?.provider || "Square")} ${byProvider.pos?.mode === "demo" ? `<span class="tag plain">sample data</span>` : `<span class="tag up dot">connected</span>`}</b>
+            <p>Item catalogue and every completed order, including which hour each one landed in. This is the only connection that really matters.</p>
+            <div class="why">${e(posProvider?.history || "")}</div></div>
+          <button class="btn sm" data-sync="pos">Sync now</button>
+        </div>
+        <div class="conn">
+          <span class="badge on">WX</span>
+          <div><b>Weather <span class="tag ${byProvider.weather?.mode === "demo" ? "plain" : "up"} dot">${e(byProvider.weather?.mode === "demo" ? "sample data" : byProvider.weather?.status || "not set up")}</span></b>
+            <p>Past and forecast temperature, rain, snow, and sun for this address.</p></div>
+          <button class="btn sm" data-sync="weather">Refresh</button>
+        </div>
+        <div class="conn">
+          <span class="badge on">EV</span>
+          <div><b>What is on nearby <span class="tag ${byProvider.events?.mode === "demo" ? "plain" : "up"} dot">${e(byProvider.events?.mode === "demo" ? "sample data" : byProvider.events?.status || "not set up")}</span></b>
+            <p>Concerts, games, conferences, festivals, and public holidays inside a trade area that adjusts to how far your customers actually travel. Each one is ranked by size, distance, timing, and how this location has responded before.</p>
+            </div>
+          <button class="btn sm" data-sync="events">Refresh</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h2>Writing</h2><p>Quantify computes every number itself. A language model is used only to put those numbers into sentences.</p></div></div>
+        <div class="card-body">
+          <div style="display:flex;gap:10px;align-items:flex-start">
+            ${icon(setup.writer.state === "connected" ? "check" : "info")}
+            <div><b style="font-size:13.5px">${e(setup.writer.state === "connected" ? `Connected to ${setup.writer.model}` : "Running on the built-in writer")}</b>
+              <p class="small muted" style="margin-top:4px;line-height:1.6">${e(setup.writer.detail)}</p></div>
+          </div>
+          <div class="card" style="margin-top:14px;box-shadow:none;background:var(--surface-2)"><div class="card-body">
+            <div class="eyebrow">Skills loaded per task</div>
+            <div style="display:grid;gap:8px;margin-top:10px">
+              ${Object.entries(setup.writer.skills || {}).map(([task, skills]) => `
+                <div style="display:flex;gap:10px;align-items:baseline;font-size:12.5px">
+                  <b style="min-width:150px">${e(task.replace(/_/g, " "))}</b>
+                  <span class="muted">${skills.map((s) => e(s)).join(", ")}</span></div>`).join("")}
+            </div>
+          </div></div>
+        </div>
+        <div class="card-foot">Set ANTHROPIC_API_KEY and run pip install anthropic to switch the writing on. Nothing about the forecast changes, only how it is explained.</div>
+      </section>
+    </div>`;
+  }
+
+  function settingsEmail(setup) {
+    const p = setup.email;
+    return `<section class="card">
+      <div class="card-head"><div><h2>Morning email</h2><p>The whole brief in one message, before anyone opens the door.</p></div></div>
+      <div class="card-body">
+        <form id="f-email" class="form-grid">
+          <div class="form-grid two">
+            <label class="field"><span>Send to</span><input name="owner_email" type="email" value="${e(p.owner_email)}" required></label>
+            <label class="field"><span>Local time</span><input name="send_time" type="time" value="${e(p.send_time)}" required></label>
+          </div>
+          <label class="field"><span>Time zone</span><input name="timezone" value="${e(p.timezone)}" placeholder="New York, Texas, 90210, or Pacific"></label>
+          <label class="check"><input name="enabled" type="checkbox" ${p.enabled ? "checked" : ""}>
+            <span><b>Send it every day</b><small>Today's plan, what to make, the reasons, the honest range, and the next six days.</small></span></label>
+          <div class="btn-row">
+            <button class="btn accent" type="submit">Save</button>
+            <button class="btn" type="button" data-do="preview-email">Preview</button>
+            <button class="btn" type="button" data-do="send-test">Send me a test</button>
+          </div>
+        </form>
+      </div>
+      <div class="card-foot">Without mail credentials a test writes a complete message into data/outbox so you can open it. Live sending uses the same message through Postmark or your own SMTP server.</div>
+    </section>`;
+  }
+
+  function settingsAccount(setup, billing) {
+    const plan = billing.plan;
+    const cancelling = billing.cancel_at_period_end;
+    return `<div class="stack-tight">
+      <section class="card">
+        <div class="card-head"><div><h2>Your account</h2></div></div>
+        <div class="card-body" style="display:grid;gap:14px">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px">
+            <div><div class="eyebrow">Signed in as</div><div style="margin-top:5px;font-weight:600">${e(S.boot.user.name)}</div><div class="small muted">${e(S.boot.user.email)}</div></div>
+            <div><div class="eyebrow">Two-step sign in</div><div style="margin-top:5px;font-weight:600" class="${setup.security.mfa_enabled ? "up" : "muted"}">${setup.security.mfa_enabled ? "On" : "Off"}</div><div class="small muted">${setup.security.mfa_enabled ? "Authenticator app" : "Optional, set it up below"}</div></div>
+            <div><div class="eyebrow">This session ends</div><div style="margin-top:5px;font-weight:600">${e(new Date(setup.security.session_expires_at).toLocaleString())}</div><div class="small muted">Sign in again after that</div></div>
+          </div>
+          <div class="btn-row"><button class="btn" data-do="signout">Sign out</button></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <div><h2>Two-step sign in</h2>
+            <p>${setup.security.mfa_enabled
+              ? "On. Signing in asks for a code from your authenticator app as well as your password."
+              : "Off. Your password alone gets you in. Turning this on takes about thirty seconds and is the single best thing you can do for this account."}</p></div>
+          <div class="spacer"></div>
+          <span class="tag ${setup.security.mfa_enabled ? "up" : "plain"} dot">${setup.security.mfa_enabled ? "On" : "Off"}</span>
+        </div>
+        <div class="card-body"><div class="btn-row">
+          ${setup.security.mfa_enabled
+            ? `<button class="btn" data-do="mfa-off">Turn it off</button>`
+            : `<button class="btn accent" data-do="mfa-on">Turn on two-step sign in</button>`}
+        </div></div>
+      </section>
+
+      ${setup.security.mfa_enabled ? `<section class="card">
+        <div class="card-head"><div><h2>Backup codes</h2>
+          <p>Ten single-use codes that get you in if your phone is lost. Optional, and most people never need them.</p></div>
+          <div class="spacer"></div>
+          <span class="tag plain">${setup.security.recovery_codes_remaining} unused</span></div>
+        <div class="card-body"><div class="btn-row">
+          <button class="btn" data-do="new-codes">${setup.security.recovery_codes_remaining ? "Replace my codes" : "Create backup codes"}</button>
+        </div></div>
+      </section>` : ""}
+
+      <section class="card">
+        <div class="card-head"><div><h2>Plan</h2><p>${e(plan.blurb)}</p></div></div>
+        <div class="plancard">
+          <div>
+            <div class="price">$${plan.monthly}<span> per location, per month</span></div>
+            <div class="small muted" style="margin-top:5px">$${plan.annual_monthly} a month if you pay for the year. ${billing.status === "trialing" ? `Free until ${e((billing.trial_end || "").slice(0, 10))}.` : ""}</div>
+            <div class="planlist">
+              ${["Register history and ongoing sync", "Fourteen days of item-level forecasting", "Weather, calendar, and nearby activity", "The morning email", "A scored accuracy record you can check"]
+                .map((f) => `<div>${icon("check")}<span>${f}</span></div>`).join("")}
+            </div>
+          </div>
+          <div style="display:grid;gap:8px;min-width:190px">
+            ${billing.payment_method
+              ? `<div class="card" style="box-shadow:none;background:var(--surface-2)"><div class="card-body" style="padding:12px 14px">
+                   <div class="eyebrow">Card on file</div>
+                   <div style="margin-top:4px;font-weight:600">${e(billing.payment_method.brand || "Card")} ending ${e(billing.payment_method.last4)}</div>
+                   <div class="small muted">Expires ${e(billing.payment_method.expires || "")}</div></div></div>`
+              : `<div class="small muted">${billing.provider.connected ? "No card on file yet." : "No payment processor connected yet."}</div>`}
+            <button class="btn ${billing.payment_method ? "" : "accent"}" data-do="billing-portal">${billing.payment_method ? "Update payment method" : "Add a payment method"}</button>
+            ${billing.provider.connected && !billing.payment_method ? `<button class="btn" data-do="billing-checkout">Start the plan</button>` : ""}
+          </div>
+        </div>
+        ${billing.invoices.length ? `<div style="border-top:1px solid var(--line)">
+          ${billing.invoices.map((inv) => `<div class="invoice">
+            <span class="muted">${e(inv.date)}</span><span>${e(inv.number || "Invoice")}</span>
+            <span class="amt">${money(inv.amount, true)}</span>
+            <span>${inv.url ? `<a class="btn sm" href="${e(inv.url)}" target="_blank" rel="noopener">Receipt ${icon("external")}</a>` : `<span class="tag plain">${e(inv.status)}</span>`}</span>
+          </div>`).join("")}</div>` : ""}
+        <div class="card-foot">${e(billing.provider.detail)}</div>
+      </section>
+
+      ${cancelling ? `<section class="card">
+        <div class="card-head"><div><h2>Your plan is set to end</h2>
+          <p>Everything keeps working until ${e((billing.current_period_end || "").slice(0, 10))}. You can turn it back on before then and nothing is interrupted.</p></div></div>
+        <div class="card-body"><div class="btn-row"><button class="btn accent" data-do="billing-resume">Keep my plan</button></div></div>
+      </section>` : `
+      <section class="card danger-zone">
+        <div class="card-head"><div><h2>Cancel your plan</h2></div></div>
+        <div class="card-body">
+          <p class="small muted" style="line-height:1.65;max-width:70ch">Cancelling stops the next charge. You keep full access until the end of the period you have already paid for, and your history stays exported-ready the whole time.</p>
+          <div class="btn-row" style="margin-top:14px"><button class="btn danger" data-do="cancel-start">Cancel my plan</button></div>
+        </div>
+      </section>`}
+    </div>`;
+  }
+
+  /* ---------- cancellation flow ---------- */
+  async function cancelStart() {
+    const billing = S.data?.billing || await API.get("/api/billing");
+    S.cancelFlow = { stage: "reason", reason: "", detail: "", reasons: billing.cancellation_reasons, support: billing.support_email };
+    renderCancelModal();
+  }
+
+  function renderCancelModal() {
+    const f = S.cancelFlow;
+    if (!f) return closeLayer();
+    let body = "";
+    let foot = "";
+
+    if (f.stage === "reason") {
+      const chosen = f.reasons.find((r) => r.code === f.reason);
+      body = `<div class="modal-head">
+          <h2>Before you go, what went wrong?</h2>
+          <p>One answer. It goes to the people who build this, not to a marketing list.</p></div>
+        <div class="modal-body">
+          <div style="display:grid;gap:8px">
+            ${f.reasons.map((r) => `
+              <button type="button" class="choice ${f.reason === r.code ? "on" : ""}" data-cancel-reason="${e(r.code)}">
+                <span class="radio"></span><div><b>${e(r.label)}</b></div></button>`).join("")}
+          </div>
+          ${chosen ? `<label class="field"><span>${e(chosen.follow_up)}</span>
+            <textarea id="cancel-detail" rows="3" placeholder="Optional, but it is the part we actually read.">${e(f.detail)}</textarea></label>` : ""}
+        </div>`;
+      foot = `<button class="btn ghost" data-do="close-layer">Never mind, keep my plan</button>
+        <button class="btn primary" data-do="cancel-next" ${f.reason ? "" : "disabled"}>Continue</button>`;
+    } else if (f.stage === "offer") {
+      body = `<div class="modal-head">
+          <h2>Give us fifteen minutes first?</h2>
+          <p>Fifteen minutes on a call with someone from the team, at a time you pick.</p></div>
+        <div class="modal-body">
+          <div class="offer-lead">
+            <b>If the price is wrong for how much you use it, we will change the price.</b>
+            <span>Tell us on the call what it is worth to you and we set it there.</span>
+          </div>
+          <div class="planlist" style="margin-top:14px">
+            ${[["We go through your own accuracy record with you, day by day, and show you what it caught and what it missed.",
+                "If it is not doing what you need, we say so."],
+               ["If something is broken or missing, we fix it while you are on the call where we can.", ""],
+               ["If it still is not worth it at the end, we cancel it for you there and then.", ""]]
+              .map(([line, sub]) => `<div>${icon("check")}<span>${line}${sub ? ` <em class="muted">${sub}</em>` : ""}</span></div>`).join("")}
+          </div>
+        </div>`;
+      foot = `<button class="btn danger" data-do="cancel-confirm">No, cancel my plan</button>
+        <button class="btn accent" data-do="cancel-talk">Set up a call</button>`;
+    } else {
+      body = `<div class="modal-head"><h2>Your plan is cancelled</h2><p>${e(f.message)}</p></div>
+        <div class="modal-body"><p class="small muted">If you change your mind before then, there is a button in Account and security that turns it straight back on.</p></div>`;
+      foot = `<button class="btn primary" data-do="close-layer">Done</button>`;
+    }
+
+    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true">
+        <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
+        ${body}<div class="modal-foot">${foot}</div>
+      </div></div>`;
+  }
+
+  /* ---------- one item, in full ---------- */
+  // Any item, however quiet. The point of the product is that the crème brûlée
+  // nobody orders gets the same treatment as the best seller.
+  async function openItemSheet(itemId) {
+    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+      <aside class="sheet wide"><div class="sheet-head"><div><h2>Reading the record</h2>
+</div>
+        <div style="margin-left:auto"><button class="icon-btn" data-do="close-layer">${icon("close")}</button></div></div>
+      <div class="sheet-body">${skeleton()}</div></aside>`;
+    try {
+      const p = await API.get(`/api/item?location_id=${encodeURIComponent(S.locationId)}&item_id=${encodeURIComponent(itemId)}&date=${S.date}`);
+      layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+        <aside class="sheet wide">
+          <div class="sheet-head">
+            <div><h2>${e(p.item.name)}</h2>
+              <p>${e(p.item.category)} · ${money(p.item.price, true)} · ${e(p.weekday)} ${e(dShort(p.date))}</p></div>
+            <div style="margin-left:auto;display:flex;gap:6px">
+              <button class="btn sm" data-do="adjust" data-item="${e(p.item.id)}" data-name="${e(p.item.name)}" data-qty="${p.today.expected}">Set my own number</button>
+              <button class="icon-btn" data-do="close-layer">${icon("close")}</button></div>
+          </div>
+          <div class="sheet-body">${itemSheetBody(p)}</div>
+        </aside>`;
+    } catch (error) {
+      toast(error.message, "error");
+      closeLayer();
+    }
+  }
+
+  function itemSheetBody(p) {
+    const t = p.today, prep = p.prep, dist = p.distribution, wp = p.weekday_profile;
+    const established = (p.drivers || []).filter((d) => d.verdict === "established");
+    const watching = (p.drivers || []).filter((d) => d.verdict === "watching");
+    const rejected = (p.drivers || []).filter((d) => d.verdict === "rejected");
+
+    return `<div class="stack">
+      <section class="tiles" style="grid-template-columns:repeat(4,minmax(0,1fr))">
+        ${tile("Make today", num(prep.quantity ?? t.expected),
+          (prep.quantity ?? t.expected) > t.expected
+            ? `The model expects <b>${num(t.expected)}</b> to sell. Make more than that, because running out costs more than throwing away.`
+            : `The model expects <b>${num(t.expected)}</b> to sell.`,
+          prep.fractile_percent ? `Covers ${prep.fractile_percent}% of the days that could happen` : "From the model")}
+        ${tile("A normal " + p.weekday, num(t.normal),
+          `<b>${t.difference >= 0 ? "+" : ""}${num(t.difference)}</b> against that today.`,
+          `Read off ${num(dist.days || 0)} comparable days`)}
+        ${tile("Honest range", `${num(dist.today_low ?? t.low)} to ${num(dist.today_high ?? t.high)}`,
+          `On a day like this one, the middle half lands between <b>${num(dist.today_p25 ?? t.low)}</b> and <b>${num(dist.today_p75 ?? t.high)}</b>.`,
+          `${e(dist.basis || "past days")} ran ${num(dist.lowest ?? 0)} to ${num(dist.highest ?? 0)}`)}
+        ${tile("Worth today", money(t.revenue),
+          `<b>${p.standing.revenue_share_percent}%</b> of takings over 90 days, ranked ${num(p.standing.revenue_rank)} of ${num(p.standing.of_items)}.`,
+          `${num(p.standing.units_90_days)} sold in the last 90 days`)}
+      </section>
+
+      ${prep.levels ? `<section class="card">
+        <div class="card-head"><div><h2>How many to make</h2>
+          <p>${e(prep.reason)}</p></div></div>
+        <div class="tablewrap"><table class="dt" style="min-width:600px"><thead><tr>
+          <th>If you make</th><th class="num right">Chance you run out</th>
+          <th class="num right">Typical left over</th><th class="num right">Typical missed sales</th>
+          <th class="num right">Cost of being wrong</th></tr></thead><tbody>
+          ${prep.levels.map((l) => `<tr class="${l.label === "This number" ? "highlight" : ""}">
+            <td class="name"><b>${num(l.quantity)}</b>${l.label === "This number" ? `<small>what we suggest</small>` : `<small>${e(l.label.toLowerCase())}</small>`}</td>
+            <td class="num right ${l.sell_out_percent > 40 ? "down" : ""}">${l.sell_out_percent}%</td>
+            <td class="num right">${l.typical_leftover}</td>
+            <td class="num right">${l.typical_missed}</td>
+            <td class="num right">${money(l.cost_of_being_wrong, true)}</td></tr>`).join("")}
+        </tbody></table></div>
+        <div class="card-foot">Worked from ${num(dist.days || 0)} comparable days. Leftovers are costed at food cost, missed sales at lost margin.</div>
+      </section>` : ""}
+
+      <section class="card">
+        <div class="card-head"><div><h2>Which days it belongs to</h2>
+          <p>${wp.matters
+            ? `The day of the week explains about ${wp.explains_percent}% of the swing in this item. ${wp.busiest_day}s run ${wp.spread_percent}% ahead of ${wp.quietest_day}s.`
+            : "The day of the week does not explain this item's swing, which is unusual."}</p></div>
+          <div class="spacer"></div>
+          <span class="tag ${wp.matters ? "up" : "plain"}">${e(wp.strength)} evidence</span></div>
+        <div class="tablewrap"><table class="dt" style="min-width:600px"><thead><tr>
+          <th>Day</th><th class="num right">Typical</th><th class="num right">Middle half</th>
+          <th class="num right">Quietest</th><th class="num right">Busiest</th>
+          <th class="num right">Against all days</th><th class="num right">Days seen</th></tr></thead><tbody>
+          ${wp.days.filter((d) => d.days).map((d) => `<tr class="${d.weekday === p.weekday ? "highlight" : ""}">
+            <td class="name"><b>${e(d.weekday)}</b>${d.weekday === p.weekday ? `<small>today</small>` : ""}</td>
+            <td class="num right plan">${d.typical}</td>
+            <td class="num right muted">${d.low} to ${d.high}</td>
+            <td class="num right muted">${d.quietest}</td>
+            <td class="num right muted">${d.busiest}</td>
+            <td class="num right ${d.vs_all_days_percent >= 0 ? "up" : "down"}">${pct(d.vs_all_days_percent)}</td>
+            <td class="num right muted">${d.days}</td></tr>`).join("")}
+        </tbody></table></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h2>What actually moves it</h2>
+</div></div>
+        ${(p.drivers || []).length ? `<div class="card-body" style="padding-bottom:0"><p class="lede">${
+          established.filter((d) => d.matters).length
+            ? `Of ${p.drivers.length} conditions tested, ${established.length} hold up, and ${established.filter((d) => d.matters).length === 1 ? "one is" : `${established.filter((d) => d.matters).length} are`} big enough to change what you make.`
+            : established.length
+              ? `Of ${p.drivers.length} conditions tested, ${established.length === 1 ? "one holds" : `${established.length} hold`} up, but ${established.length === 1 ? "it moves" : "they move"} this item by less than one on a typical day. Nothing here should change your number today.`
+              : `${p.drivers.length} conditions tested. None of them hold up. What this item does is mostly about the day of the week, not the weather or the calendar.`
+        }</p></div>` : ""}
+        ${established.length ? `<div class="tablewrap"><table class="dt" style="min-width:660px"><thead><tr>
+          <th>Condition</th><th class="num right">Effect</th><th class="num right">Today</th>
+          <th class="num right">Chance it is noise</th><th>Evidence</th></tr></thead><tbody>
+          ${established.map((d) => `<tr>
+            <td class="name"><b>${e(d.label)}</b><small>${e(d.phrase)}</small></td>
+            <td class="num right ${d.effect_percent >= 0 ? "up" : "down"}">${d.effect_percent >= 0 ? "+" : ""}${d.effect_percent}%</td>
+            <td class="num right ${d.today_effect_units >= 0 ? "up" : "down"}">${d.today_effect_units >= 0 ? "+" : ""}${d.today_effect_units}</td>
+            <td class="num right">${formatP(d.q)}</td>
+            <td class="small muted">${e(d.evidence)}${d.provisional ? " · thin sample" : ""}${d.note ? `<br><b>${e(d.note)}</b>` : ""}</td></tr>`).join("")}
+        </tbody><tfoot><tr><td colspan="2"><b>Added up</b><small>every condition above, together</small></td>
+          <td class="num right ${established.reduce((s, d) => s + d.today_effect_units, 0) >= 0 ? "up" : "down"}"><b>${established.reduce((s, d) => s + d.today_effect_units, 0) >= 0 ? "+" : ""}${Math.round(established.reduce((s, d) => s + d.today_effect_units, 0) * 10) / 10}</b></td>
+          <td colspan="2" class="small muted">against a normal ${e(p.today.weekday || "day")}. This total will not always match the number at the top.</td></tr></tfoot></table></div>`
+        : `<div class="empty">${icon("empty")}<b>Nothing outside the restaurant moves this item</b>
+             <span>Once the day of the week is accounted for, no condition tested here changes it enough to be sure of.</span></div>`}
+        ${watching.length ? `<div class="card-body" style="padding-top:0">
+          <p class="small muted" style="margin-bottom:8px">Leaning one way, not proven. Not enough to act on.</p>
+          ${watching.map((d) => `<p class="small muted" style="margin-bottom:6px"><b>${e(d.label)}</b> looks like ${d.effect_percent >= 0 ? "+" : ""}${d.effect_percent}% ${e(d.phrase)}, but the chance of seeing that from noise alone is ${formatP(d.q)}. ${e(d.note)}</p>`).join("")}
+        </div>` : ""}
+        ${rejected.length ? `<details class="context-disclosure" style="margin:0 18px 16px">
+          <summary>${rejected.length} conditions tested that did not hold up</summary>
+          <div class="context-detail">
+            ${rejected.map((d) => `<p><b>${e(d.label)}</b>: ${d.effect_percent >= 0 ? "+" : ""}${d.effect_percent}% per unit, but the chance of seeing that from noise alone is ${formatP(d.q)}. ${e(d.evidence)}.</p>`).join("")}
+          </div></details>` : ""}
+      </section>
+
+      <div class="brief-grid lower-grid" style="border:0">
+        <section class="card">
+          <div class="card-head"><div><h2>Has it changed?</h2></div></div>
+          <div class="card-body">
+            ${p.trend.recent_average !== null && p.trend.recent_average !== undefined ? `
+              <p class="lede">The last four weeks averaged <b>${p.trend.recent_average}</b> a day against <b>${p.trend.prior_average}</b> in the four weeks before.
+              ${p.trend.moved
+                ? `That is a real move: a difference this size would come up by chance about ${formatP(p.trend.p)} of the time.`
+                : `That is not a real move. A gap this size is ordinary week-to-week variation.`}</p>
+              ${p.trend.same_weeks_last_year ? `<p class="lede" style="margin-top:10px">The same weeks last year averaged <b>${p.trend.same_weeks_last_year}</b>.</p>` : ""}
+              ${p.trend.long_run ? `<p class="small muted" style="margin-top:10px">Over the whole record it is moving ${p.trend.long_run.per_year >= 0 ? "up" : "down"} about ${Math.abs(p.trend.long_run.per_year)} a day per year, ${e(p.trend.long_run.strength)} evidence.</p>` : ""}
+            ` : `<p class="muted small">Not enough history yet.</p>`}
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><div><h2>When it sells</h2></div></div>
+          <div class="card-body">
+            <p class="lede">Busiest at <b>${e(p.hourly.busiest || "no clear hour")}</b>, which takes ${p.hourly.busiest_share}% of the day.
+            Half of them are gone by <b>${e(p.hourly.half_sold_by || "the end of service")}</b>.</p>
+            <div class="hours" style="height:118px;margin-top:14px">${p.hourly.hours.map((h) => `
+              <div class="hourcol" title="${e(h.label)}: ${h.per_day} a day, ${h.share_percent}% of this item">
+                <div class="track"><i style="height:${Math.max(4, (h.share_percent / Math.max(1, p.hourly.busiest_share)) * 100)}%"></i></div>
+                <span>${e(h.label.replace(" ", ""))}</span></div>`).join("")}</div>
+            <p class="small muted" style="margin-top:10px">Averaged over the last ${p.hourly.window_days} days.</p>
+          </div>
+        </section>
+      </div>
+
+      ${p.related.length ? `<section class="card">
+        <div class="card-head"><div><h2>What it moves with</h2>
+          <p>A negative pairing means people are choosing between them.</p></div></div>
+        <div class="tablewrap"><table class="dt" style="min-width:560px"><thead><tr>
+          <th>Item</th><th>Relationship</th><th class="num right">Strength</th><th class="num right">Days compared</th></tr></thead><tbody>
+          ${p.related.map((r) => `<tr class="clickable" data-item-sheet="${e(r.item_id)}">
+            <td class="name"><b>${e(r.name)}</b></td>
+            <td class="${r.r > 0 ? "up" : "down"}">${e(r.kind)}</td>
+            <td class="num right">${Math.abs(r.r)}</td>
+            <td class="num right muted">${num(r.days)}</td></tr>`).join("")}
+        </tbody></table></div>
+        <div class="card-foot">Strength runs from 0 to 1. Anything above about 0.4 is a strong pairing for daily food sales.</div>
+      </section>` : ""}
+
+      <div class="brief-grid lower-grid" style="border:0">
+        ${p.accuracy.days ? `<section class="card">
+          <div class="card-head"><div><h2>How well we call this one</h2></div></div>
+          <div class="card-body">
+            <p class="lede">Over the last ${noun(p.accuracy.days, "scored day")} this item has been called <b>${p.accuracy.accuracy}%</b> right,
+            missing by <b>${p.accuracy.average_miss}</b> a day on average. Lean: ${e(p.accuracy.bias_direction)}.</p>
+            ${p.accuracy.sold_out_days ? `<p class="lede down" style="margin-top:8px">It ran out during service on ${noun(p.accuracy.sold_out_days, "of those days")}.</p>` : ""}
+          </div>
+        </section>` : ""}
+
+        ${p.unusual.length ? `<section class="card">
+          <div class="card-head"><div><h2>Days it behaved oddly</h2>
+            <p>Days this item did something its own record cannot account for.</p></div></div>
+          <div class="card-body" style="display:grid;gap:9px">
+            ${p.unusual.map((u) => `<div style="display:grid;grid-template-columns:96px 1fr auto;gap:12px;align-items:baseline;font-size:12.5px">
+              <b>${e(dShort(u.date))}</b>
+              <span class="muted">${e(u.weekday)}, sold ${num(u.sold)}. ${e(u.note)}</span>
+              <span class="${u.sigma >= 0 ? "up" : "down"} tnum">${u.above_normal >= 0 ? "+" : ""}${u.above_normal}</span>
+            </div>`).join("")}
+          </div>
+        </section>` : ""}
+      </div>
+
+      ${p.composition ? `<section class="card">
+        <div class="card-head"><div><h2>What goes into it</h2><p>${e(p.composition.summary)}</p></div>
+          <div class="spacer"></div><span class="tag ${p.composition.confidence === "high" ? "up" : "plain"}">${e(p.composition.confidence)} confidence</span></div>
+        <div class="tablewrap"><table class="dt" style="min-width:520px"><thead><tr>
+          <th>Part</th><th>Role</th><th class="num right">Per ${e(p.item.unit)}</th>
+          <th class="num right">For ${num(prep.quantity ?? p.today.expected)} today</th></tr></thead><tbody>
+          ${p.composition.components.map((c) => `<tr>
+            <td class="name"><b>${e(c.name)}</b></td>
+            <td class="muted">${e(c.role)}</td>
+            <td class="num right">${e(c.quantity || "not stated")}</td>
+            <td class="num right">${e(scaleQuantity(c.quantity, prep.quantity ?? p.today.expected))}</td></tr>`).join("")}
+        </tbody></table></div>
+      </section>` : ""}
+
+      
+    </div>`;
+  }
+
+  // Multiply a per-unit amount up to today's batch when the amount is numeric.
+  function scaleQuantity(quantity, batch) {
+    if (!quantity) return "";
+    const match = String(quantity).match(/([\d.]+)\s*(g|kg|oz|lb|ml|l|cup|cups|slice|slices|piece|pieces|patty|patties|bun|buns|egg|eggs|set|sets|portion|portions|box|boxes|bag|bags|carton|cartons|scoop|scoops|coat|coats|pinch|plate|plates|wrap|wraps|sleeve|sleeves|ball|balls|lid|lids|straw|straws)\b/i);
+    if (!match) return "";
+    const total = Number(match[1]) * Number(batch || 0);
+    if (!Number.isFinite(total) || total <= 0) return "";
+    let unit = match[2].toLowerCase();
+    let value = total;
+    if (unit === "g" && total >= 1000) { value = total / 1000; unit = "kg"; }
+    if (unit === "ml" && total >= 1000) { value = total / 1000; unit = "l"; }
+    if (unit === "oz" && total >= 16) { value = total / 16; unit = "lb"; }
+    const rounded = value >= 100 ? Math.round(value) : Math.round(value * 10) / 10;
+    // Weights and volumes stay as they are; countable things take a plural.
+    const countable = { slice: "slices", piece: "pieces", patty: "patties", bun: "buns", egg: "eggs",
+      set: "sets", portion: "portions", box: "boxes", bag: "bags", carton: "cartons", scoop: "scoops",
+      coat: "coats", plate: "plates", wrap: "wraps", sleeve: "sleeves", ball: "balls", lid: "lids",
+      straw: "straws", cup: "cups" };
+    if (rounded !== 1 && countable[unit]) unit = countable[unit];
+    return `${rounded.toLocaleString()} ${unit}`;
+  }
+
+  function formatP(p) {
+    const value = Number(p);
+    if (!Number.isFinite(value)) return "unknown";
+    if (value < 0.0001) return "under 1 in 10,000";
+    if (value < 0.001) return "about 1 in 1,000";
+    if (value < 0.01) return `about 1 in ${Math.round(1 / value)}`;
+    if (value < 0.2) return `about 1 in ${Math.round(1 / value)}`;
+    return `${Math.round(value * 100)}%`;
+  }
+
+  /* ---------- first run tutorial ---------- */
+  // Six stops. Each one lands on a real part of the real product with the
+  // operator's own numbers already in it, because a tour of empty boxes teaches
+  // nothing. Advancing switches the screen, scrolls the thing into view, and
+  // lifts it clear of the blur so it is the one sharp thing on the page.
+  const TOUR = [
+    {
+      view: "today",
+      target: ".tiles",
+      title: "What today is worth",
+      body: "What you will ring, and what is left after the food and the hours. Both move as the day does.",
+      place: "bottom",
+    },
+    {
+      view: "today",
+      target: "#itemtable",
+      title: "How many to make",
+      body: "A number for every item, not just the big ones. Make sits above what will sell, because running out costs more than throwing away.",
+      place: "top",
+    },
+    {
+      view: "today",
+      target: "#whytoday",
+      title: "Why it says that",
+      body: "Every reason is tested against your own sales before it is shown. If nothing is really moving today, it says that instead of inventing something.",
+      place: "top",
+    },
+    {
+      view: "history",
+      target: "#dayrows",
+      title: "We mark our own work",
+      body: "Every closed day, what it rang, what it kept, and how close the call was. The score is always against what was said before service, never a number we revised later.",
+      place: "top",
+    },
+    {
+      view: "menu",
+      target: "#menulist",
+      title: "Down to the ingredient",
+      body: "What each item is made of, so a busy Saturday turns into how much beef and how many buns. Correct anything we read wrong and it stays corrected.",
+      place: "top",
+    },
+    {
+      view: "today",
+      target: "#itemtable .dt tbody tr",
+      title: "Open anything",
+      body: "Click any item name anywhere in Quantify for its whole record: which days it belongs to, what actually moves it, and how well we have called it before.",
+      place: "center",
+    },
+  ];
+
+  function tourEligible() {
+    if (localStorage.getItem("quantify.tour") === "done") return false;
+    return S.view === "today" && !!S.data;
+  }
+
+  function startTour(fromStart = true) {
+    if (fromStart) S.tour = { step: 0 };
+    document.body.classList.add("tour-on");
+    paintTour();
+  }
+
+  function endTour(finished) {
+    document.body.classList.remove("tour-on");
+    layer.innerHTML = "";
+    S.tour = null;
+    localStorage.setItem("quantify.tour", "done");
+    if (finished) tourFinale();
+  }
+
+  function tourFrame(box, pad) {
+    if (!box) return `<div class="tour-veil"></div>`;
+    const top = Math.max(0, box.top - pad);
+    const bottom = Math.min(window.innerHeight, box.bottom + pad);
+    const left = Math.max(0, box.left - pad);
+    const right = Math.min(window.innerWidth, box.right + pad);
+    const band = `top:${top}px;height:${Math.max(0, bottom - top)}px`;
+    return `
+      <div class="tour-veil" style="top:0;left:0;right:0;height:${top}px"></div>
+      <div class="tour-veil" style="top:${bottom}px;left:0;right:0;bottom:0"></div>
+      <div class="tour-veil" style="${band};left:0;width:${left}px"></div>
+      <div class="tour-veil" style="${band};left:${right}px;right:0"></div>
+      <div class="tour-ring" style="top:${top}px;left:${left}px;width:${Math.max(0, right - left)}px;height:${Math.max(0, bottom - top)}px"></div>`;
+  }
+
+  async function paintTour() {
+    const stop = TOUR[S.tour.step];
+    if (!stop) return endTour(true);
+
+    if (stop.view && S.view !== stop.view) {
+      S.view = stop.view;
+      localStorage.setItem("quantify.view", S.view);
+      await loadView();
+      // loadView repaints the whole screen, so the tour card has to go back on.
+      document.body.classList.add("tour-on");
+    }
+
+    const node = stop.target ? document.querySelector(stop.target) : null;
+    if (node) {
+      // A card taller than half the screen is scrolled to its top, so its
+      // heading and first rows stay in sight with the tour card below them.
+      const tall = node.getBoundingClientRect().height > window.innerHeight * 0.55;
+      node.scrollIntoView({ behavior: "smooth", block: tall ? "start" : "center" });
+      await new Promise((resolve) => setTimeout(resolve, 420));
+      if (tall) window.scrollBy({ top: -80, behavior: "smooth" });
+      await new Promise((resolve) => setTimeout(resolve, tall ? 260 : 0));
+    } else {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      await new Promise((resolve) => setTimeout(resolve, 260));
+    }
+    const box = node ? node.getBoundingClientRect() : null;
+    const last = S.tour.step === TOUR.length - 1;
+    layer.innerHTML = `${tourFrame(box, 8)}
+      <div class="tour-card ${stop.place || "center"}" role="dialog" aria-modal="true" aria-label="${e(stop.title)}">
+        <div class="tour-top">
+          <span class="tour-count">${S.tour.step + 1} of ${TOUR.length}</span>
+          <button class="tour-skip" data-do="tour-end">Skip</button>
+        </div>
+        <h2>${e(stop.title)}</h2>
+        <p>${e(stop.body)}</p>
+        <div class="tour-foot">
+          <button class="tour-back" data-do="tour-back" ${S.tour.step === 0 ? "disabled" : ""} aria-label="Back">
+            ${icon("chevL")}
+          </button>
+          <div class="tour-dots">${TOUR.map((_, i) =>
+            `<i class="${i === S.tour.step ? "on" : ""}${i < S.tour.step ? " seen" : ""}"></i>`).join("")}</div>
+          <button class="btn accent" data-do="tour-next">${last ? "Finish" : "Next"}</button>
+        </div>
+      </div>`;
+    placeTourCard(node, stop.place);
+  }
+
+  function placeTourCard(node, place) {
+    const card = layer.querySelector(".tour-card");
+    if (!card) return;
+    if (!node || place === "center") return;  // the class already centres it
+    const box = node.getBoundingClientRect();
+    const size = card.getBoundingClientRect();
+    const pad = 18;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    const fitsAbove = box.top - size.height - pad >= pad;
+    const fitsBelow = box.bottom + size.height + pad <= vh - pad;
+    let top;
+    let left = box.left + box.width / 2 - size.width / 2;
+
+    if (place === "top" && fitsAbove) top = box.top - size.height - pad;
+    else if (place === "bottom" && fitsBelow) top = box.bottom + pad;
+    else if (fitsAbove) top = box.top - size.height - pad;
+    else if (fitsBelow) top = box.bottom + pad;
+    else if (vw - box.right >= size.width + pad * 2) {
+      // Room beside it. Better than on top of it.
+      left = box.right + pad;
+      top = Math.max(pad, Math.min(box.top, vh - size.height - pad));
+    } else if (box.left >= size.width + pad * 2) {
+      left = box.left - size.width - pad;
+      top = Math.max(pad, Math.min(box.top, vh - size.height - pad));
+    } else {
+      // A target that fills the screen. Nothing avoids covering some of it, so
+      // the card takes the bottom corner, where it hides the tail rather than
+      // the heading and the first rows.
+      left = vw - size.width - pad;
+      top = vh - size.height - pad;
+    }
+
+    card.style.top = Math.max(pad, Math.min(top, vh - size.height - pad)) + "px";
+    card.style.left = Math.max(pad, Math.min(left, vw - size.width - pad)) + "px";
+    card.style.transform = "none";
+  }
+
+  // The sign off. It holds long enough to read, then hands the app over.
+  function tourFinale() {
+    const node = document.createElement("div");
+    node.className = "finale";
+    node.innerHTML = `<div class="finale-in">
+      <div class="finale-tick">${icon("check")}</div>
+      <b>You are set up</b>
+      <span class="finale-mark">Quantify</span>
+    </div>`;
+    document.body.appendChild(node);
+    requestAnimationFrame(() => node.classList.add("run"));
+    setTimeout(() => {
+      node.classList.add("out");
+      setTimeout(() => node.remove(), 700);
+    }, 2400);
+  }
+
+  /* ---------- sheets ---------- */
+  async function openDaySheet(dateISO) {
+    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+      <aside class="sheet"><div class="sheet-head"><div><h2>${e(dLong(dateISO))}</h2><p>Loading the day</p></div>
+      <div style="margin-left:auto"><button class="icon-btn" data-do="close-layer">${icon("close")}</button></div></div>
+      <div class="sheet-body">${skeleton()}</div></aside>`;
+    try {
+      const d = await API.get(`/api/history/day?location_id=${encodeURIComponent(S.locationId)}&date=${dateISO}`);
+      const r = d.review || {};
+      const acc = d.accuracy;
+      const maxHour = Math.max(...(d.hourly || []).flatMap((h) => [h.actual, h.predicted]), 1);
+      layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+        <aside class="sheet">
+          <div class="sheet-head">
+            <div><h2>${e(dLong(dateISO))}</h2><p>${e(d.weekday)} · ${num(d.orders)} orders · ${money(d.sales)}</p></div>
+            <div style="margin-left:auto;display:flex;gap:6px">
+              <button class="btn sm" data-open-date="${dateISO}" data-do="close-layer">Open the plan</button>
+              <button class="icon-btn" data-do="close-layer">${icon("close")}</button></div>
+          </div>
+          <div class="sheet-body">
+            <section class="card"><div class="card-body">
+              <div class="eyebrow">How the call went</div>
+              <h3 style="margin-top:8px;font-size:16px;line-height:1.4">${e(r.headline || "")}</h3>
+              <p class="lede" style="margin-top:10px">${e(r.where_error_sat || "")}</p>
+              <p class="lede" style="margin-top:8px">${e(r.likely_reason || "")}</p>
+              <p class="lede" style="margin-top:8px"><b>${e(r.matters || "")}</b></p>
+              ${acc !== null ? `<div class="accmeter" style="margin-top:14px">
+                <div class="top"><b>${acc}% per item</b><small>day total ${num(d.predicted_units)} called, ${num(d.units)} sold</small></div>
+                <div class="line"><i class="${acc >= 90 ? "" : acc >= 80 ? "mid" : "low"}" style="width:${Math.max(4, acc)}%"></i></div></div>` : ""}
+            </div></section>
+
+            <section class="tiles" style="grid-template-columns:repeat(${d.costs ? 3 : 2},minmax(0,1fr))">
+              ${tile("Rang up", money(d.sales), `<b>${num(d.units)}</b> items across <b>${num(d.orders)}</b> orders.`, `Average order ${money(d.average_order, true)}`)}
+              ${d.costs ? tile("Kept", money(d.costs.gross_profit),
+                `<b>${money(d.costs.cogs)}</b> in food and <b>${money(d.costs.labour)}</b> in wages came out of that${d.costs.other ? `, plus <b>${money(d.costs.other)}</b> fixed` : ""}.`,
+                `About ${d.costs.margin_percent}% of what was rung`) : ""}
+              ${tile("Called", d.predicted_sales !== null ? money(d.predicted_sales) : "Not scored", d.predicted_units !== null ? `<b>${num(d.predicted_units)}</b> items expected.` : "This day has not been scored yet.", `Called the day before`)}
+            </section>
+
+            ${(d.hourly || []).length ? `<section class="card">
+              <div class="card-head"><div><h2>Hour by hour</h2><p>Solid is what sold. The outline is what was called.</p></div></div>
+              <div class="card-body"><div class="hours">${d.hourly.map((h) => `
+                <div class="hourcol" title="${clock(String(h.hour).padStart(2, "0") + ":00")}: ${num(h.actual)} sold, ${num(h.predicted)} called">
+                  <div class="track"><i class="ghost" style="height:${Math.max(3, (h.predicted / maxHour) * 100)}%"></i><i style="height:${Math.max(3, (h.actual / maxHour) * 100)}%"></i></div>
+                  <span>${((h.hour % 12) || 12)}</span></div>`).join("")}</div></div>
+            </section>` : ""}
+
+            ${(d.item_scores || []).length ? `<section class="card">
+              <div class="card-head"><div><h2>Item by item</h2><p>Sorted by how far off each one was.</p></div></div>
+              <div class="tablewrap"><table class="dt" style="min-width:0"><thead><tr>
+                <th>Item</th><th class="num right">Called</th><th class="num right">Sold</th><th class="num right">Gap</th></tr></thead><tbody>
+                ${d.item_scores.map((row) => `<tr>
+                  <td class="name"><b>${e(row.name)}</b>${row.sold_out ? `<small class="down">ran out during service</small>` : ""}</td>
+                  <td class="num right">${num(row.predicted)}</td><td class="num right">${num(row.actual)}</td>
+                  <td class="num right ${row.gap >= 0 ? "up" : "down"}">${row.gap >= 0 ? "+" : ""}${num(row.gap)}</td></tr>`).join("")}
+              </tbody></table></div>
+            </section>` : ""}
+
+            <section class="card">
+              <div class="card-head"><div><h2>Where the orders came from</h2></div></div>
+              <div class="card-body" style="display:grid;gap:10px">
+                ${d.channels.map((c) => `<div class="mixrow">
+                  <div class="who"><b>${e(c.channel)}</b><small>${num(c.orders)} orders</small></div>
+                  <div class="mixbar"><i class="role-produce" style="width:${Math.max(3, (c.sales / Math.max(1, d.sales)) * 100)}%"></i></div>
+                  <span class="qty">${money(c.sales)}</span></div>`).join("")}
+              </div>
+            </section>
+          </div>
+        </aside>`;
+    } catch (error) {
+      toast(error.message, "error");
+      closeLayer();
+    }
+  }
+
+  function closeLayer() {
+    layer.innerHTML = "";
+    S.cancelFlow = null;
+  }
+
+  function emptyState(title, detail) {
+    return `<div class="empty">${icon("empty")}<b>${e(title)}</b><span>${e(detail)}</span></div>`;
+  }
+
+  /* ---------- live pulse ---------- */
+  function startPulse() {
+    clearInterval(startPulse._t);
+    clearInterval(startPulse._clock);
+    const check = async () => {
+      try {
+        const result = await API.get(`/api/pulse?location_id=${encodeURIComponent(S.locationId)}`);
+        S.pulse.checkedAt = Date.now();
+        const changed = S.pulse.version && S.pulse.version !== result.version;
+        S.pulse.version = result.version;
+        S.pulse.live = true;
+        if (changed && !layer.innerHTML) await loadView(true);
+        else paintPulse();
+      } catch (_) {
+        S.pulse.live = false;
+        paintPulse();
+      }
+    };
+    check();
+    startPulse._t = setInterval(check, 11000);
+    startPulse._clock = setInterval(paintPulse, 1000);
+  }
+
+  function paintPulse() {
+    const dot = document.querySelector(".pulse-dot");
+    const text = document.getElementById("pulse-text");
+    if (!dot || !text) return;
+    dot.className = `pulse-dot ${S.pulse.live ? "" : "stale"}`;
+    if (!S.pulse.live) { text.textContent = "Reconnecting"; return; }
+    const since = Math.round((Date.now() - S.pulse.checkedAt) / 1000);
+    text.textContent = since <= 3 ? "Live, updating on its own" : `Checked ${since}s ago`;
+  }
+
+  /* ---------- infinite scroll ---------- */
+  let observer = null;
+  function watchScroll() {
+    if (observer) observer.disconnect();
+    const sentinel = document.getElementById("sentinel");
+    if (!sentinel) return;
+    observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        if (S.historyTab === "days") moreDays();
+        else if (S.historyTab === "orders") moreOrders();
+      }
+    }, { rootMargin: "300px" });
+    observer.observe(sentinel);
+  }
+
+  async function moreDays() {
+    if (S.history.loading || !S.history.hasMore || !S.history.nextBefore) return;
+    S.history.loading = true;
+    try {
+      const start = rangeStart(S.history.range);
+      const page = await API.get(`/api/history/days?location_id=${encodeURIComponent(S.locationId)}&before=${S.history.nextBefore}&limit=18${start ? `&start=${start}` : ""}`);
+      S.history.days = S.history.days.concat(page.days);
+      S.history.nextBefore = page.next_before;
+      S.history.hasMore = page.has_more;
+    } catch (error) { toast(error.message, "error"); }
+    S.history.loading = false;
+    render(true);
+  }
+
+  async function moreOrders() {
+    if (S.orders.loading || !S.orders.hasMore || !S.orders.nextDate) return;
+    S.orders.loading = true;
+    try {
+      const start = rangeStart(S.orders.range);
+      const page = await API.get(`/api/history/orders?location_id=${encodeURIComponent(S.locationId)}&before=${S.orders.nextDate}&skip=${S.orders.nextSkip}&limit=40${start ? `&start=${start}` : ""}`);
+      S.orders.rows = S.orders.rows.concat(page.orders);
+      S.orders.nextDate = page.next_before_date;
+      S.orders.nextSkip = page.next_skip;
+      S.orders.hasMore = page.has_more;
+    } catch (error) { toast(error.message, "error"); }
+    S.orders.loading = false;
+    render(true);
+  }
+
+  /* ---------- interactions ---------- */
+  document.addEventListener("click", async (event) => {
+    const link = event.target.closest("a[data-link]");
+    if (link) { event.preventDefault(); return go(link.dataset.link); }
+    const anchor = event.target.closest("a[data-scroll]");
+    if (anchor) {
+      event.preventDefault();
+      document.getElementById(anchor.dataset.scroll)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    const target = event.target.closest("button, a[data-do]");
+    if (!target) {
+      const row = event.target.closest("[data-item-sheet]");
+      if (row) return openItemSheet(row.dataset.itemSheet);
+      return;
+    }
+
+    if (target.dataset.view) {
+      S.view = target.dataset.view;
+      localStorage.setItem("quantify.view", S.view);
+      window.scrollTo(0, 0);
+      return loadView();
+    }
+    if (target.dataset.htab) { S.historyTab = target.dataset.htab; return loadView(); }
+    if (target.dataset.owin) { S.order.days = Number(target.dataset.owin); return loadView(); }
+    if (target.dataset.oadj) return orderAdjust(target.dataset.oadj, Number(target.dataset.step));
+    if (target.dataset.odrop) {
+      S.order.extras.splice(Number(target.dataset.odrop), 1);
+      return render();
+    }
+    if (target.dataset.stab) {
+      S.settingsTab = target.dataset.stab;
+      if (S.view !== "settings") { S.view = "settings"; localStorage.setItem("quantify.view", S.view); }
+      if (target.dataset.stab === "costs" && !S.costs) return loadCosts();
+      return S.view === "settings" ? render() : loadView();
+    }
+    if (target.dataset.drange) { S.history.range = target.dataset.drange; return loadView(); }
+    if (target.dataset.orange) { S.orders.range = target.dataset.orange; return loadView(); }
+    if (target.dataset.day) { S.date = addDays(S.date, Number(target.dataset.day)); return loadView(); }
+    if (target.dataset.openDate) {
+      S.date = target.dataset.openDate; S.view = "today"; closeLayer();
+      window.scrollTo(0, 0); return loadView();
+    }
+    if (target.dataset.dayDetail) return openDaySheet(target.dataset.dayDetail);
+    if (target.dataset.itemSheet) return openItemSheet(target.dataset.itemSheet);
+    if (target.dataset.expand) {
+      const id = target.dataset.expand;
+      if (S.open.has(id)) S.open.delete(id); else S.open.add(id);
+      return render(true);
+    }
+    if (target.dataset.pick) {
+      S.onboarding.values[target.dataset.pick] = target.dataset.value;
+      target.parentElement.querySelectorAll("[data-pick]").forEach((node) => {
+        node.classList.toggle("on", node.dataset.value === target.dataset.value);
+      });
+      return;
+    }
+    if (target.dataset.toggleGoal) {
+      const goal = target.dataset.toggleGoal;
+      const goals = S.onboarding.values.goals || [];
+      const next = goals.includes(goal) ? goals.filter((g) => g !== goal) : goals.concat(goal);
+      S.onboarding.values.goals = next;
+      target.classList.toggle("on", next.includes(goal));
+      return;
+    }
+    if (target.dataset.place) {
+      const holder = target.closest(".typeahead");
+      const field = holder ? holder.querySelector("[data-typeahead]") : null;
+      if (field) field.value = target.dataset.place;
+      if (field && field.id === "place-input") {
+        S.onboarding.values.place = target.dataset.place;
+        S.onboarding.suggestions = [];
+      }
+      paintSuggestions(holder, []);
+      API.get(`/api/timezone?q=${encodeURIComponent(target.dataset.place)}`).then((r) => {
+        if (field && field.id === "place-input") S.onboarding.tz = r.match;
+        const hint = holder && holder.parentElement
+          ? holder.parentElement.querySelector("[data-tz-hint]") : document.querySelector("[data-tz-hint]");
+        if (hint) hint.innerHTML = tzHint(r.match);
+      }).catch(() => {});
+      return;
+    }
+    if (target.dataset.cancelReason) {
+      S.cancelFlow.detail = document.getElementById("cancel-detail")?.value || "";
+      S.cancelFlow.reason = target.dataset.cancelReason;
+      return renderCancelModal();
+    }
+    if (target.dataset.demoTab) {
+      demoTabs.tab = target.dataset.demoTab;
+      const main = document.getElementById("screen-main");
+      if (main) main.innerHTML = screenPanel(S.show || {});
+      document.querySelectorAll("[data-demo-tab]").forEach((node) =>
+        node.classList.toggle("on", node.dataset.demoTab === demoTabs.tab));
+      return;
+    }
+    if (target.dataset.sync) return runSync(target);
+
+    const action = target.dataset.do;
+    if (!action) return;
+
+    switch (action) {
+      case "retry": return boot();
+      case "today": S.date = todayISO(); return loadView();
+      case "back-signin": return go("/login");
+      case "close-layer": return closeLayer();
+      case "copy":
+        await navigator.clipboard.writeText(target.dataset.copy || "");
+        return toast("Copied");
+      case "onb-back":
+        S.onboarding.step = Math.max(0, S.onboarding.step - 1);
+        return renderOnboarding();
+      case "onb-finish": return finishOnboarding();
+      case "save-costs": return saveCosts();
+      case "add-cost-line": {
+        const host = document.getElementById("cost-lines");
+        if (host) host.insertAdjacentHTML("beforeend", costLine({ name: "", amount: "", period: "month" }));
+        return;
+      }
+      case "drop-cost-line": {
+        const line = target.closest(".costline");
+        const host = document.getElementById("cost-lines");
+        if (line && host && host.children.length > 1) line.remove();
+        else if (line) line.querySelectorAll("input").forEach((node) => { node.value = ""; });
+        return;
+      }
+      case "preview-email": return previewEmail();
+      case "send-test": return sendTest();
+      case "adjust": return openAdjust(target);
+      case "clear-adjust": return clearAdjust(target);
+      case "compose": case "recompose": return composeItem(target.dataset.item, action === "recompose");
+      case "edit-composition": return editComposition(target.dataset.item);
+      case "menu-preview": case "menu-import": return menuImport(action === "menu-import");
+      case "switch-location": return openLocationPicker();
+      case "new-codes": return newRecoveryCodes();
+      case "resend-code": return resendCode();
+      case "mfa-on": return openTwoStep();
+      case "mfa-off": return openTwoStepOff();
+      case "signout":
+        try { await API.send("/api/auth/logout", "POST", {}); } catch (_) { /* expire locally */ }
+        clearInterval(startPulse._t); clearInterval(startPulse._clock);
+        API.setCsrf(""); S.auth = null; S.boot = null;
+        return go("/", true);
+      case "more-days": return moreDays();
+      case "more-orders": return moreOrders();
+      case "cancel-start": return cancelStart();
+      case "cancel-next": return cancelNext();
+      case "cancel-confirm": return cancelConfirm();
+      case "cancel-talk": return cancelTalk();
+      case "close-toast": toastNode.className = "toast"; return;
+      case "tour-next": S.tour.step += 1; return paintTour();
+      case "tour-back": S.tour.step = Math.max(0, S.tour.step - 1); return paintTour();
+      case "tour-end": return endTour(false);
+      case "tour-start": return startTour(true);
+      case "order-reset": S.order.edits = {}; return render();
+      case "order-copy": return orderCopy();
+      case "order-add": {
+        const name = prompt("What else do you want on the list?");
+        if (!name || !name.trim()) return;
+        const qty = prompt(`How much ${name.trim()}?`, "1");
+        S.order.extras.push({ name: name.trim(), qty: (qty || "1").trim() });
+        return render();
+      }
+      case "billing-portal": return billingRedirect("/api/billing/portal");
+      case "billing-checkout": return billingRedirect("/api/billing/checkout");
+      case "billing-resume":
+        try { const r = await API.send("/api/billing/resume", "POST", {}); toast(r.message); await loadView(); }
+        catch (error) { toast(error.message, "error"); }
+        return;
+      default: return;
+    }
+  });
+
+  document.addEventListener("change", (event) => {
+    const box = event.target.closest("[data-oqty]");
+    if (box) {
+      const value = Number(box.value);
+      S.order.edits[box.dataset.oqty] = Number.isFinite(value) && value >= 0 ? value : 0;
+      render();
+    }
+  });
+
+  document.addEventListener("change", async (event) => {
+    if (event.target.id === "date-picker") { S.date = event.target.value; return loadView(); }
+  });
+
+  document.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const data = Object.fromEntries(new FormData(form).entries());
+    const button = form.querySelector("button[type=submit]");
+    if (button) button.disabled = true;
+    try {
+      if (form.id === "f-create") {
+        const result = await API.send("/api/auth/setup", "POST", data);
+        API.setCsrf(result.csrf_token);
+        S.auth = { authenticated: true, user: { ...result.user, csrf_token: result.csrf_token } };
+        S.verification = result.verification;
+        S.auth.email_verification_required = true;
+        return go("/verify", true);
+      }
+      if (form.id === "f-confirm-email") {
+        await API.send("/api/auth/email/confirm", "POST", { code: data.code });
+        toast("Email confirmed");
+        return go("/app", true);
+      }
+      if (form.id === "f-signin") {
+        const result = await API.send("/api/auth/login", "POST", data);
+        if (result.mfa_required) { S.challenge = result.challenge; return renderSignInCode(); }
+        API.setCsrf(result.csrf_token);
+        return go("/app", true);
+      }
+      if (form.id === "f-code") {
+        const result = await API.send("/api/auth/verify", "POST", { challenge: S.challenge, code: data.code });
+        API.setCsrf(result.csrf_token);
+        S.challenge = "";
+        return go("/app", true);
+      }
+      if (form.id === "f-enable") {
+        await API.send("/api/auth/totp/enable", "POST", { code: data.code });
+        closeLayer();
+        toast("Two-step sign in is on");
+        return loadView();
+      }
+      if (form.id === "f-disable-mfa") {
+        await API.send("/api/auth/mfa/disable", "POST", { password: data.password });
+        closeLayer();
+        toast("Two-step sign in is off");
+        return loadView();
+      }
+      if (form.id === "f-onb") {
+        const goals = S.onboarding.values.goals;
+        Object.assign(S.onboarding.values, data);
+        S.onboarding.values.goals = goals;
+        S.onboarding.step += 1;
+        return renderOnboarding();
+      }
+      if (form.id === "f-location") {
+        const result = await API.send(`/api/location?location_id=${encodeURIComponent(S.locationId)}`, "POST", data);
+        toast(`Saved. Times run on ${result.timezone.label.toLowerCase()}.`);
+        S.boot = await API.get("/api/bootstrap");
+        return loadView();
+      }
+      if (form.id === "f-email") {
+        await API.send(`/api/email/preferences?location_id=${encodeURIComponent(S.locationId)}`, "POST",
+          { ...data, enabled: form.elements.enabled.checked, include_week_ahead: true });
+        toast("Morning email saved");
+        return loadView();
+      }
+      if (form.id === "f-composition") {
+        const components = String(data.parts || "").split(NEWLINE).map((line) => line.split("|").map((v) => v.trim()))
+          .filter((parts) => parts[0])
+          .map((parts) => ({
+            name: parts[0], role: (parts[1] || "other").toLowerCase(),
+            quantity: parts[2] || "", share: Number(parts[3] || 0) || 0, confidence: "high",
+          }));
+        await API.send(`/api/menu/composition?location_id=${encodeURIComponent(S.locationId)}`, "PUT",
+          { item_id: data.item_id, summary: data.summary, components });
+        closeLayer();
+        toast("Saved. This item is no longer an estimate.");
+        return loadView();
+      }
+      if (form.id === "f-adjust") {
+        await API.send(`/api/forecast/override?location_id=${encodeURIComponent(S.locationId)}`, "POST",
+          { item_id: data.item_id, date: S.date, quantity: Number(data.quantity), reason: data.reason });
+        closeLayer();
+        toast("Your number is in. The model result is kept alongside it.");
+        return loadView();
+      }
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      if (button) button.disabled = false;
+    }
+  });
+
+  /* ---------- actions ---------- */
+  async function finishOnboarding() {
+    try {
+      const v = S.onboarding.values;
+      await API.send("/api/onboarding", "POST", {
+        company: v.company, concept: v.concept, location_count: v.location_count,
+        goal: (v.goals || []).join(", "), pos: v.pos, place: v.place,
+        open_hour: Number(v.open_hour ?? 7), close_hour: Number(v.close_hour ?? 21),
+      });
+      toast("Welcome to Quantify");
+      return go("/app", true);
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  async function runSync(target) {
+    const provider = target.dataset.sync;
+    const label = target.textContent;
+    target.disabled = true;
+    target.textContent = "Working";
+    try {
+      await API.send(`/api/integrations/${provider}/sync?location_id=${encodeURIComponent(S.locationId)}`, "POST",
+        { days: provider === "pos" ? 1095 : provider === "events" ? 90 : 16, backfill_days: 1095 });
+      toast("Synced");
+      await loadView();
+    } catch (error) {
+      toast(error.message, "error");
+      target.disabled = false;
+      target.textContent = label;
+    }
+  }
+
+  async function previewEmail() {
+    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal wide"><div class="modal-head"><h2>Morning email</h2></div>
+      <div class="modal-body"><div class="skel" style="height:60vh;border-radius:10px"></div></div></div></div>`;
+    try {
+      const result = await API.get(`/api/email/preview?location_id=${encodeURIComponent(S.locationId)}&date=${S.date}`);
+      layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+        <div class="modal-wrap"><div class="modal wide">
+          <button class="modal-close" data-do="close-layer">${icon("close")}</button>
+          <div class="modal-head"><h2>${e(result.subject)}</h2><p>Exactly what lands in the inbox.</p></div>
+          <div class="modal-body"><iframe class="emailframe" title="Email preview"></iframe></div>
+        </div></div>`;
+      layer.querySelector("iframe").srcdoc = result.html;
+    } catch (error) { closeLayer(); toast(error.message, "error"); }
+  }
+
+  async function sendTest() {
+    try {
+      const result = await API.send(`/api/email/send-test?location_id=${encodeURIComponent(S.locationId)}`, "POST", { date: S.date });
+      toast(result.status === "outbox" ? "Written to data/outbox so you can open it" : "Test sent");
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  function openAdjust(target) {
+    const item = S.data.items.find((row) => row.item_id === target.dataset.item);
+    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal">
+        <button class="modal-close" data-do="close-layer">${icon("close")}</button>
+        <div class="modal-head"><h2>Set your own number for ${e(target.dataset.name)}</h2>
+          <p>The model's number was ${num(item?.model_expected ?? target.dataset.qty)}.</p></div>
+        <form id="f-adjust" class="modal-body">
+          <input type="hidden" name="item_id" value="${e(target.dataset.item)}">
+          <label class="field"><span>Make this many</span><input name="quantity" type="number" min="0" max="100000" value="${e(target.dataset.qty)}" required></label>
+          <label class="field"><span>Why</span><textarea name="reason" rows="3" required minlength="4" placeholder="Catering order for 30 confirmed this morning"></textarea>
+            <small>Whoever opens this tomorrow will see the reason next to the number.</small></label>
+          <div class="modal-foot" style="margin:6px -22px -20px">
+            ${item?.override ? `<button class="btn ghost" type="button" data-do="clear-adjust" data-item="${e(target.dataset.item)}">Go back to the model</button>` : ""}
+            <button class="btn accent" type="submit">Save</button>
+          </div>
+        </form>
+      </div></div>`;
+  }
+
+  async function clearAdjust(target) {
+    try {
+      await API.send(`/api/forecast/override?location_id=${encodeURIComponent(S.locationId)}`, "DELETE",
+        { item_id: target.dataset.item, date: S.date });
+      closeLayer();
+      toast("Back to the model result");
+      await loadView();
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  async function composeItem(itemId, force) {
+    toast("Reading the item");
+    try {
+      const result = force
+        ? await API.send(`/api/menu/composition?location_id=${encodeURIComponent(S.locationId)}`, "POST", { item_id: itemId })
+        : await API.get(`/api/menu/composition?location_id=${encodeURIComponent(S.locationId)}&item_id=${encodeURIComponent(itemId)}`);
+      const item = S.data.items.find((row) => row.id === itemId);
+      if (item) item.composition = result;
+      S.open.add(itemId);
+      render(true);
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  function editComposition(itemId) {
+    const item = S.data.items.find((row) => row.id === itemId);
+    const comp = item?.composition;
+    if (!comp) return toast("Nothing read for that item yet", "error");
+    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal wide">
+        <button class="modal-close" data-do="close-layer">${icon("close")}</button>
+        <div class="modal-head"><h2>Correct ${e(item.normalized_name)}</h2>
+          <p>Read from the till label. If you know the recipe, put it right.</p></div>
+        <form id="f-composition" class="modal-body">
+          <input type="hidden" name="item_id" value="${e(itemId)}">
+          <label class="field"><span>What this item is</span>
+            <input name="summary" value="${e(comp.summary)}" required></label>
+          <label class="field"><span>Parts, one per line</span>
+            <textarea name="parts" rows="8" required>${comp.components.map((c) => `${c.name} | ${c.role} | ${c.quantity || ""} | ${c.share}`).join(String.fromCharCode(10))}</textarea>
+            <small>Name, role, amount per unit, share of cost. Separate with a vertical bar.</small></label>
+          <div class="modal-foot" style="margin:6px -22px -20px">
+            <button class="btn ghost" type="button" data-do="close-layer">Cancel</button>
+            <button class="btn accent" type="submit">Save as confirmed</button>
+          </div>
+        </form>
+      </div></div>`;
+  }
+
+  async function menuImport(commit) {
+    const text = document.getElementById("menu-text")?.value || "";
+    if (!text.trim()) return toast("Paste some menu text first", "error");
+    try {
+      const result = await API.send(`/api/menu/import?location_id=${encodeURIComponent(S.locationId)}`, "POST", { text, commit });
+      if (commit) { toast(`${result.created} added, ${result.updated} updated`); return loadView(); }
+      document.getElementById("menu-preview-out").innerHTML = `
+        <div class="card" style="margin-top:14px;box-shadow:none;background:var(--surface-2)"><div class="card-body" style="display:grid;gap:8px">
+          <div class="eyebrow">Read as</div>
+          ${result.preview.map((row) => `<div style="display:flex;gap:10px;font-size:12.5px;align-items:baseline">
+            <b style="min-width:170px">${e(row.name)}</b>
+            <span class="muted">${e(row.interpretation.normalized_name)} · ${e(row.interpretation.item_family.replaceAll("-", " "))} · ${Math.round(row.interpretation.confidence * 100)}% sure</span>
+          </div>`).join("")}
+        </div></div>`;
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  function openLocationPicker() {
+    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal">
+        <button class="modal-close" data-do="close-layer">${icon("close")}</button>
+        <div class="modal-head"><h2>Switch location</h2></div>
+        <div class="modal-body"><div style="display:grid;gap:8px">
+          ${S.boot.locations.map((row) => `
+            <button type="button" class="choice ${row.id === S.locationId ? "on" : ""}" data-pick-location="${e(row.id)}">
+              <span class="radio"></span>
+              <div><b>${e(row.name)}</b><small>${e(row.concept)} · ${e(row.city)}, ${e(row.region)}</small></div></button>`).join("")}
+        </div></div>
+      </div></div>`;
+    layer.querySelectorAll("[data-pick-location]").forEach((node) => {
+      node.addEventListener("click", async () => {
+        S.locationId = node.dataset.pickLocation;
+        localStorage.setItem("quantify.location", S.locationId);
+        S.narrativeTried = "";
+        closeLayer();
+        await loadView();
+      });
+    });
+  }
+
+  async function resendCode() {
+    try {
+      const result = await API.send("/api/auth/email/resend", "POST", {});
+      if (result.already_verified) {
+        toast("That address is already confirmed");
+        return go("/app", true);
+      }
+      S.verification = result;
+      renderConfirmEmail(result);
+      toast(result.preview_code ? "New code ready below" : `Sent again to ${result.sent_to}`);
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  async function openTwoStep() {
+    try {
+      const setup = await API.get("/api/auth/mfa/setup");
+      layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+        <div class="modal-wrap"><div class="modal wide">
+          <button class="modal-close" data-do="close-layer">${icon("close")}</button>
+          <div class="modal-head"><h2>Turn on two-step sign in</h2>
+            <p>Scan the square with any authenticator app. After this, signing in asks for a six-digit code as well as your password.</p></div>
+          <div class="modal-body">
+            <div class="mfa-grid">
+              <div class="qr">${setup.qr_svg || ""}</div>
+              <div>
+                <ol class="steps">
+                  <li>Open Google Authenticator, 1Password, Authy, or whichever app you use.</li>
+                  <li>Scan the square. If you cannot scan, type the key below instead.</li>
+                  <li>Enter the six digits it shows.</li>
+                </ol>
+                <div class="keybox" style="margin-top:14px">
+                  <code>${e(setup.secret_grouped || "")}</code>
+                  <button class="icon-btn" type="button" data-do="copy" data-copy="${e(setup.secret || "")}" title="Copy key">${icon("copy")}</button>
+                </div>
+              </div>
+            </div>
+            <form id="f-enable" style="margin-top:6px">
+              <label class="field"><span>Code from the app</span>
+                <input class="code-input" name="code" inputmode="numeric" maxlength="6" required autofocus></label>
+              <div class="modal-foot" style="margin:14px -22px -20px">
+                <button class="btn ghost" type="button" data-do="close-layer">Not now</button>
+                <button class="btn accent" type="submit">Turn it on</button>
+              </div>
+            </form>
+          </div>
+        </div></div>`;
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  function openTwoStepOff() {
+    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal">
+        <button class="modal-close" data-do="close-layer">${icon("close")}</button>
+        <div class="modal-head"><h2>Turn off two-step sign in</h2>
+          <p>Your password alone will get into this account again. Enter it to confirm this is you.</p></div>
+        <form id="f-disable-mfa" class="modal-body">
+          <label class="field"><span>Your password</span><input name="password" type="password" autocomplete="current-password" required autofocus></label>
+          <p class="form-note">Any unused backup codes are destroyed, and the entry in your authenticator app stops working.</p>
+          <div class="modal-foot" style="margin:6px -22px -20px">
+            <button class="btn ghost" type="button" data-do="close-layer">Keep it on</button>
+            <button class="btn danger" type="submit">Turn it off</button>
+          </div>
+        </form>
+      </div></div>`;
+  }
+
+  async function newRecoveryCodes() {
+    try {
+      const result = await API.send("/api/auth/recovery-codes", "POST", {});
+      layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+        <div class="modal-wrap"><div class="modal">
+          <button class="modal-close" data-do="close-layer">${icon("close")}</button>
+          <div class="modal-head"><h2>Your backup codes</h2>
+            <p>Each one works once. Put them somewhere that is not your phone. This is the only time they are shown.</p></div>
+          <div class="modal-body"><div class="codegrid">${result.codes.map((c) => `<code>${e(c)}</code>`).join("")}</div></div>
+          <div class="modal-foot">
+            <button class="btn" data-do="copy" data-copy="${e(result.codes.join("\n"))}">Copy all</button>
+            <button class="btn primary" data-do="close-layer">Saved them</button></div>
+        </div></div>`;
+      await loadView(true);
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  async function cancelNext() {
+    const f = S.cancelFlow;
+    f.detail = document.getElementById("cancel-detail")?.value || "";
+    try {
+      const result = await API.send("/api/billing/cancel/reason", "POST",
+        { reason: f.reason, detail: f.detail, wants_contact: false });
+      f.offer = result.offer;
+      f.stage = "offer";
+      renderCancelModal();
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  async function cancelTalk() {
+    const f = S.cancelFlow;
+    try {
+      await API.send("/api/billing/cancel/reason", "POST", { reason: f.reason, detail: f.detail, wants_contact: true });
+      closeLayer();
+      toast(
+        "Booked. Someone from the team will call you within one business day on the number "
+        + "on your account. Nothing has changed on your plan in the meantime.",
+        "ok", true,
+      );
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  async function cancelConfirm() {
+    try {
+      const result = await API.send("/api/billing/cancel", "POST", { immediate: false });
+      S.cancelFlow.stage = "done";
+      S.cancelFlow.message = result.message;
+      renderCancelModal();
+      await loadView(true);
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  async function billingRedirect(path) {
+    try {
+      const result = await API.send(path, "POST", { plan: "standard" });
+      if (result.url) window.location.href = result.url;
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && layer.innerHTML) closeLayer();
+  });
+
+  boot();
+})();

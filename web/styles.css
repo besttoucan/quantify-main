@@ -81,7 +81,9 @@
 * { box-sizing: border-box; }
 html { background: var(--bg); -webkit-text-size-adjust: 100%; }
 /* A stray wide element must never grow the layout viewport on a phone. */
-html, body { overflow-x: hidden; }
+/* clip, not hidden: hidden turns the body into a scroll container and that stops
+   the rail from sticking while the page scrolls. */
+html, body { overflow-x: clip; }
 body {
   margin: 0; min-width: 320px; min-height: 100vh; background: var(--bg); color: var(--ink);
   font: 400 var(--t-md)/1.5 var(--sans); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
@@ -328,7 +330,7 @@ input:disabled, textarea:disabled { background: var(--surface-3); color: var(--i
   overflow: hidden;
 }
 .headline-main { padding: 22px 24px 20px; min-width: 0; }
-.headline-main h2 { font-size: clamp(21px, 2.4vw, 27px); line-height: 1.2; letter-spacing: -.022em; max-width: 34ch; }
+.headline-main h2 { font-size: var(--t-2xl); line-height: 1.2; letter-spacing: -.022em; max-width: 34ch; }
 .headline-main .sum { margin-top: 10px; font-size: var(--t-md); line-height: 1.65; color: var(--ink-2); max-width: 66ch; }
 .headline-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 13px; }
 .headline-side {
@@ -348,7 +350,7 @@ input:disabled, textarea:disabled { background: var(--surface-3); color: var(--i
   position: relative; overflow: hidden;
 }
 .tile > .eyebrow { display: flex; align-items: center; gap: 6px; }
-.tile .value { font-size: clamp(24px, 2.6vw, 31px); font-weight: 600; letter-spacing: -.03em; line-height: 1.1; font-variant-numeric: tabular-nums; margin-top: 3px; }
+.tile .value { font-size: var(--t-2xl); font-weight: 600; letter-spacing: -.03em; line-height: 1.1; font-variant-numeric: tabular-nums; margin-top: 3px; }
 .tile .versus { font-size: var(--t-sm); color: var(--ink-2); line-height: 1.5; margin-top: 5px; }
 .tile .versus b { font-weight: 600; }
 .tile .basis { font-size: var(--t-xs); color: var(--ink-4); margin-top: 5px; padding-top: 8px; border-top: 1px solid var(--line); line-height: 1.5; }

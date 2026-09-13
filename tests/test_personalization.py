@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
-from quantify_app import connectors, costs, geography, intelligence, wages
+from quantify_app import connectors, costs, geography, intelligence, item_analysis, transactions, wages
 from quantify_app.database import connect, initialize
 
 
@@ -211,6 +211,46 @@ class LocationCosts(unittest.TestCase):
                 self.assertEqual(build.call_count,5)
                 self.assertEqual(training_version,intelligence._data_version(conn,"loc",training=True))
                 self.assertEqual(fit.call_count,trained)
+
+    def _historical_item(self, conn, target):
+        conn.execute("INSERT INTO menu_items(id,location_id,name,category,price) VALUES('item','loc','House sandwich','Lunch',12)")
+        conn.executemany("INSERT INTO sales(location_id,item_id,date,quantity,revenue) VALUES('loc','item',?,?,?)",
+            [((target-timedelta(days=n)).isoformat(),100+(n%7)*8,(100+(n%7)*8)*12) for n in range(91)])
+
+    def test_historical_item_uses_opening_expected_without_swapping_make(self):
+        target = date(2026, 8, 26)
+        with connect(self.path) as conn:
+            self._historical_item(conn,target)
+            conn.execute("""INSERT INTO forecast_calls(location_id,date,item_id,expected,lower,upper,price,
+                overridden,model_version,locked_at,locked_local)
+                VALUES('loc',?,'item',46,30,60,12,1,'test','2026-08-26T05:00:00Z','05:00')""",(target.isoformat(),))
+            conn.execute("""INSERT INTO forecast_overrides(location_id,item_id,date,quantity,reason,updated_at)
+                VALUES('loc','item',?,77,'Catering','2026-08-26T05:00:00Z')""",(target.isoformat(),))
+            day = transactions.day_detail(conn,"loc",target)
+            profile = item_analysis.item_profile(conn,"loc","item",target)
+            expected = next(row["predicted"] for row in day["item_scores"] if row["item_id"] == "item")
+            self.assertEqual((expected,profile["today"]["expected"],profile["today"]["model_expected"]),(46,46,46))
+            self.assertEqual(profile["today"]["make"],77)
+            self.assertEqual(profile["today"]["call_source"],"stored")
+            self.assertEqual(profile["today"]["call_label"],"Recorded opening call")
+            self.assertEqual(profile["today"]["call_recorded_at"],"2026-08-26T05:00:00Z")
+
+    def test_historical_item_reuses_scored_reconstruction_and_labels_it(self):
+        target = date(2026, 8, 26)
+        with connect(self.path) as conn:
+            self._historical_item(conn,target)
+            entries = [{"item_id":"item","name":"House sandwich","predicted":46,"actual":100,"gap":54}]
+            conn.execute("""INSERT INTO day_accuracy(location_id,date,predicted_units,actual_units,predicted_sales,
+                actual_sales,accuracy,items_json,scored_at,call_source)
+                VALUES('loc',?,46,100,552,1200,46,?,'2026-08-27T05:00:00Z','reconstructed')""",
+                (target.isoformat(),json.dumps(entries)))
+            day = transactions.day_detail(conn,"loc",target)
+            profile = item_analysis.item_profile(conn,"loc","item",target)
+            self.assertEqual(profile["today"]["expected"],day["item_scores"][0]["predicted"])
+            self.assertEqual(profile["today"]["expected"],46)
+            self.assertNotEqual(profile["today"]["recomputed_expected"],46)
+            self.assertEqual(profile["today"]["call_source"],"reconstructed")
+            self.assertEqual(profile["today"]["call_label"],"Reconstructed expectation")
 
 
 if __name__ == "__main__":

@@ -42,7 +42,9 @@
     onboarding: { step: 0, values: {}, tz: null },
     cancelFlow: null,
     narrativeTried: "",
+    unreadUpdates: 0,
   };
+  let updatesUI = null;
 
   /* ---------- helpers ---------- */
   const e = (v) => String(v ?? "")
@@ -80,7 +82,14 @@
   };
   // "Today" is the location's own date, sent by /api/bootstrap and refreshed by
   // /api/pulse. The browser clock is only a fallback before the first answer.
-  const todayISO = () => (S.boot && S.boot.today) || localISO(new Date());
+  const todayISO = () => {
+    const timezone = S.boot?.locations?.find(row => row.id === S.locationId)?.timezone;
+    if (timezone) {
+      try { return new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()); }
+      catch (_) { /* Fall back to the server date until the timezone is corrected. */ }
+    }
+    return S.boot?.today || localISO(new Date());
+  };
 
   // Copies text and resolves true when it worked. Plain http has no
   // navigator.clipboard, so the old execCommand path is kept as the fallback.
@@ -99,6 +108,7 @@
   }
 
   const ICONS = {
+    updates: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/>',
     today: '<path d="M3 8h18M7 3v3M17 3v3M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/>',
     history: '<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v4l3 2"/>',
     order: '<path d="M3 7.5 12 3l9 4.5v9L12 21l-9-4.5v-9Z"/><path d="M3 7.5 12 12l9-4.5M12 12v9"/>',
@@ -220,6 +230,7 @@
 
   function leaveApp() {
     stopPulse();
+    updatesUI?.stop();
   }
 
   async function loadWorkspace() {
@@ -234,7 +245,7 @@
     if (S.view === "forecast") { S.view = "today"; S.todayPane = "ahead"; }
     if (S.view === "menu") { S.view = "settings"; S.settingsTab = "menu"; }
     if (S.view === "suppliers") S.view = "ordering";
-    if (!["today", "ordering", "history", "settings"].includes(S.view)) S.view = "today";
+    if (!["today", "ordering", "history", "updates", "settings"].includes(S.view)) S.view = "today";
     if (["email", "connections"].includes(S.settingsTab)) S.settingsTab = "location";
     if (S.settingsTab === "suppliers") S.settingsTab = "location";
     if (S.settingsTab === "security") S.settingsTab = "account";
@@ -242,6 +253,7 @@
     store.set("quantify.stab", S.settingsTab);
     await loadView();
     startPulse();
+    void getUpdatesUI().start();
     // First arrival gets the tutorial, once. It waits for the real screen so
     // every stop lands on this location's own numbers.
     if (tourEligible()) setTimeout(() => startTour(true), 550);
@@ -811,18 +823,66 @@
     return `<span class="tz-hint">${icon("check")} Read as ${e(tz.matched)}, so ${e(tz.label)}.</span>`;
   }
   /* ---------- shell ---------- */
-  // Three places to work and one place to set things up. What to make today,
-  // what to buy, and what happened. The next two weeks are a panel inside
-  // Today, and the menu is a settings page, because both are read far less
-  // often than they are worth a button on every screen.
+  // Daily work, ordering, results, current operating updates, and setup.
   const NAV = [
     ["today", "Today", "today"],
     ["ordering", "Order", "order"],
     ["history", "History", "history"],
+    ["updates", "Updates", "updates"],
     ["settings", "Settings", "settings"],
   ];
 
-  const currentLocation = () => S.boot.locations.find((row) => row.id === S.locationId) || S.boot.locations[0] || {};
+  const currentLocation = () => S.boot?.locations?.find((row) => row.id === S.locationId) || S.boot?.locations?.[0] || {};
+
+  function paintUpdateCount(count) {
+    S.unreadUpdates = count;
+    root.querySelectorAll("[data-updates-count]").forEach(node => {
+      node.textContent = count > 99 ? "99+" : String(count);
+      node.hidden = !count;
+    });
+    const button = root.querySelector('[data-view="updates"]');
+    button?.setAttribute("aria-label", count ? `Updates, ${count} unread` : "Updates");
+  }
+
+  function getUpdatesUI() {
+    if (!updatesUI) updatesUI = window.QuantifyUpdates.create({
+      getContext: () => ({ locationId: S.locationId, view: S.view, timezone: currentLocation().timezone, userKey: S.boot?.user?.email || S.auth?.user?.email || "" }),
+      get: url => API.get(url),
+      post: (url, body) => API.send(url, "POST", body),
+      onUnread: paintUpdateCount,
+      onRender: () => { if (S.view === "updates") renderUpdates(); },
+      onNavigate: async action => {
+        if (!["today", "ordering", "settings", "updates"].includes(action.view)) return;
+        const location = S.locationId;
+        S.view = action.view;
+        if (["today", "ordering"].includes(action.view)) S.date = todayISO();
+        if (action.view === "settings" && ["location", "menu", "costs", "account"].includes(action.tab)) {
+          S.settingsTab = action.tab; store.set("quantify.stab", action.tab);
+        }
+        store.set("quantify.view", S.view);
+        window.scrollTo(0, 0);
+        await loadView();
+        if (action.item_id && S.locationId === location && S.view === action.view) await openItemSheet(action.item_id, "", todayISO());
+      },
+    });
+    return updatesUI;
+  }
+
+  function renderUpdates() {
+    const existing = root.querySelector(".updates-panel");
+    const html = getUpdatesUI().panel();
+    if (existing) {
+      const focused = existing.contains(document.activeElement) ? document.activeElement : null;
+      const focusKey = focused && [...focused.attributes].find(attr => attr.name.startsWith("data-update-"));
+      const earlierOpen = existing.querySelector(".updates-earlier")?.open;
+      existing.outerHTML = html;
+      const next = root.querySelector(".updates-panel");
+      if (earlierOpen && next.querySelector(".updates-earlier")) next.querySelector(".updates-earlier").open = true;
+      if (focusKey) next.querySelector(`[${focusKey.name}="${CSS.escape(focusKey.value)}"]`)?.focus({ preventScroll: true });
+      return;
+    }
+    root.innerHTML = shell("Updates", e(currentLocation().name), "", html);
+  }
 
   function shell(title, subtitle, tools, body) {
     const location = currentLocation();
@@ -835,8 +895,8 @@
         <div class="rail-head">${wordmark()}</div>
         <nav class="rail-nav">
           ${NAV.map(([key, label, ico]) => `
-            <button class="nav-item ${S.view === key ? "active" : ""}" data-view="${key}">
-              <i>${icon(ico)}</i><span>${e(navLabel(key, label))}</span></button>`).join("")}
+            <button class="nav-item ${S.view === key ? "active" : ""}" data-view="${key}" ${S.view === key ? 'aria-current="page"' : ""} ${key === "updates" ? `aria-label="Updates${S.unreadUpdates ? `, ${S.unreadUpdates} unread` : ""}"` : ""}>
+              <i>${icon(ico)}</i><span>${e(navLabel(key, label))}</span>${key === "updates" ? `<b class="updates-nav-count" data-updates-count ${S.unreadUpdates ? "" : "hidden"} aria-hidden="true">${S.unreadUpdates > 99 ? "99+" : S.unreadUpdates}</b>` : ""}</button>`).join("")}
         </nav>
         <div class="rail-foot">
           ${many
@@ -937,6 +997,10 @@
         await loadHistory(silent);
         if (token !== loadView._seq) return;
       }
+      if (S.view === "updates") {
+        await getUpdatesUI().load();
+        if (token !== loadView._seq) return;
+      }
       if (S.view === "settings") {
         // Setup and billing are read once per visit and again after a save
         // (the save handlers drop S.data). Tab taps never refetch them.
@@ -1021,6 +1085,7 @@
     if (S.view === "today") return dLong(S.date);
     if (S.view === "ordering") return "Order";
     if (S.view === "history") return "History";
+    if (S.view === "updates") return "Updates";
     return "Settings";
   }
 
@@ -1039,6 +1104,7 @@
       if (S.view === "today") renderToday();
       if (S.view === "history") renderHistory();
       if (S.view === "ordering") renderOrdering();
+      if (S.view === "updates") renderUpdates();
       if (S.view === "settings") renderSettings();
     } catch (error) {
       // One broken card must not take the whole screen down. What was on
@@ -1395,7 +1461,7 @@
     ((live && live.hours) || []).forEach((h) => { byslot[h.slot] = h; });
     const max = Math.max(...rows.map((r) => Number(r.units || 0)), ...Object.values(byslot).map((h) => Number(h.rung_units || 0)), 1);
     const peak = rows.reduce((best, row) => (Number(row.units) > Number(best.units) ? row : best), rows[0]);
-    return `<div class="chart-key"><span><i class="k-pred"></i>Expected</span>${live ? '<span><i class="k-actual"></i>Sold</span>' : '<span><i class="k-peak"></i>Busiest hour</span>'}</div><div class="hours">${rows.map((row) => {
+    return `<div class="chart-key hours-key"><span><i class="k-pred"></i>Expected</span>${live ? '<span><i class="k-actual"></i>Sold</span>' : '<span><i class="k-peak"></i>Busiest hour</span>'}</div><div class="hours">${rows.map((row) => {
       const h = (Number(row.units || 0) / max) * 100;
       const state = byslot[row.slot ?? row.hour];
       const done = !!(state && state.state === "done");
@@ -4345,6 +4411,8 @@
   // Everything a location holds in memory. Called when the location changes so
   // nothing from the last one is shown or saved against the new one.
   function resetLocationState() {
+    updatesUI?.reset();
+    S.date = todayISO();
     S.costs = null; S.menu = null; S.supply = null; S.attention = null; S.outlook = null; S.data = null;
     S.order.edits = {}; S.order.extras = [];
     S.narrativeTried = ""; S.itemCache = {}; S.open = new Set();
@@ -4945,6 +5013,7 @@
         resetLocationState();
         closeLayer();
         await loadView();
+        void getUpdatesUI().start();
       });
     });
   }

@@ -1093,6 +1093,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                 "writer": ai.status(),
                 "billing": {"connected": billing.connected(), "plan": billing.overview(conn, organization_id)["plan"]},
                 "user": {"name": session["display_name"], "email": session["email"]},
+                "support_email": billing.SUPPORT_EMAIL,
             })
             return True
 

@@ -1871,21 +1871,35 @@
   }
 
   /* ---------- ordering ---------- */
-  // The buying list, one block per supplier. Three facts a till cannot know are
-  // asked for on this screen once and then kept: who sells the thing, how it is
-  // bought, and what is on the shelf. With those, what you will use becomes what
-  // to order and by when. A forecast line has a recipe behind it; anything the
-  // recipe cannot speak for is said out loud rather than folded in.
-  const ORDER_WINDOWS = [["2", "2 days"], ["3", "3 days"], ["5", "5 days"], ["7", "a week"]];
+  // The buying list, one card per supplier. Three things a register cannot
+  // know are asked for here once and then kept: who sells the thing, how it
+  // is bought, and what is on the shelf. With those, what you will use becomes
+  // what to order and by when. Lines that need a hand come first; the rest sit
+  // behind one line that says how long they are covered for.
+  const ORDER_WINDOWS = [["2", "2 days"], ["3", "3 days"], ["5", "5 days"], ["7", "7 days"]];
   const LEAD_CHOICES = [[0, "same day"], [1, "next day"], [2, "two days"], [3, "three days"], [5, "five days"], [7, "a week"]];
   const WEEKDAY_CHOICES = [["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["fri", "Fri"], ["sat", "Sat"], ["sun", "Sun"]];
   const PACK_LABELS = ["case", "box", "bag", "tray", "flat", "tub", "bucket", "sleeve", "carton", "sack", "pack"];
   const UNCHANGED_UNITS = new Set(["g", "kg", "lb", "oz", "ml", "l", "gal", "floz", "qt"]);
-  const CHANNEL_LABELS = { sent: "Sent by email", outbox: "Written to the outbox", drafted: "Opened in the mail app", opened: "Placed on their site", copied: "Copied" };
+  const CHANNEL_LABELS = {
+    sent: "Sent by email", outbox: "Saved, not sent", failed: "Email did not go through",
+    drafted: "Sent from the mail app", confirmed: "Sent from the mail app", opened: "Placed on their site", copied: "Copied",
+  };
 
   const lineKey = (line) => String(line.name || "").toLowerCase();
   const cap = (text) => (text ? text.charAt(0).toUpperCase() + text.slice(1) : "");
   const locationName = () => (S.boot.locations.find((row) => row.id === S.locationId) || {}).name || "";
+  const locQ = () => `location_id=${encodeURIComponent(S.locationId)}`;
+  const counted = (line) => line.on_hand !== null && line.on_hand !== undefined;
+  // Whole numbers stay whole; anything else keeps one decimal, the same rule
+  // for what you will use, what is on hand and what to order.
+  const fmtQty = (v) => {
+    const n = Number(v || 0);
+    return Number.isInteger(n) ? num(n) : String(Math.round(n * 10) / 10);
+  };
+  const glyph = (path) => `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">${path}</svg>`;
+  const MINUS = glyph('<path d="M5 12h14"/>');
+  const PLUS = glyph('<path d="M12 5v14M5 12h14"/>');
 
   function plural(n, unit) {
     const u = String(unit || "");
@@ -1899,7 +1913,8 @@
     try { return new URL(url).hostname.replace(/^www\./, ""); } catch (_) { return url; }
   }
 
-  // Today, tomorrow, a weekday inside the week, otherwise the date.
+  // Today, tomorrow, a weekday inside the week, otherwise the date. Timestamps
+  // arrive in the location's own clock, so the date part is the local date.
   function whenLabel(iso) {
     if (!iso) return "";
     const day = String(iso).slice(0, 10);
@@ -1911,102 +1926,18 @@
     if (gap > 1 && gap < 7) return weekday(day);
     return dShort(day);
   }
+  // The same, short enough for a cell: "Tue" for Tuesday.
+  const shortDay = (text) => String(text || "").replace(/^([A-Z][a-z]{2})[a-z]*day$/, "$1");
+  const whenShort = (iso) => shortDay(whenLabel(iso));
 
-  function orderQty(line) {
-    const edit = S.order.edits[lineKey(line)];
-    return edit === undefined ? line.suggested.quantity : edit;
-  }
-
-  // Packs step by one. Loose units step by a grain that suits the size.
-  function orderGrain(line) {
-    if (line.pack_size) return 1;
-    return line.typical >= 100 ? 10 : line.typical >= 20 ? 5 : 1;
-  }
-
-  function groupBySupplier(lines, suppliers) {
-    const byId = new Map(suppliers.map((s) => [s.id, { supplier: s, lines: [], extras: [] }]));
-    const loose = { supplier: null, lines: [], extras: [] };
-    lines.forEach((line) => (byId.get(line.supplier_id) || loose).lines.push(line));
-    S.order.extras.forEach((row) => (byId.get(row.supplier_id) || loose).extras.push(row));
-    const groups = Array.from(byId.values()).filter((g) => g.lines.length || g.extras.length);
-    if (loose.lines.length || loose.extras.length || !groups.length) groups.push(loose);
-    return groups;
-  }
-
-  function findGroup(id) {
-    const d = S.data;
-    if (!d || !d.ready) return null;
-    return groupBySupplier(d.lines.filter((row) => row.orderable), d.suppliers || [])
-      .find((g) => (g.supplier ? g.supplier.id : "") === (id || "")) || null;
-  }
-
-  function renderOrdering() {
-    const d = S.data;
-    if (!d || !d.ready) {
-      root.innerHTML = shell("Order", "", "",
-        emptyState("Nothing to order yet", "Once the register has some history, this becomes the list of what to buy."));
-      return;
-    }
-    // Whatever was being typed keeps its cursor through the repaint.
-    const active = document.activeElement;
-    const keep = active && (active.dataset.supplyCount ? ["supplyCount", active.dataset.supplyCount]
-      : active.dataset.oqty ? ["oqty", active.dataset.oqty] : null);
-
-    const c = d.counts;
-    const lines = d.lines.filter((row) => row.orderable);
-    const shares = d.lines.filter((row) => !row.orderable);
-    const suppliers = d.suppliers || [];
-    const groups = groupBySupplier(lines, suppliers);
-    const changed = Object.keys(S.order.edits).length;
-
-    const tools = `<div class="seg">${ORDER_WINDOWS.map(([k, l]) =>
-      `<button class="${String(S.order.days) === k ? "on" : ""}" data-owin="${k}">${l}</button>`).join("")}</div>`;
-
-    const body = `<div class="stack">
-      ${groups.map((g, i) => supplyGroup(g, d, suppliers, i === 0)).join("")}
-      <div class="btn-row supply-page-actions">
-        <button class="btn sm" data-do="order-add">Add something else</button>
-        ${changed ? `<button class="btn sm ghost" data-do="order-reset">Back to the suggested numbers</button>` : ""}
-      </div>
-      ${c.uncovered ? `<p class="small muted" style="padding:0 2px">${num(c.uncovered)} of your ${num(c.menu_items)} menu items have no recipe on file, so nothing they use is on this list.</p>` : ""}
-
-      ${d.backlog.length ? `<section class="card">
-        <div class="card-head"><div><h2>Worth adding a recipe for</h2>
-          <p>Each one moves that much of your buying from guesswork onto the forecast.</p></div></div>
-        <div class="tablewrap"><table class="dt"><tbody>
-          ${d.backlog.map((row) => `<tr class="clickable" data-item-sheet="${e(row.item_id)}">
-            <td class="name"><b>${e(row.name)}</b><small>about ${num(row.monthly_units)} a month</small></td>
-            <td class="num right">${money(row.monthly_value)}<div class="small muted">a month</div></td>
-          </tr>`).join("")}
-        </tbody></table></div>
-      </section>` : ""}
-
-      ${shares.length ? `<details class="context-disclosure" style="margin:0 2px">
-        <summary>${shares.length} things measured as a share rather than a count</summary>
-        <div class="context-detail">
-          ${shares.map((row) => `<p><b>${e(row.name)}</b>: ${num(row.typical)} ${e(row.unit)}. ${e(row.note)}</p>`).join("")}
-        </div></details>` : ""}
-    </div>`;
-    root.innerHTML = shell("Order", `${e(dMed(d.start))} through ${e(dMed(d.end))}`, tools, body);
-
-    if (keep) {
-      const attr = keep[0] === "supplyCount" ? "data-supply-count" : "data-oqty";
-      const node = document.querySelector(`[${attr}="${CSS.escape(keep[1])}"]`);
-      if (node) { node.focus({ preventScroll: true }); node.select?.(); }
-    }
-  }
-
-  function supplierLine(s) {
-    const parts = [];
-    const days = s.delivery_days || [];
-    parts.push(days.length ? `Delivers ${joinAnd(days.map((k) => cap(k)))}.` : "Delivers any day.");
-    const sched = s.schedule || {};
-    if (sched.next_delivery) parts.push(`Next delivery ${whenLabel(sched.next_delivery)} if the order is in ${e(sched.order_by_label)}.`);
-    if (s.last_order && s.last_order.status !== "copied") {
-      const o = s.last_order;
-      parts.push(`Last order ${whenLabel(o.sent_at)}${o.expected_on ? `, arriving ${whenLabel(o.expected_on)}` : ""}.`);
-    }
-    return parts.map((p) => (p.startsWith("Next") ? p : e(p))).join(" ");
+  // "Tuesday by 3 PM" -> "by Tue 3 PM"; "today by 3 PM" -> "by 3 PM today".
+  function orderByShort(label) {
+    const t = String(label || "");
+    if (!t || t === "now") return t;
+    const m = t.match(/^(.+?) by (.+)$/);
+    if (!m) return `by ${shortDay(t)}`;
+    if (m[1] === "today") return `by ${m[2]} today`;
+    return `by ${shortDay(m[1])} ${m[2]}`;
   }
 
   function joinAnd(items) {
@@ -2015,85 +1946,297 @@
     return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
   }
 
-  function supplyGroup(g, d, suppliers, first) {
+  function orderQty(line) {
+    const edit = S.order.edits[lineKey(line)];
+    return edit === undefined ? Number(line.suggested.quantity || 0) : edit;
+  }
+
+  // Packs step by one. Loose units step by a grain that suits the size.
+  function orderGrain(line) {
+    if (line.pack_size) return 1;
+    return line.typical >= 100 ? 10 : line.typical >= 20 ? 5 : 1;
+  }
+
+  // Short, or not counted yet. The API says so when it can; otherwise it is
+  // read off the line.
+  function needsAction(line) {
+    if (line.needs_action !== undefined && line.needs_action !== null) return !!line.needs_action;
+    if (!counted(line)) return true;
+    return Number(line.suggested.quantity || 0) > 0 || orderQty(line) > 0;
+  }
+
+  // "Add something else" lines live in the browser, per location, until an
+  // order carrying them goes out.
+  const extrasKey = () => `quantify.extras.${S.locationId}`;
+  function loadExtras() {
+    if (S.order.extrasFor === S.locationId) return;
+    S.order.extrasFor = S.locationId;
+    let rows = [];
+    try { rows = JSON.parse(store.get(extrasKey()) || "[]"); } catch (_) { rows = []; }
+    S.order.extras = Array.isArray(rows) ? rows.filter((row) => row && row.name) : [];
+  }
+  function saveExtras() { store.set(extrasKey(), JSON.stringify(S.order.extras)); }
+
+  // Every supplier gets a card, even one with nothing assigned yet, so it can
+  // always be reached to edit or remove. The unassigned lines come last.
+  function groupBySupplier(lines, suppliers) {
+    const byId = new Map(suppliers.map((s) => [s.id, { supplier: s, lines: [], extras: [] }]));
+    const loose = { supplier: null, lines: [], extras: [] };
+    lines.forEach((line) => (byId.get(line.supplier_id) || loose).lines.push(line));
+    S.order.extras.forEach((row) => (byId.get(row.supplier_id) || loose).extras.push(row));
+    const groups = Array.from(byId.values());
+    if (loose.lines.length || loose.extras.length || !groups.length) groups.push(loose);
+    return groups;
+  }
+
+  function findGroup(id) {
+    const d = S.data;
+    if (!d || !d.ready) return null;
+    return groupBySupplier((d.lines || []).filter((row) => row.orderable), d.suppliers || [])
+      .find((g) => (g.supplier ? g.supplier.id : "") === (id || "")) || null;
+  }
+
+  function renderOrdering() {
+    const d = S.data;
+    S.order.folds = S.order.folds || {};
+    loadExtras();
+    const tools = `<div class="seg">${ORDER_WINDOWS.map(([k, l]) =>
+      `<button class="${String(S.order.days) === k ? "on" : ""}" data-owin="${k}">${l}</button>`).join("")}</div>`;
+    const lines = d && d.ready ? (d.lines || []).filter((row) => row.orderable) : [];
+    if (!lines.length) {
+      root.innerHTML = shell("Order", "", tools, `<section class="card">${orderEmpty(d)}</section>`);
+      return;
+    }
+    // Whatever was being typed keeps its cursor through a repaint.
+    const active = document.activeElement;
+    const keep = active && (active.dataset.supplyCount ? ["data-supply-count", active.dataset.supplyCount]
+      : active.dataset.oqty ? ["data-oqty", active.dataset.oqty] : null);
+
+    const c = d.counts || {};
+    const shares = (d.lines || []).filter((row) => !row.orderable);
+    const suppliers = d.suppliers || [];
+    const groups = groupBySupplier(lines, suppliers);
+    const changed = Object.keys(S.order.edits).length;
+    const looseShown = groups.some((g) => !g.supplier);
+    const backlog = d.backlog || [];
+
+    const body = `<div class="stack">
+      ${groups.map((g) => supplyGroup(g, d, suppliers)).join("")}
+      <div class="btn-row supply-page-actions">
+        <button class="btn sm" data-supply="order-add">Add something else</button>
+        ${looseShown ? "" : `<button class="btn sm" data-supply="supplier-new">Add supplier</button>`}
+        ${changed ? `<button class="btn sm ghost" data-supply="order-reset">Back to the suggested numbers</button>` : ""}
+      </div>
+      ${c.uncovered ? `<p class="small muted supply-note">${num(c.uncovered)} of your ${num(c.menu_items)} menu items have no recipe on file, so nothing they use is on this list.</p>` : ""}
+      ${backlog.length ? `<details class="context-disclosure supply-note">
+        <summary>${backlog.length === 1 ? "1 item worth a recipe" : `${backlog.length} items worth a recipe`}</summary>
+        <div class="context-detail">
+          <p>Each one moves that much of your buying onto this list.</p>
+          <div class="tablewrap"><table class="dt"><tbody>
+            ${backlog.map((row) => `<tr class="clickable" data-item-sheet="${e(row.item_id)}">
+              <td class="name"><b>${e(row.name)}</b><small>about ${num(row.monthly_units)} a month</small></td>
+              <td class="num right">${money(row.monthly_value)}<div class="small muted">a month</div></td>
+            </tr>`).join("")}
+          </tbody></table></div>
+        </div></details>` : ""}
+      ${shares.length ? `<details class="context-disclosure supply-note">
+        <summary>${shares.length === 1 ? "1 thing used by the batch, not bought by the count" : `${shares.length} things used by the batch, not bought by the count`}</summary>
+        <div class="context-detail">
+          ${shares.map((row) => `<p><b>${e(row.name)}</b>: ${num(row.typical)} ${e(row.unit)}.</p>`).join("")}
+        </div></details>` : ""}
+      <details class="context-disclosure supply-note" id="orders-sent" ${S.order.logOpen ? "open" : ""}>
+        <summary>Orders you sent</summary>
+        <div class="context-detail" id="orders-sent-body">${ordersSentBody()}</div>
+      </details>
+    </div>`;
+    root.innerHTML = shell("Order", `${e(dMed(d.start))} through ${e(dMed(d.end))}`, tools, body);
+    if (S.order.logOpen) loadOrderLog();
+
+    if (keep) {
+      const node = root.querySelector(`[${keep[0]}="${CSS.escape(keep[1])}"]`);
+      if (node) { node.focus({ preventScroll: true }); node.select?.(); }
+    }
+  }
+
+  // Nothing to buy: one heading, one sentence, the one button that fixes it.
+  function orderEmpty(d) {
+    const cause = orderCause(d);
+    if (cause === "no_menu") {
+      return emptyState("Nothing to buy yet", "Add your menu and Quantify works out what each item uses.",
+        `<button class="btn accent" data-stab="menu">Add the menu</button>`);
+    }
+    if (cause === "no_recipes") {
+      return emptyState("Nothing to buy yet", "Confirm what goes into each item and the list of what to order appears here.",
+        `<button class="btn accent" data-stab="menu">Open the menu</button>`);
+    }
+    return emptyState("Nothing to buy yet", "Once the register has a week of sales, this becomes the list of what to buy.",
+      `<button class="btn accent" data-stab="location">Connect the register</button>`);
+  }
+
+  // Why the list is empty. The plan says so when it can; otherwise items with
+  // no recipe mean recipes, and the day's brief says whether there is a menu.
+  function orderCause(d) {
+    if (d && d.cause) return d.cause;
+    if (d && ((d.unknown || []).length || (d.items_covered || 0) + (d.items_uncovered || 0) > 0)) return "no_recipes";
+    const known = S.order.cause;
+    if (known && known.for === S.locationId) return known.value;
+    fetchOrderCause();
+    return "no_sales";
+  }
+
+  async function fetchOrderCause() {
+    const loc = S.locationId;
+    if (S.order.causeFor === loc) return;
+    S.order.causeFor = loc;
+    try {
+      const brief = await API.get(`/api/brief?location_id=${encodeURIComponent(loc)}&date=${todayISO()}`);
+      const items = (brief.items || []).length;
+      const health = brief.data_health || {};
+      const noSales = brief.no_history !== undefined ? !!brief.no_history : !health.latest_sale_date;
+      S.order.cause = { for: loc, value: noSales ? "no_sales" : items ? "no_recipes" : "no_menu" };
+      if (S.view === "ordering" && S.locationId === loc && !isTyping() && !layer.innerHTML) render(true);
+    } catch (_) {
+      S.order.causeFor = "";
+    }
+  }
+
+  function supplierLine(s) {
+    const parts = [];
+    const days = s.delivery_days || [];
+    parts.push(days.length ? `Delivers ${joinAnd(days.map((k) => cap(k)))}.` : "Delivers any day.");
+    const sched = s.schedule || {};
+    if (sched.next_delivery) {
+      const next = whenLabel(sched.next_delivery);
+      const label = String(sched.order_by_label || "");
+      const m = label.match(/^(.+?) by (.+)$/);
+      const byDay = m ? m[1] : label;
+      const byClock = m ? m[2] : "";
+      if (!byClock && byDay === next) parts.push(`Next delivery ${next}. Order the same day.`);
+      else if (byClock && byDay === next) parts.push(`Next delivery ${next} if the order is in by ${byClock} that day.`);
+      else if (!byClock) parts.push(`Next delivery ${next} if the order is in ${byDay === "today" ? "today" : `by ${byDay}`}.`);
+      else parts.push(`Next delivery ${next} if the order is in by ${byClock} ${byDay}.`);
+    }
+    if (s.last_order && s.last_order.status !== "copied") {
+      const o = s.last_order;
+      parts.push(`Last order ${whenLabel(o.sent_at)}${o.expected_on ? `, lands ${whenLabel(o.expected_on)}` : ""}.`);
+    }
+    return e(parts.join(" "));
+  }
+
+  function supplyGroup(g, d, suppliers) {
     const s = g.supplier;
     const id = s ? s.id : "";
-    const title = s ? s.name : (suppliers.length ? "Not assigned to a supplier yet" : "What to buy");
-    const sub = s ? supplierLine(s) : (suppliers.length ? "Choose a supplier on a line and it moves into that list." : "");
-    const rows = g.lines.map((line) => supplyRow(line, suppliers, !s)).join("")
-      + g.extras.map((row) => extraRow(row)).join("");
+    const name = s ? s.name : "";
+    const title = s ? name : (suppliers.length ? "Not assigned yet" : "What to buy");
+    const sub = s ? supplierLine(s)
+      : suppliers.length ? "Tap a name to choose who you buy it from."
+      : d.counts_taken ? "" : "Count what is on the shelf and the Order column drops to what is short.";
+    const act = g.lines.filter(needsAction);
+    const rest = g.lines.filter((line) => !needsAction(line));
+    const rows = act.map((line) => supplyRow(line)).join("") + g.extras.map((row) => extraRow(row)).join("");
+    const fold = rest.length ? `<details class="sfold" data-fold="${e(id)}" ${S.order.folds[id] ? "open" : ""}>
+        <summary>${rest.length === 1 ? "1 more line is" : `${rest.length} more lines are`} covered through ${e(whenLabel(d.end))}</summary>
+        ${rest.map((line) => supplyRow(line)).join("")}
+      </details>` : "";
+    const nothing = !g.lines.length && !g.extras.length;
+    const ready = groupOrderLines(g).length > 0;
+    const off = `data-needs-order ${ready ? "" : 'disabled title="Put a number on at least one line first"'}`;
+    const open = s && s.website
+      ? `<a class="btn sm accent" href="${e(s.website)}" target="_blank" rel="noopener" data-supply="order-site" data-id="${e(id)}" data-needs-order aria-disabled="${!ready}" tabindex="${ready ? 0 : -1}">Open ${e(name)} ${icon("external")}</a>`
+      : "";
     const actions = s ? `
-        ${s.website ? `<a class="btn accent" href="${e(s.website)}" target="_blank" rel="noopener" data-supply="order-site" data-id="${e(id)}">Open ${e(s.name)} ${icon("external")}</a>` : ""}
-        <button class="btn ${s.website ? "" : "accent"}" data-supply="order-email" data-id="${e(id)}">Email the order</button>
-        <button class="btn ghost" data-supply="order-copy" data-id="${e(id)}">Copy</button>`
-      : `<button class="btn" data-supply="order-copy" data-id="">Copy the list</button>`;
-    const foot = first && !d.counts_taken
-      ? `<div class="card-foot">Type what is on the shelf under On hand and the Order column drops to what is actually short.</div>` : "";
-    return `<section class="card supply-group">
+        ${open ? `<button class="btn sm" data-supply="order-email" data-id="${e(id)}" ${off}>Email order</button>${open}`
+          : `<button class="btn sm accent" data-supply="order-email" data-id="${e(id)}" ${off}>Email order</button>`}
+        <details class="overflow">
+          <summary class="btn sm ghost" aria-label="More for ${e(name)}">More</summary>
+          <div class="overflow-menu">
+            <button type="button" data-supply="order-copy" data-id="${e(id)}" ${off}>Copy the list</button>
+            <button type="button" data-supply="supplier-edit" data-id="${e(id)}">Edit supplier</button>
+          </div>
+        </details>`
+      : `<button class="btn sm ghost" data-supply="order-copy" data-id="" ${off}>Copy the list</button>
+         <button class="btn sm accent" data-supply="supplier-new">Add supplier</button>`;
+    return `<section class="card supply-group" data-supplier-group="${e(id)}">
       <div class="card-head">
         <div><h2>${e(title)}</h2>${sub ? `<p>${sub}</p>` : ""}</div>
         <div class="spacer"></div>
-        ${s ? `<button class="btn sm ghost" data-supply="supplier-edit" data-id="${e(id)}">Edit</button>`
-            : `<button class="btn sm" data-supply="supplier-new">Add a supplier</button>`}
+        <div class="btn-row supply-head-actions">${actions}</div>
       </div>
-      <div class="sline head"><span>Ingredient</span><span class="right">Will use</span><span>On hand</span><span>Runs out</span><span class="right">Order</span></div>
-      ${rows}
-      <div class="card-body supply-actions"><div class="btn-row">${actions}</div></div>
-      ${foot}
+      ${nothing ? `<div class="card-body small muted">Nothing assigned to ${e(name)} yet. Tap a line's name to choose who you buy it from.</div>` : `
+      <div class="sline head"><span>Item</span><span>Will use</span><span>On hand</span><span>Runs out</span><span class="right">Order</span></div>
+      ${rows}${fold}`}
     </section>`;
   }
 
-  function supplyRow(line, suppliers, loose) {
+  function supplyRow(line) {
     const key = lineKey(line);
     const qty = orderQty(line);
     const unit = line.suggested.unit;
-    const counted = line.on_hand !== null && line.on_hand !== undefined;
-    const meta = [line.role || ""];
-    if (line.pack_size) meta.push(`${num(line.pack_size)} ${plural(line.pack_size, line.pack_unit)} per ${line.pack_label}`);
+    const has = counted(line);
+    const inPacks = !!line.pack_size;
+    const meta = [];
+    if (inPacks) meta.push(`${fmtQty(line.pack_size)} ${plural(line.pack_size, line.pack_unit)} per ${line.pack_label}`);
     if (line.product_code) meta.push(`code ${line.product_code}`);
     if (line.pack_note) meta.push(line.pack_note);
-    const inPacks = !!line.pack_size;
-    return `<div class="sline">
+    return `<div class="sline" data-line-row="${e(key)}">
       <div class="s-name">
-        <button class="s-open" data-supply="item" data-key="${e(key)}"><b>${e(line.name)}</b></button>
-        <small>${e(meta.filter(Boolean).join(" · "))}</small>
-        ${loose && suppliers.length ? `<select class="s-assign" data-supply-assign="${e(key)}" aria-label="Supplier for ${e(line.name)}">
-            <option value="">Choose a supplier</option>
-            ${suppliers.map((s) => `<option value="${e(s.id)}">${e(s.name)}</option>`).join("")}
-          </select>` : ""}
+        <button class="s-open" data-supply="item" data-key="${e(key)}" aria-label="Settings for ${e(line.name)}">${e(line.name)}</button>
+        ${meta.length ? `<small>${e(meta.join(" · "))}</small>` : ""}
       </div>
-      <div class="s-use right"><b>${num(line.typical)} ${e(plural(line.typical, line.unit))}</b><small>about ${num(line.per_day)} a day</small></div>
-      <div class="s-count">
+      <div class="s-use"><span class="lbl">Will use</span><b>${fmtQty(line.typical)}</b> <span class="unit">${e(plural(line.typical, line.unit))}</span></div>
+      <div class="s-count"><span class="lbl">On hand</span>
         <label class="count">
-          <input type="number" inputmode="decimal" min="0" step="any" placeholder="0"
+          <input type="number" inputmode="decimal" min="0" step="any"
                  data-supply-count="${e(key)}" data-unit="${inPacks ? "pack" : e(line.unit)}" data-kind="${e(line.kind)}"
-                 value="${counted ? e(inPacks ? line.on_hand_packs : line.on_hand) : ""}" aria-label="On hand, ${e(line.name)}">
+                 value="${has ? e(fmtQty(inPacks ? line.on_hand_packs : line.on_hand)) : ""}" aria-label="On hand, ${e(line.name)}">
           <span>${e(plural(2, inPacks ? line.pack_label : line.unit))}</span>
         </label>
-        ${counted && inPacks ? `<small>${num(line.on_hand)} ${e(plural(line.on_hand, line.unit))}</small>` : ""}
+        <small class="count-sub">${countSub(line)}</small>
+        <small class="count-err" hidden></small>
       </div>
-      <div class="s-runs">${runsOutCell(line, counted)}</div>
-      <div class="s-order right">
-        <div class="qty">
-          <button class="qstep" data-oadj="${e(key)}" data-step="-1" aria-label="Less">-</button>
-          <input class="qin" data-oqty="${e(key)}" type="number" inputmode="decimal" min="0" step="any" value="${qty}" aria-label="Order, ${e(line.name)}">
-          <button class="qstep" data-oadj="${e(key)}" data-step="1" aria-label="More">+</button>
+      <div class="s-runs">${runsOutCell(line)}</div>
+      <div class="s-order right"><span class="lbl">Order</span>
+        <div class="stepper">
+          <button type="button" class="qstep" data-oadj="${e(key)}" data-step="-1" tabindex="-1" aria-label="Less">${MINUS}</button>
+          <input class="qin" data-oqty="${e(key)}" type="number" inputmode="decimal" min="0" step="any" value="${fmtQty(qty).replace(/,/g, "")}" aria-label="Order, ${e(line.name)}">
+          <button type="button" class="qstep" data-oadj="${e(key)}" data-step="1" tabindex="-1" aria-label="More">${PLUS}</button>
         </div>
-        <small>${e(plural(qty, unit))}${inPacks && qty ? `, ${num(qty * line.pack_size)} ${e(plural(qty * line.pack_size, line.pack_unit))}` : ""}</small>
+        <small class="qunit">${orderUnit(line, qty)}</small>
       </div>
     </div>`;
   }
 
-  function runsOutCell(line, counted) {
-    if (!counted) return `<small>Not counted</small>`;
-    if (line.days_of_cover === null || line.days_of_cover === undefined) return `<small>Not used in this window</small>`;
+  function countSub(line) {
+    return counted(line) && line.pack_size ? `${fmtQty(line.on_hand)} ${e(plural(line.on_hand, line.unit))}` : "";
+  }
+
+  function orderUnit(line, qty) {
+    const unit = line.suggested.unit;
+    return `${e(plural(qty, unit))}${line.pack_size && qty ? `, ${fmtQty(qty * line.pack_size)} ${e(plural(qty * line.pack_size, line.pack_unit))}` : ""}`;
+  }
+
+  // One line: the day it runs out, then what to do about it. Colour only
+  // inside two days. Nothing at all until it has been counted.
+  function runsOutCell(line) {
+    if (!counted(line)) return "";
     const days = line.days_of_cover;
-    const o = line.order;
+    if (days === null || days === undefined) return `<span class="lbl">Runs out</span><small>Not used in this window</small>`;
+    const o = line.order || {};
+    const tone = days < 1 ? "down" : days < 2 ? "warn" : "";
+    const when = `<b class="${tone}">${e(cap(line.runs_out_label || whenLabel(line.runs_out_on)))}</b>`;
+    const onOrder = Number(line.on_order || 0);
     let note = "";
-    if (o && o.late) note = `<small class="down">Order now${o.arrives ? `, lands ${e(o.arrives_label)}` : ""}</small>`;
-    else if (o) note = `<small class="${o.urgent ? "warn" : ""}">Order ${e(o.order_by_label)}</small>`;
-    return `<b class="${days < 1.5 ? "down" : days < 3 ? "warn" : ""}">${e(cap(line.runs_out_label))}</b>
-      <small>${days < 1 ? "less than a day" : `${days} days`} of cover</small>${note}`;
+    if (onOrder > 0) {
+      const unit = line.on_order_unit || line.suggested.unit;
+      note = `<small>${fmtQty(onOrder)} ${e(plural(onOrder, unit))} on order${line.arrives ? `, lands ${e(whenShort(line.arrives))}` : ""}</small>`;
+    } else if (line.no_supplier || !line.supplier_id) {
+      note = `<small>Choose a supplier</small>`;
+    } else if (o.late) {
+      note = `<small class="down">Order now${o.arrives ? `, lands ${e(whenShort(o.arrives))}` : ""}</small>`;
+    } else if (o.order_by_label && (Number(line.suggested.quantity || 0) > 0 || orderQty(line) > 0)) {
+      note = `<small>Order ${e(orderByShort(o.order_by_label))}</small>`;
+    }
+    return `<span class="lbl">Runs out</span>${when}${note}`;
   }
 
   function extraRow(row) {
@@ -2101,17 +2244,51 @@
     return `<div class="sline extra">
       <div class="s-name"><b>${e(row.name)}</b><small>added by you</small></div>
       <div class="s-use"></div><div class="s-count"></div><div class="s-runs"></div>
-      <div class="s-order right"><b>${e(row.qty)}</b>
-        <button class="btn sm ghost" data-odrop="${index}" style="margin-top:4px">Remove</button></div>
+      <div class="s-order right"><span class="lbl">Order</span><b>${e(row.qty)}</b>
+        <button class="btn sm ghost" data-supply="order-drop" data-index="${index}">Remove</button></div>
     </div>`;
   }
 
+  // A stepper tap changes one number on one row. The page is not repainted.
   function orderAdjust(key, step) {
-    const line = (S.data.lines || []).find((row) => lineKey(row) === key);
+    const line = ((S.data && S.data.lines) || []).find((row) => lineKey(row) === key);
     if (!line) return;
     const now = orderQty(line);
-    S.order.edits[key] = Math.max(0, Math.round((now + step * orderGrain(line)) * 10) / 10);
-    render(true);
+    setOrderQty(line, Math.max(0, Math.round((now + step * orderGrain(line)) * 10) / 10));
+  }
+
+  function setOrderQty(line, qty) {
+    const key = lineKey(line);
+    S.order.edits[key] = qty;
+    const row = root.querySelector(`[data-line-row="${CSS.escape(key)}"]`);
+    if (!row) return;
+    const box = row.querySelector("[data-oqty]");
+    if (box && document.activeElement !== box) box.value = String(qty);
+    const unit = row.querySelector(".qunit");
+    if (unit) unit.innerHTML = orderUnit(line, qty);
+    const runs = row.querySelector(".s-runs");
+    if (runs) runs.innerHTML = runsOutCell(line);
+    const reset = root.querySelector("[data-supply='order-reset']");
+    updateSupplierActions(line);
+    if (!reset) {
+      const actions = root.querySelector(".supply-page-actions");
+      if (actions) actions.insertAdjacentHTML("beforeend", `<button class="btn sm ghost" data-supply="order-reset">Back to the suggested numbers</button>`);
+    }
+  }
+
+  function updateSupplierActions(line) {
+    const id = line.supplier_id || "";
+    const group = findGroup(id);
+    if (!group) return;
+    const ready = groupOrderLines(group).length > 0;
+    const card = root.querySelector(`[data-supplier-group="${CSS.escape(id)}"]`);
+    card?.querySelectorAll("[data-needs-order]").forEach((node) => {
+      if (node.tagName === "A") {
+        node.setAttribute("aria-disabled", String(!ready));
+        node.tabIndex = ready ? 0 : -1;
+      } else if (!node.dataset.busy) node.disabled = !ready;
+      if (ready) node.removeAttribute("title");
+    });
   }
 
   function groupOrderLines(g) {
@@ -2127,144 +2304,190 @@
     return lines;
   }
 
+  function linesText(rows) {
+    return rows.map((row) => `${row.name}: ${fmtQty(row.quantity)} ${plural(row.quantity, row.unit)}`
+      + (row.pack_size ? ` (${fmtQty(row.pack_size)} ${plural(row.pack_size, row.pack_unit)} each)` : "")
+      + (row.product_code ? `, code ${row.product_code}` : "")).join(NEWLINE);
+  }
+
   function orderTextFor(g, d) {
     const s = g.supplier;
     const head = `Order for ${locationName()}${s ? `, ${s.name}` : ""}, ${dMed(d.start)} to ${dMed(d.end)}`;
-    const rows = groupOrderLines(g).map((row) => `${row.name}: ${row.quantity} ${plural(row.quantity, row.unit)}`
-      + (row.pack_size ? ` (${row.pack_size} ${plural(row.pack_size, row.pack_unit)} each)` : "")
-      + (row.product_code ? `, code ${row.product_code}` : ""));
-    return `${head}${NEWLINE}${NEWLINE}${rows.join(NEWLINE)}`;
+    return `${head}${NEWLINE}${NEWLINE}${linesText(groupOrderLines(g))}`;
   }
 
-  // Kept for anything that still calls it: copies the loose list.
-  function orderCopy() { return supplyCopy(""); }
-
-  function supplyCopy(id) {
+  // Copying never records an order. Only "I placed this order" and "I sent
+  // this order" and a sent email do.
+  async function supplyCopy(id) {
     const g = findGroup(id);
     if (!g) return;
-    const text = orderTextFor(g, S.data);
     if (!groupOrderLines(g).length) return toast("Nothing on this list yet", "error");
-    const done = () => toast("Copied. Paste it into a text or an email to your rep.");
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
-    else fallbackCopy(text, done);
-    if (id) logOrder(id, "copy", g).catch(() => {});
-  }
-
-  function fallbackCopy(text, done) {
-    const box = document.createElement("textarea");
-    box.value = text; box.setAttribute("readonly", ""); box.style.position = "fixed"; box.style.top = "-1000px";
-    document.body.appendChild(box); box.select();
-    try { document.execCommand("copy"); done(); } catch (_) { toast("Could not copy on this browser", "error"); }
-    box.remove();
+    const ok = await copyText(orderTextFor(g, S.data));
+    toast(ok ? "Copied" : "Could not copy on this browser", ok ? "ok" : "error");
   }
 
   function logOrder(id, channel, g, extra = {}) {
     const d = S.data;
-    return API.send(`/api/supply/order?location_id=${encodeURIComponent(S.locationId)}`, "POST", {
+    return API.send(`/api/supply/order?${locQ()}`, "POST", {
       supplier_id: id, channel, lines: groupOrderLines(g), window_start: d.start, window_end: d.end, ...extra,
     });
   }
 
+  // After an order goes out: its typed numbers and added lines are done with,
+  // and the list is read again so the lines show what is on order.
+  function afterOrder(g) {
+    const id = g.supplier ? g.supplier.id : "";
+    g.lines.forEach((line) => { delete S.order.edits[lineKey(line)]; });
+    S.order.extras = S.order.extras.filter((row) => (row.supplier_id || "") !== id);
+    saveExtras();
+    S.order.log = null;
+    return loadView(true);
+  }
+
   async function supplyEmail(id) {
+    const loc = S.locationId;
     const g = findGroup(id);
     if (!g || !g.supplier) return;
-    if (!g.supplier.order_email) {
-      toast("Add an order email for this supplier first", "error");
-      return openSupplierForm(g.supplier);
-    }
+    const s = g.supplier;
+    if (!s.order_email) return openSupplierForm(s, "Needed to email the order");
     if (!groupOrderLines(g).length) return toast("Nothing on this order yet", "error");
-    const channel = S.data.mail_provider === "outbox" ? "mail-app" : "email";
+    if (!S.data.mail_provider || S.data.mail_provider === "outbox") {
+      // No mail service on this account: the order opens in the person's own
+      // mail app, and nothing is recorded until they say it went.
+      const subject = `Order from ${locationName()}, ${dShort(S.data.start)} to ${dShort(S.data.end)}`;
+      const body = orderTextFor(g, S.data);
+      window.location.href = `mailto:${encodeURIComponent(s.order_email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+      return openOrderSheet(id, "mail");
+    }
     try {
-      const r = await logOrder(id, channel, g);
-      if (r.mailto) window.location.href = r.mailto;
-      toast(r.message, "ok", r.order.status === "outbox");
-      await loadView(true);
-    } catch (error) { toast(error.message, "error"); }
+      const r = await logOrder(id, "email", g);
+      if (S.locationId !== loc || S.view !== "ordering") return;
+      const status = r.order && r.order.status;
+      if (status !== "sent") {
+        S.order.log = null;
+        return toast(r.message || "The order was not sent. Try again.", "error", true);
+      }
+      toast("Sent");
+      return afterOrder(g);
+    } catch (error) { return toast(error.message, "error"); }
   }
 
-  async function supplyPlaced(id) {
+  async function supplyPlaced(id, channel) {
+    const loc = S.locationId;
     const g = findGroup(id);
     if (!g || !g.supplier) return;
     try {
-      const r = await logOrder(id, "site", g);
+      const r = await logOrder(id, channel, g, channel === "mail-app" ? { confirmed: true } : {});
+      if (S.locationId !== loc || S.view !== "ordering") return;
       closeLayer();
-      toast(r.order.expected_on ? `Noted. Arriving ${whenLabel(r.order.expected_on)}.` : "Noted.");
-      await loadView(true);
-    } catch (error) { toast(error.message, "error"); }
+      const lands = r.order && r.order.expected_on ? whenLabel(r.order.expected_on) : "";
+      toast(lands ? `Noted, lands ${lands}` : "Noted");
+      return afterOrder(g);
+    } catch (error) { return toast(error.message, "error"); }
   }
 
-  // The supplier's site opens in its own tab; this panel is the list to type
-  // in while it is open, and the one button that records the order was placed.
-  function openSitePanel(id) {
+  // The list to type in while the supplier's site or the mail app is open in
+  // another window, and the one button that records the order went.
+  function openOrderSheet(id, mode) {
     const g = findGroup(id);
     const s = g && g.supplier;
-    if (!s || !s.website) return;
+    if (!s) return;
     const lines = groupOrderLines(g);
-    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-      <aside class="sheet">
+    const intro = mode === "mail"
+      ? "Your mail app should open with the order written out. Send it there, then come back."
+      : `${hostOf(s.website)} is open in the other tab. Type this in, then come back.`;
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <aside class="sheet" role="dialog" aria-modal="true" aria-label="Order for ${e(s.name)}">
         <div class="sheet-head">
-          <div><h2>${e(s.name)}</h2><p>Open in the other tab at ${e(hostOf(s.website))}. Type this in, then come back.</p></div>
+          <div><h2>${e(s.name)}</h2><p>${e(intro)}</p></div>
           <div style="margin-left:auto"><button class="icon-btn" data-do="close-layer" aria-label="Close">${icon("close")}</button></div>
         </div>
         <div class="sheet-body">
           <section class="card">
+            ${s.notes ? `<div class="card-head"><div><p>${e(s.notes)}</p></div></div>` : ""}
             <div class="site-list">
-              ${lines.length ? lines.map((row) => `<div class="site-line"><b>${e(row.name)}</b>
-                  <span>${row.quantity} ${e(plural(row.quantity, row.unit))}${row.pack_size ? `, ${num(row.pack_size)} ${e(plural(row.pack_size, row.pack_unit))} each` : ""}${row.product_code ? ` · code ${e(row.product_code)}` : ""}</span></div>`).join("")
-                : `<p class="small muted">Nothing on this order yet.</p>`}
+              ${lines.map((row) => `<div class="site-line"><b>${e(row.name)}</b>
+                <span>${fmtQty(row.quantity)} ${e(plural(row.quantity, row.unit))}${row.pack_size ? `, ${fmtQty(row.pack_size)} ${e(plural(row.pack_size, row.pack_unit))} each` : ""}${row.product_code ? ` · code ${e(row.product_code)}` : ""}</span></div>`).join("")}
             </div>
-            ${lines.length ? `<div class="card-body supply-actions"><div class="btn-row">
-              <button class="btn accent" data-supply="order-placed" data-id="${e(id)}">I placed this order</button>
+            <div class="card-body supply-actions"><div class="btn-row">
+              <button class="btn accent" data-supply="${mode === "mail" ? "order-sent" : "order-placed"}" data-id="${e(id)}">${mode === "mail" ? "I sent this order" : "I placed this order"}</button>
               <button class="btn ghost" data-supply="order-copy" data-id="${e(id)}">Copy</button>
-            </div></div>` : ""}
+            </div></div>
           </section>
         </div>
-      </aside>`;
+      </aside>`);
   }
 
+  // Tap a name: who sells it, how it is bought, the code on their order guide.
   function openItemSettings(key) {
-    const line = (S.data.lines || []).find((row) => lineKey(row) === key);
+    const line = ((S.data && S.data.lines) || []).find((row) => lineKey(row) === key);
     if (!line) return;
-    const suppliers = S.data.suppliers || [];
+    const suppliers = (S.data && S.data.suppliers) || [];
     const drivers = (line.driven_by || []).map((x) => `${x.item} ${x.share_percent}%`).join(", ");
-    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-      <div class="modal-wrap"><div class="modal">
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true" aria-label="${e(line.name)}">
         <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
         <div class="modal-head"><h2>${e(line.name)}</h2>
-          <p>About ${num(line.per_day)} ${e(plural(line.per_day, line.unit))} a day${drivers ? `, from ${e(drivers)}` : ""}.</p></div>
+          <p>About ${fmtQty(line.per_day)} ${e(plural(line.per_day, line.unit))} a day${drivers ? `, from ${e(drivers)}` : ""}.</p></div>
         <form id="f-supply-item" class="modal-body">
           <input type="hidden" name="ingredient" value="${e(key)}">
           <label class="field"><span>Who you buy it from</span>
-            <select name="supplier_id">
+            <select name="supplier_id" ${suppliers.length ? "autofocus" : ""}>
               <option value="">Not set</option>
               ${suppliers.map((s) => `<option value="${e(s.id)}" ${s.id === line.supplier_id ? "selected" : ""}>${e(s.name)}</option>`).join("")}
-            </select></label>
+            </select>
+            ${suppliers.length ? "" : `<small>No suppliers yet. Add one from the Order page and it appears here.</small>`}</label>
           <div class="field"><span class="field-label">How it is bought</span>
             <div class="packrow">
-              <input name="pack_size" type="number" inputmode="decimal" min="0" step="any" value="${line.pack_size || ""}" placeholder="80" aria-label="How many per pack">
-              <input name="pack_unit" value="${e(line.pack_size ? line.pack_unit : line.unit)}" aria-label="Unit" placeholder="${e(line.unit)}">
-              <span>per</span>
-              <select name="pack_label" aria-label="Pack">${PACK_LABELS.map((p) => `<option ${p === (line.pack_label || "case") ? "selected" : ""}>${p}</option>`).join("")}</select>
+              <label class="field"><span>Units in a pack</span>
+                <input name="pack_size" type="number" inputmode="decimal" min="0" step="any" value="${line.pack_size || ""}" placeholder="how many"></label>
+              <label class="field"><span>Unit</span>
+                <input name="pack_unit" value="${e(line.pack_size ? line.pack_unit : line.unit)}" placeholder="${e(line.unit)}"></label>
+              <label class="field"><span>Pack</span>
+                <select name="pack_label">${PACK_LABELS.map((p) => `<option ${p === (line.pack_label || "case") ? "selected" : ""}>${p}</option>`).join("")}</select></label>
             </div>
             <small>Leave the amount empty to keep ordering in ${e(plural(2, line.unit))}.</small></div>
-          <label class="field"><span>Product code with the supplier</span>
+          <label class="field"><span>Code on their order guide</span>
             <input name="product_code" value="${e(line.product_code || "")}" placeholder="Optional"></label>
           <div class="modal-foot" style="margin:6px -22px -20px">
             <button class="btn ghost" type="button" data-do="close-layer">Cancel</button>
             <button class="btn accent" type="submit">Save</button>
           </div>
         </form>
-      </div></div>`;
+      </div></div>`);
   }
 
-  function openSupplierForm(existing) {
-    const s = existing || { delivery_days: [], lead_days: 1 };
-    const days = new Set(s.delivery_days || []);
-    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-      <div class="modal-wrap"><div class="modal">
+  // These are website shortcuts, not direct order connections. A supplier's
+  // account, prices and delivery schedule still belong to that supplier.
+  const SUPPLIER_SITES = [
+    { id: "sysco", name: "Sysco", site: "Sysco Shop", website: "https://shop.sysco.com/" },
+    { id: "usfoods", name: "US Foods", site: "MOXe", website: "https://www.usfoods.com/how-we-help-you/easy-ordering" },
+    { id: "performance", name: "Performance Foodservice", site: "CustomerFirst and regional sites", website: "https://www.performancefoodservice.com/Company/Sign-In" },
+  ];
+
+  function openSupplierPicker() {
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true" aria-label="Add supplier">
         <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
-        <div class="modal-head"><h2>${existing ? e(s.name) : "New supplier"}</h2></div>
-        <form id="f-supply-supplier" class="modal-body">
+        <div class="modal-head"><h2>Add supplier</h2><p>Choose where you buy. Orders are placed on the supplier's website or by email.</p></div>
+        <div class="modal-body">
+          <div class="supplier-choices">${SUPPLIER_SITES.map((s) => `<button class="supplier-choice" type="button" data-supply="supplier-preset" data-id="${s.id}">
+            <span><b>${e(s.name)}</b><small>${e(s.site)}</small></span>${icon("chevR")}</button>`).join("")}</div>
+          <button class="btn" type="button" data-supply="supplier-custom">My supplier isn't listed</button>
+          <p class="supplier-help">Use any supplier by adding their details. You can also ask for help arranging a connection.</p>
+        </div>
+      </div></div>`);
+  }
+
+  function openSupplierForm(existing, emailNote = "", preset = null) {
+    const s = existing || { delivery_days: [], lead_days: 1, ...(preset || {}) };
+    const days = new Set(s.delivery_days || []);
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true" aria-label="${existing ? e(s.name) : "New supplier"}">
+        <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
+        <div class="modal-head"><h2>${existing ? e(s.name) : "Add supplier"}</h2>
+          <p>Save the details you use to order. Confirm delivery days and cutoff with your supplier.</p></div>
+        <form id="f-supply-supplier" class="modal-body" novalidate>
           <input type="hidden" name="sid" value="${e(s.id || "")}">
           <input type="hidden" name="delivery_days" value="${e((s.delivery_days || []).join(","))}">
           <div class="form-grid two">
@@ -2272,12 +2495,14 @@
             <label class="field"><span>Your rep</span><input name="rep_name" value="${e(s.rep_name || "")}" placeholder="Optional"></label>
           </div>
           <div class="form-grid two">
-            <label class="field"><span>Order email</span><input name="order_email" type="email" value="${e(s.order_email || "")}" placeholder="orders@example.com"></label>
-            <label class="field"><span>Phone</span><input name="phone" type="tel" value="${e(s.phone || "")}"></label>
+            <label class="field"><span>Order email</span><input name="order_email" type="email" inputmode="email" autocomplete="off" value="${e(s.order_email || "")}" placeholder="orders@example.com" ${emailNote ? "autofocus" : ""}>
+              <small class="field-err" ${emailNote ? "" : "hidden"}>${e(emailNote)}</small></label>
+            <label class="field"><span>Phone</span><input name="phone" type="tel" inputmode="tel" value="${e(s.phone || "")}" placeholder="Optional"></label>
           </div>
           <div class="form-grid two">
-            <label class="field"><span>Ordering site</span><input name="website" value="${e(s.website || "")}" placeholder="shop.example.com"></label>
-            <label class="field"><span>Account number</span><input name="account_number" value="${e(s.account_number || "")}"></label>
+            <label class="field"><span>Ordering site</span><input name="website" type="url" inputmode="url" autocomplete="off" value="${e(s.website || "")}" placeholder="https://shop.example.com">
+              <small class="field-err" hidden></small></label>
+            <label class="field"><span>Account number</span><input name="account_number" value="${e(s.account_number || "")}" placeholder="Optional"></label>
           </div>
           <div class="field"><span class="field-label">Delivery days</span>
             <div class="chipset">${WEEKDAY_CHOICES.map(([k, l]) =>
@@ -2291,6 +2516,11 @@
               <small>After the order goes in.</small></label>
           </div>
           <label class="field"><span>Notes</span><textarea name="notes" rows="2" placeholder="Minimum order, who to call when the truck is late">${e(s.notes || "")}</textarea></label>
+          <details class="supplier-help"><summary>Need help connecting this supplier?</summary>
+            <p>Send the supplier's name and website to ask about a connection. You can keep ordering by website, phone or email.</p>
+            <button class="btn" type="button" data-supply="supplier-help">Email a connection request</button>
+            <small>Your email app opens with a draft. Send it there to contact support.</small>
+          </details>
           <div class="modal-foot" style="margin:6px -22px -20px">
             ${existing ? `<button class="btn ghost" type="button" data-supply="supplier-remove" data-id="${e(s.id)}">Remove</button>` : ""}
             <span style="flex:1"></span>
@@ -2298,16 +2528,55 @@
             <button class="btn accent" type="submit">Save</button>
           </div>
         </form>
-      </div></div>`;
+      </div></div>`);
+  }
+
+  function emailSupplierRequest(target) {
+    const form = target.closest("form");
+    const data = form ? Object.fromEntries(new FormData(form).entries()) : {};
+    const name = String(data.name || "").trim();
+    if (!name) {
+      form?.querySelector('[name="name"]')?.focus();
+      return toast("Enter the supplier's name", "error");
+    }
+    const support = S.boot?.support_email || "support@quantify.app";
+    const subject = `Supplier connection request: ${name}`;
+    const body = [
+      `Please help me arrange a supplier connection for ${locationName()}.`, "",
+      `Supplier: ${name}`, `Ordering website: ${data.website || "Not known"}`,
+      `Supplier representative: ${data.rep_name || "Not known"}`,
+      `Supplier email: ${data.order_email || "Not known"}`, `Phone: ${data.phone || "Not known"}`,
+      "", `Contact: ${S.boot?.user?.name || ""}`, `Reply to: ${S.boot?.user?.email || ""}`,
+    ].join(NEWLINE);
+    window.location.href = `mailto:${encodeURIComponent(support)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  }
+
+  // Removing a supplier is its own question, with what it does said plainly.
+  function openRemoveSupplier(id) {
+    const s = ((S.data && S.data.suppliers) || []).find((row) => row.id === id);
+    if (!s) return;
+    const n = ((S.data && S.data.lines) || []).filter((row) => row.supplier_id === id).length;
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true" aria-label="Remove ${e(s.name)}">
+        <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
+        <div class="modal-head"><h2>Remove ${e(s.name)}?</h2>
+          <p>${n ? `This takes ${e(s.name)} off ${noun(n, "line")}. ` : ""}Orders you sent stay in the log.</p></div>
+        <div class="modal-body">
+          <div class="modal-foot" style="margin:6px -22px -20px">
+            <button class="btn ghost" type="button" data-supply="supplier-edit" data-id="${e(id)}">Keep it</button>
+            <button class="btn danger" type="button" data-supply="supplier-remove-yes" data-id="${e(id)}">Remove ${e(s.name)}</button>
+          </div>
+        </div>
+      </div></div>`);
   }
 
   function openOrderAdd() {
     const suppliers = (S.data && S.data.suppliers) || [];
-    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-      <div class="modal-wrap"><div class="modal">
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true" aria-label="Add something else">
         <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
         <div class="modal-head"><h2>Add something else</h2>
-          <p>For anything no recipe speaks for. Foil, gloves, the fryer oil.</p></div>
+          <p>Foil, gloves, fryer oil, anything the recipes do not cover.</p></div>
         <form id="f-supply-extra" class="modal-body">
           <label class="field"><span>What</span><input name="name" required minlength="2" placeholder="Fryer oil" autofocus></label>
           <label class="field"><span>How much</span><input name="qty" required value="1" placeholder="2 cases"></label>
@@ -2319,153 +2588,276 @@
             <button class="btn accent" type="submit">Add it</button>
           </div>
         </form>
-      </div></div>`;
+      </div></div>`);
   }
 
-  async function loadSupply() {
-    try {
-      S.supply = await API.get(`/api/supply?location_id=${encodeURIComponent(S.locationId)}`);
-      if (S.view === "settings" && S.settingsTab === "suppliers") render(true);
-    } catch (error) { toast(error.message, "error"); }
-  }
-
+  // Suppliers live on the Order page. This stays only until the Settings tab
+  // that called it is gone.
   function settingsSuppliers() {
-    const v = S.supply;
-    if (!v) { loadSupply(); return `<section class="card"><div class="card-body">${skeleton()}</div></section>`; }
-    const list = v.suppliers || [];
-    return `<div class="stack-tight">
-      <section class="card">
-        <div class="card-head">
-          <div><h2>Who you buy from</h2>
-            ${list.length ? "" : `<p>Add the people you order from and the Order page sorts itself by who to call.</p>`}</div>
-          <div class="spacer"></div>
-          <button class="btn sm accent" data-supply="supplier-new">Add a supplier</button>
-        </div>
-        ${list.map(supplierRow).join("")}
-        ${v.mail_provider === "outbox" && list.length ? `<div class="card-foot">No mail service is connected, so Email the order opens your own mail app with the order written out.</div>` : ""}
-      </section>
-      ${(v.recent_orders || []).length ? `<section class="card">
-        <div class="card-head"><div><h2>Recent orders</h2></div></div>
-        ${v.recent_orders.map(orderLogRow).join("")}
-      </section>` : ""}
-    </div>`;
+    return `<section class="card">${emptyState("Suppliers are on the Order page", "Add, edit and order from each supplier there.",
+      `<button class="btn accent" data-view="ordering">Open the order</button>`)}</section>`;
   }
 
-  function supplierRow(s) {
-    const contact = [s.rep_name, s.phone, s.order_email].filter(Boolean).join(" · ");
-    const days = s.delivery_days || [];
-    const when = [
-      days.length ? joinAnd(days.map(cap)) : "Any day",
-      s.cutoff_label ? `order by ${s.cutoff_label}` : "",
-      `arrives ${(LEAD_CHOICES.find(([v]) => v === Number(s.lead_days)) || [0, "next day"])[1]}`,
-    ].filter(Boolean).join(" · ");
-    return `<div class="srow">
-      <div><b>${e(s.name)}</b>${contact ? `<small>${e(contact)}</small>` : ""}</div>
-      <div><span>${e(when)}</span>
-        ${s.last_order ? `<small>Last order ${e(whenLabel(s.last_order.sent_at))}${s.last_order.expected_on ? `, arriving ${e(whenLabel(s.last_order.expected_on))}` : ""}</small>` : ""}</div>
-      <div class="btn-row">
-        ${s.website ? `<a class="btn sm" href="${e(s.website)}" target="_blank" rel="noopener">${e(hostOf(s.website))} ${icon("external")}</a>` : ""}
-        <button class="btn sm ghost" data-supply="supplier-edit" data-id="${e(s.id)}">Edit</button>
-      </div>
-    </div>`;
+  // The log of orders that went out, read when the fold is opened.
+  function ordersSentBody() {
+    const log = S.order.log;
+    if (!log || log.for !== S.locationId) return `<p class="small muted">Loading</p>`;
+    if (!log.rows.length) return `<p class="small muted">Nothing sent yet. Orders you email or place show here.</p>`;
+    return `<div class="srows">${log.rows.map(orderLogRow).join("")}</div>`;
+  }
+
+  async function loadOrderLog(force = false) {
+    const loc = S.locationId;
+    if (!force && S.order.log && S.order.log.for === loc) return;
+    if (S.order.logFor === loc && !force) return;
+    S.order.logFor = loc;
+    try {
+      const r = await API.get(`/api/supply/orders?${locQ()}`);
+      S.order.log = { for: loc, rows: r.orders || [] };
+    } catch (_) {
+      S.order.log = { for: loc, rows: [] };
+    } finally {
+      S.order.logFor = "";
+    }
+    const host = document.getElementById("orders-sent-body");
+    if (host && S.locationId === loc) host.innerHTML = ordersSentBody();
   }
 
   function orderLogRow(o) {
-    return `<div class="srow">
-      <div><b>${e(o.supplier_name || "No supplier")}</b><small>${noun(o.line_count, "line")} · ${e(CHANNEL_LABELS[o.status] || o.status)}${o.sent_by ? ` · ${e(o.sent_by)}` : ""}</small></div>
-      <div><span>${e(cap(whenLabel(o.sent_at)))}</span>${o.expected_on ? `<small>arriving ${e(whenLabel(o.expected_on))}</small>` : ""}</div>
-      <div class="small muted">${e(o.window_start && o.window_end ? `${dShort(o.window_start)} to ${dShort(o.window_end)}` : "")}</div>
+    const span = o.window_start && o.window_end ? `for ${dShort(o.window_start)} to ${dShort(o.window_end)}` : "";
+    return `<div class="srow clickable" data-supply="order-view" data-id="${e(o.id)}" role="button" tabindex="0">
+      <div><b>${e(o.supplier_name || "No supplier")}</b><small>${noun(o.line_count, "line")} · ${e(CHANNEL_LABELS[o.status] || cap(String(o.status || "").replace(/-/g, " ")))}${o.sent_by ? ` · ${e(o.sent_by)}` : ""}</small></div>
+      <div><span>${e(cap(whenLabel(o.sent_at)))}</span>${o.expected_on ? `<small>lands ${e(whenLabel(o.expected_on))}</small>` : ""}</div>
+      <div class="small muted">${e(span)}</div>
     </div>`;
   }
 
-  // Counts are saved as they are typed, then the list is refreshed once the
-  // typing pauses, so a fast count down the walk-in never fights the screen.
-  let countRefresh = 0;
-  let countChain = Promise.resolve();
-  function saveCount(input) {
-    const body = { ingredient: input.dataset.supplyCount, on_hand: input.value.trim(), unit: input.dataset.unit, kind: input.dataset.kind };
-    countChain = countChain.then(() => API.send(`/api/supply/count?location_id=${encodeURIComponent(S.locationId)}`, "POST", body))
-      .catch((error) => toast(error.message, "error"));
-    clearTimeout(countRefresh);
-    countRefresh = setTimeout(() => countChain.then(() => { if (S.view === "ordering") loadView(true); }), 600);
+  // One past order, written out, with a Copy so it can go again.
+  function openOrderView(id) {
+    const o = (((S.order.log || {}).rows) || []).find((row) => row.id === id);
+    if (!o) return;
+    const head = `Order for ${locationName()}${o.supplier_name ? `, ${o.supplier_name}` : ""}${o.window_start && o.window_end ? `, ${dMed(o.window_start)} to ${dMed(o.window_end)}` : ""}`;
+    const text = `${head}${NEWLINE}${NEWLINE}${linesText(o.lines || [])}`;
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <aside class="sheet" role="dialog" aria-modal="true" aria-label="${e(head)}">
+        <div class="sheet-head">
+          <div><h2>${e(o.supplier_name || "No supplier")}</h2>
+            <p>${e(cap(whenLabel(o.sent_at)))}${o.sent_by ? `, ${e(o.sent_by)}` : ""} · ${e(CHANNEL_LABELS[o.status] || cap(String(o.status || "")))}${o.expected_on ? ` · lands ${e(whenLabel(o.expected_on))}` : ""}</p></div>
+          <div style="margin-left:auto"><button class="icon-btn" data-do="close-layer" aria-label="Close">${icon("close")}</button></div>
+        </div>
+        <div class="sheet-body">
+          <section class="card">
+            <div class="site-list">
+              ${(o.lines || []).map((row) => `<div class="site-line"><b>${e(row.name)}</b>
+                <span>${fmtQty(row.quantity)} ${e(plural(row.quantity, row.unit))}${row.product_code ? ` · code ${e(row.product_code)}` : ""}</span></div>`).join("")}
+            </div>
+            <div class="card-body supply-actions"><div class="btn-row">
+              <button class="btn" data-do="copy" data-copy="${e(text)}">Copy</button>
+            </div></div>
+          </section>
+        </div>
+      </aside>`);
   }
 
-  async function assignSupplier(select) {
-    const key = select.dataset.supplyAssign;
-    const line = (S.data.lines || []).find((row) => lineKey(row) === key);
-    if (!line) return;
-    if (select.value === "new") return openSupplierForm(null);
-    if (!select.value) return;
+  // A count is saved the moment it changes, and only that row is redrawn from
+  // the answer. Nothing else on the page moves under the person's hands.
+  let countChain = Promise.resolve();
+  function saveCount(input) {
+    const raw = input.value.trim();
+    const cell = input.closest(".s-count");
+    const err = cell && cell.querySelector(".count-err");
+    const say = (message) => {
+      if (err) { err.textContent = message; err.hidden = !message; }
+      input.classList.toggle("bad", !!message);
+    };
+    if (input.validity && input.validity.badInput) return say("Enter a number, like 12 or 2.5");
+    if (raw !== "") {
+      const n = Number(raw.replace(/,/g, ""));
+      if (!Number.isFinite(n)) return say("Enter a number, like 12 or 2.5");
+      if (n < 0) return say("A count cannot be below zero");
+    }
+    say("");
+    const key = input.dataset.supplyCount;
+    const loc = S.locationId;
+    const query = `location_id=${encodeURIComponent(loc)}`;
+    const start = S.date;
+    const days = S.order.days;
+    const body = { ingredient: key, on_hand: raw, unit: input.dataset.unit, kind: input.dataset.kind, start, days };
+    countChain = countChain.then(async () => {
+      try {
+        const r = await API.send(`/api/supply/count?${query}`, "POST", body);
+        if (S.view !== "ordering" || S.locationId !== loc) return;
+        const saved = (r && r.saved && r.saved[0]) || r || {};
+        let line = saved.line && saved.line.suggested ? saved.line : (saved.suggested ? saved : null);
+        if (!line) {
+          // Until the count route answers with the line, the list is read
+          // again and just this row is taken from it.
+          const plan = await API.get(`/api/ordering?${query}&start=${start}&days=${days}`);
+          if (S.view !== "ordering" || S.locationId !== loc) return;
+          line = (plan.lines || []).find((row) => lineKey(row) === key) || null;
+          if (S.data && plan.ready) { S.data.counts_taken = plan.counts_taken; S.data.last_counted_at = plan.last_counted_at; }
+        }
+        if (line) patchLine(line);
+      } catch (error) {
+        say(plainError(error));
+      }
+    });
+    return undefined;
+  }
+
+  function patchLine(line) {
+    const key = lineKey(line);
+    const lines = (S.data && S.data.lines) || [];
+    const i = lines.findIndex((row) => lineKey(row) === key);
+    if (i < 0) return;
+    lines[i] = line;
+    updateSupplierActions(line);
+    remember();
+    const row = root.querySelector(`[data-line-row="${CSS.escape(key)}"]`);
+    if (!row) return;
+    const runs = row.querySelector(".s-runs");
+    if (runs) runs.innerHTML = runsOutCell(line);
+    const sub = row.querySelector(".count-sub");
+    if (sub) sub.innerHTML = countSub(line);
+    const box = row.querySelector("[data-supply-count]");
+    if (box && document.activeElement !== box) {
+      box.value = counted(line) ? fmtQty(line.pack_size ? line.on_hand_packs : line.on_hand).replace(/,/g, "") : "";
+    }
+    if (S.order.edits[key] === undefined) {
+      const qty = orderQty(line);
+      const qin = row.querySelector("[data-oqty]");
+      if (qin && document.activeElement !== qin) qin.value = String(qty);
+      const unit = row.querySelector(".qunit");
+      if (unit) unit.innerHTML = orderUnit(line, qty);
+    }
+  }
+
+  const validEmail = (text) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(text || "").trim());
+  // "shop.example.com" or a full address; anything without a real host is
+  // refused before it can become a button that opens nothing.
+  function cleanSite(text) {
+    const t = String(text || "").replace(/\s+/g, "");
+    if (!t) return "";
+    const url = /^https?:\/\//i.test(t) ? t : `https://${t}`;
     try {
-      await API.send(`/api/supply/item?location_id=${encodeURIComponent(S.locationId)}`, "POST", {
-        ingredient: key, supplier_id: select.value, pack_size: line.pack_size || 0,
-        pack_unit: line.pack_unit || "", pack_label: line.pack_label || "case", product_code: line.product_code || "",
-      });
-      await loadView(true);
-    } catch (error) { toast(error.message, "error"); }
+      const u = new URL(url);
+      return /^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/i.test(u.hostname) ? u.href : null;
+    } catch (_) { return null; }
+  }
+  function fieldError(form, name, message) {
+    const input = form.querySelector(`[name=${name}]`);
+    const note = input && input.parentElement.querySelector(".field-err");
+    if (note) { note.textContent = message; note.hidden = !message; }
+    if (input && message) input.focus();
   }
 
   async function supplySubmit(form) {
     const data = Object.fromEntries(new FormData(form).entries());
     const button = form.querySelector("button[type=submit]");
+    const formId = form.getAttribute("id");
+    if (formId === "f-supply-supplier") {
+      if (String(data.name || "").trim().length < 2) return toast("Give the supplier a name", "error");
+      fieldError(form, "order_email", "");
+      fieldError(form, "website", "");
+      if (String(data.order_email || "").trim() && !validEmail(data.order_email)) {
+        return fieldError(form, "order_email", "That does not look like an email address");
+      }
+      const site = cleanSite(data.website);
+      if (site === null) return fieldError(form, "website", "The ordering site should look like shop.example.com");
+      data.website = site;
+    }
+    if (form.dataset.saving === "true") return;
+    form.dataset.saving = "true";
     if (button) button.disabled = true;
     try {
-      if (form.getAttribute("id") === "f-supply-supplier") {
+      if (formId === "f-supply-supplier") {
         data.id = data.sid || "";
         delete data.sid;
         data.delivery_days = String(data.delivery_days || "").split(",").filter(Boolean);
         data.lead_days = Number(data.lead_days);
-        const saved = await API.send(`/api/supply/supplier?location_id=${encodeURIComponent(S.locationId)}`, "POST", data);
+        const saved = await API.send(`/api/supply/supplier?${locQ()}`, "POST", data);
         closeLayer();
-        toast(`Saved ${saved.name}`);
+        toast("Saved");
         S.supply = null;
         return loadView(true);
       }
-      if (form.getAttribute("id") === "f-supply-item") {
+      if (formId === "f-supply-item") {
         data.pack_size = Number(data.pack_size) || 0;
-        await API.send(`/api/supply/item?location_id=${encodeURIComponent(S.locationId)}`, "POST", data);
+        await API.send(`/api/supply/item?${locQ()}`, "POST", data);
         closeLayer();
         toast("Saved");
         return loadView(true);
       }
-      if (form.getAttribute("id") === "f-supply-extra") {
+      if (formId === "f-supply-extra") {
         S.order.extras.push({ name: String(data.name).trim(), qty: String(data.qty || "1").trim(), supplier_id: data.supplier_id || "" });
+        saveExtras();
         closeLayer();
         return render(true);
       }
     } catch (error) {
       toast(error.message, "error");
     } finally {
+      delete form.dataset.saving;
       if (button) button.disabled = false;
     }
+    return undefined;
   }
 
+  const pendingSupplierOrders = new Set();
   async function supplyAction(target) {
     const kind = target.dataset.supply;
     const id = target.dataset.id || "";
-    if (kind === "supplier-new") return openSupplierForm(null);
+    if (target.disabled) return undefined;
+    const menu = target.closest("details.overflow");
+    if (menu) menu.removeAttribute("open");
+    if (kind === "supplier-new") return openSupplierPicker();
+    if (kind === "supplier-custom") return openSupplierForm(null);
+    if (kind === "supplier-preset") {
+      const preset = SUPPLIER_SITES.find((s) => s.id === id);
+      return preset ? openSupplierForm(null, "", { name: preset.name, website: preset.website }) : undefined;
+    }
+    if (kind === "supplier-help") return emailSupplierRequest(target);
     if (kind === "supplier-edit") {
-      const s = ((S.data && S.data.suppliers) || (S.supply && S.supply.suppliers) || []).find((row) => row.id === id);
-      return s ? openSupplierForm(s) : loadSupply();
+      const s = ((S.data && S.data.suppliers) || []).find((row) => row.id === id);
+      return s ? openSupplierForm(s) : toast("That supplier is not on this location. Refresh and try again.", "error");
     }
-    if (kind === "supplier-remove") {
-      target.outerHTML = `<button class="btn danger" type="button" data-supply="supplier-remove-yes" data-id="${e(id)}">Yes, remove it</button>`;
-      return;
-    }
+    if (kind === "supplier-remove") return openRemoveSupplier(id);
     if (kind === "supplier-remove-yes") {
+      target.disabled = true;
       try {
-        await API.send(`/api/supply/supplier?location_id=${encodeURIComponent(S.locationId)}`, "DELETE", { id });
+        await API.send(`/api/supply/supplier?${locQ()}`, "DELETE", { id });
         closeLayer();
         toast("Removed");
         S.supply = null;
         return loadView(true);
-      } catch (error) { return toast(error.message, "error"); }
+      } catch (error) { target.disabled = false; return toast(error.message, "error"); }
     }
     if (kind === "item") return openItemSettings(target.dataset.key);
     if (kind === "order-copy") return supplyCopy(id);
-    if (kind === "order-email") return supplyEmail(id);
-    if (kind === "order-site") return openSitePanel(id);
-    if (kind === "order-placed") return supplyPlaced(id);
+    if (["order-email", "order-placed", "order-sent"].includes(kind)) {
+      const key = `${S.locationId}:${id}`;
+      if (pendingSupplierOrders.has(key)) return;
+      pendingSupplierOrders.add(key);
+      target.disabled = true;
+      target.dataset.busy = "true";
+      try {
+        if (kind === "order-email") return await supplyEmail(id);
+        return await supplyPlaced(id, kind === "order-sent" ? "mail-app" : "site");
+      } finally {
+        pendingSupplierOrders.delete(key);
+        delete target.dataset.busy;
+        target.disabled = false;
+      }
+    }
+    if (kind === "order-site") return openOrderSheet(id, "site");
+    if (kind === "order-view") return openOrderView(id);
+    if (kind === "order-add") return openOrderAdd();
+    if (kind === "order-reset") { S.order.edits = {}; return render(true); }
+    if (kind === "order-drop") {
+      S.order.extras.splice(Number(target.dataset.index), 1);
+      saveExtras();
+      return render(true);
+    }
     return undefined;
   }
 
@@ -2477,17 +2869,50 @@
       if (hidden) hidden.value = Array.from(day.parentElement.querySelectorAll(".chip.on")).map((n) => n.dataset.supplyDay).join(",");
       return;
     }
+    const step = event.target.closest("[data-oadj]");
+    if (step) return orderAdjust(step.dataset.oadj, Number(step.dataset.step));
     const target = event.target.closest("[data-supply]");
-    if (target) supplyAction(target);
+    if (target) {
+      if (target.getAttribute("aria-disabled") === "true") return event.preventDefault();
+      supplyAction(target);
+    }
+  });
+
+  // The overflow menu closes when the tap lands anywhere else.
+  document.addEventListener("pointerdown", (event) => {
+    document.querySelectorAll("details.overflow[open]").forEach((node) => {
+      if (!node.contains(event.target)) node.removeAttribute("open");
+    });
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const row = event.target.closest && event.target.closest("[data-supply='order-view']");
+    if (row && event.target === row) { event.preventDefault(); openOrderView(row.dataset.id); }
   });
 
   document.addEventListener("change", (event) => {
     const count = event.target.closest("[data-supply-count]");
     if (count) return saveCount(count);
-    const assign = event.target.closest("[data-supply-assign]");
-    if (assign) return assignSupplier(assign);
+    const box = event.target.closest("[data-oqty]");
+    if (box) {
+      const line = ((S.data && S.data.lines) || []).find((row) => lineKey(row) === box.dataset.oqty);
+      const value = Number(box.value);
+      if (line) setOrderQty(line, Number.isFinite(value) && value >= 0 ? Math.round(value * 10) / 10 : 0);
+      return undefined;
+    }
     return undefined;
   });
+
+  // Which folds are open survives a repaint. toggle does not bubble, so it is
+  // caught on the way down.
+  document.addEventListener("toggle", (event) => {
+    const node = event.target;
+    if (!node || node.tagName !== "DETAILS") return;
+    S.order.folds = S.order.folds || {};
+    if (node.dataset.fold !== undefined) S.order.folds[node.dataset.fold] = node.open;
+    if (node.id === "orders-sent") { S.order.logOpen = node.open; if (node.open) loadOrderLog(); }
+  }, true);
 
   document.addEventListener("submit", (event) => {
     const form = event.target;
@@ -3589,11 +4014,6 @@
     }
     if (target.dataset.htab) { S.historyTab = target.dataset.htab; return loadView(); }
     if (target.dataset.owin) { S.order.days = Number(target.dataset.owin); S.order.edits = {}; return loadView(); }
-    if (target.dataset.oadj) return orderAdjust(target.dataset.oadj, Number(target.dataset.step));
-    if (target.dataset.odrop) {
-      S.order.extras.splice(Number(target.dataset.odrop), 1);
-      return render(true);
-    }
     if (target.dataset.stab) {
       // The tab paints from what is already in memory; only what it lacks is
       // fetched afterwards.
@@ -3746,8 +4166,6 @@
         window.scrollTo(0, 0);
         await loadView();
         return startTour(true);
-      case "order-reset": S.order.edits = {}; return render(true);
-      case "order-add": return openOrderAdd();
       case "billing-portal": return billingRedirect("/api/billing/portal");
       case "billing-checkout": return billingRedirect("/api/billing/checkout");
       case "billing-resume":
@@ -3755,15 +4173,6 @@
         catch (error) { toast(error.message, "error"); }
         return;
       default: return;
-    }
-  });
-
-  document.addEventListener("change", (event) => {
-    const box = event.target.closest("[data-oqty]");
-    if (box) {
-      const value = Number(box.value);
-      S.order.edits[box.dataset.oqty] = Number.isFinite(value) && value >= 0 ? value : 0;
-      render(true);
     }
   });
 

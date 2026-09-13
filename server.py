@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from quantify_app import ai, billing, costs, intraday, localtime, ordering, supply, timezones, transactions, updates
+from quantify_app import ai, billing, costs, geography, intraday, localtime, ordering, supply, timezones, transactions, updates
 from quantify_app.auth import (
     EMAIL_CODE_MINUTES,
     auth_state,
@@ -1015,21 +1015,30 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             if data.get("add_location") and str(data.get("location_name", "")).strip():
                 billing.require_location_capacity(conn, organization_id)
                 location_id = f"loc-{uuid.uuid4().hex[:10]}"
+                city = str(data.get("city") or resolved.get("city") or place)[:80]
+                region = str(data.get("region") or resolved.get("region") or "")[:40]
+                geo = geography.resolve_place(city, region)
+                latitude = _float(data.get("latitude"), geo["latitude"] or 0, -90.0, 90.0, "Latitude")
+                longitude = _float(data.get("longitude"), geo["longitude"] or 0, -180.0, 180.0, "Longitude")
+                if data.get("latitude") is not None and data.get("longitude") is not None and (latitude or longitude):
+                    geo = {"status": "owner", "source": "Coordinates entered during location setup",
+                           "key": f"owner:{latitude:.6f},{longitude:.6f}"}
                 conn.execute(
                     """INSERT INTO locations(
                           id,organization_id,name,concept,address,city,region,postal_code,
-                          latitude,longitude,timezone,open_hour,close_hour,currency,active)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'USD',1)""",
+                          latitude,longitude,timezone,open_hour,close_hour,currency,active,
+                          geography_status,geography_source,geography_key)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'USD',1,?,?,?)""",
                     (
                         location_id, organization_id, str(data.get("location_name"))[:120],
                         str(data.get("concept", "Restaurant"))[:60], str(data.get("address", ""))[:200],
-                        str(data.get("city", place))[:80], str(data.get("region", ""))[:40],
+                        city, region,
                         str(data.get("postal_code", ""))[:16],
-                        _float(data.get("latitude"), 40.7128, -90.0, 90.0, "Latitude"),
-                        _float(data.get("longitude"), -74.0060, -180.0, 180.0, "Longitude"),
+                        latitude, longitude,
                         resolved["timezone"],
                         _int(data.get("open_hour"), 7, 0, 23, "Opening hour"),
                         _int(data.get("close_hour"), 21, 0, 28, "Closing hour"),
+                        geo["status"], geo["source"], geo["key"],
                     ),
                 )
                 conn.execute(
@@ -1055,8 +1064,8 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                     concept=str(data.get("concept", "")),
                     name=company,
                     owner_email=session["email"],
-                    city=str(data.get("city", place))[:80],
-                    region=str(data.get("region", ""))[:40],
+                    city=str(data.get("city") or resolved.get("city") or place)[:80],
+                    region=str(data.get("region") or resolved.get("region") or "")[:40],
                     timezone=resolved["timezone"],
                     latitude=resolved.get("latitude"),
                     longitude=resolved.get("longitude"),
@@ -1090,26 +1099,30 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             resolved = timezones.resolve(str(data.get("timezone") or place_query))
             if not resolved.get("confident"):
                 raise ValueError("Choose a recognised city or time zone before adding the location")
-            geo = timezones.resolve(place_query)
+            named_place = timezones.resolve(place_query)
+            city = named_place.get("city") or place.split(",", 1)[0].strip()
+            region = region or named_place.get("region") or ""
+            geo = geography.resolve_place(city, region)
             opens, closes = _trading_hours(data)
             billing.ensure_subscription(conn, organization_id)
             billing.require_location_capacity(conn, organization_id)
             location_id = f"loc-{uuid.uuid4().hex[:10]}"
             latitude, longitude = geo.get("latitude"), geo.get("longitude")
-            verified = latitude is not None and longitude is not None
+            verified = geo["status"] != "unverified"
             conn.execute(
                 """INSERT INTO locations(id,organization_id,name,concept,address,city,region,postal_code,
-                      latitude,longitude,timezone,open_hour,close_hour,currency,active)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'USD',1)""",
-                (location_id, organization_id, name, concept, "", geo.get("city") or place,
-                 geo.get("region") or region, "",
-                 latitude if verified else 0, longitude if verified else 0, resolved["timezone"], opens, closes),
+                      latitude,longitude,timezone,open_hour,close_hour,currency,active,
+                      geography_status,geography_source,geography_key)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'USD',1,?,?,?)""",
+                (location_id, organization_id, name, concept, "", city, region, "",
+                 latitude if verified else 0, longitude if verified else 0, resolved["timezone"], opens, closes,
+                 geo["status"], geo["source"], geo["key"]),
             )
             conn.execute("INSERT INTO settings(location_id,key,value) VALUES(?,'geography_status',?)",
-                         (location_id, "verified" if verified else "unverified"))
+                         (location_id, geo["status"]))
             conn.commit()
             self.json_response({"location": dict(_location(conn, location_id, organization_id)),
-                                "geography_status": "verified" if verified else "unverified"}, status=201)
+                                "geography_status": geo["status"]}, status=201)
             return True
 
         if path == "/api/bootstrap" and method == "GET":
@@ -1494,18 +1507,25 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             data = self._read_json()
             current = _location(conn, location_id, session["organization_id"])
             resolved = timezones.resolve(str(data.get("timezone") or data.get("place") or current["timezone"]), fallback=current["timezone"])
+            city = str(data.get("city") or current["city"])[:80]
+            region = str(data.get("region") or current["region"])[:40]
+            moved = city != current["city"] or region != current["region"]
+            geo = geography.resolve_place(city, region) if moved else geography.for_location(current)
             conn.execute(
-                "UPDATE locations SET name=?,concept=?,city=?,region=?,timezone=?,open_hour=?,close_hour=? WHERE id=?",
+                """UPDATE locations SET name=?,concept=?,city=?,region=?,timezone=?,open_hour=?,close_hour=?,
+                   latitude=?,longitude=?,geography_status=?,geography_source=?,geography_key=? WHERE id=?""",
                 (
                     str(data.get("name") or current["name"])[:120],
                     str(data.get("concept") or current["concept"])[:80],
-                    str(data.get("city") or current["city"])[:80],
-                    str(data.get("region") or current["region"])[:40],
+                    city, region,
                     resolved["timezone"],
                     *_trading_hours({
                         "open_hour": data.get("open_hour", current["open_hour"]),
                         "close_hour": data.get("close_hour", current["close_hour"]),
                     }),
+                    geo["latitude"] if geo["latitude"] is not None else 0,
+                    geo["longitude"] if geo["longitude"] is not None else 0,
+                    geo["status"], geo["source"], geo["key"],
                     location_id,
                 ),
             )

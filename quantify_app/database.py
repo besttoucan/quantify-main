@@ -547,6 +547,14 @@ CREATE INDEX IF NOT EXISTS idx_supplier_items_supplier ON supplier_items(supplie
 # Columns added after the first release. SQLite has no "add column if missing",
 # so each one is checked against the live table before it is applied.
 ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
+    ("locations", "geography_status", "TEXT NOT NULL DEFAULT 'unverified'"),
+    ("locations", "geography_source", "TEXT NOT NULL DEFAULT ''"),
+    ("locations", "geography_key", "TEXT NOT NULL DEFAULT ''"),
+    ("weather", "geography_key", "TEXT NOT NULL DEFAULT ''"),
+    ("events", "geography_key", "TEXT NOT NULL DEFAULT ''"),
+    ("events", "attendance_source", "TEXT NOT NULL DEFAULT 'unverified'"),
+    ("events", "distance_source", "TEXT NOT NULL DEFAULT 'unverified'"),
+    ("cost_settings", "payroll_load_source", "TEXT NOT NULL DEFAULT 'unverified'"),
     ("weather", "snowfall_cm", "REAL NOT NULL DEFAULT 0"),
     ("weather", "uv_index", "REAL NOT NULL DEFAULT 0"),
     ("organizations", "concept", "TEXT NOT NULL DEFAULT ''"),
@@ -633,6 +641,8 @@ def initialize(db_path: Path | str) -> None:
             if stored and stored < version:
                 for statement in statements:
                     conn.execute(statement)
+        from .geography import repair_locations
+        repair_locations(conn)
         conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_run_version
                      ON forecast_runs(location_id,target_date,model_version,data_version)
                      WHERE data_version IS NOT NULL""")

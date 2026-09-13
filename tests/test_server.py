@@ -219,7 +219,7 @@ class ServerTests(unittest.TestCase):
     def test_cost_validation_speaks_plainly(self) -> None:
         response, data = self.one.call("PUT", "/api/costs?location_id=loc-one", {"hourly_wage": 3})
         self.assertEqual(response.status, 400)
-        self.assertEqual(data["error"], "Enter what you pay an hour, or leave the local minimum")
+        self.assertEqual(data["error"], "Enter hourly pay of at least $5, or leave the field blank")
         response, data = self.one.call("PUT", "/api/costs?location_id=loc-one",
                                        {"categories": [{"category": "Coffee", "percent": 0}]})
         self.assertEqual(response.status, 400)
@@ -369,6 +369,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.status, 201, result)
         location_id = result['location']['id']
         self.assertEqual(result['location']['timezone'], 'America/Denver')
+        self.assertEqual(result['location']['city'], 'Denver')
+        self.assertEqual(result['location']['geography_status'], 'city')
+        self.assertTrue(result['location']['geography_key'].startswith('census-2025:'))
+        self.assertLess(result['location']['longitude'], -104)
         with connect(self.db_path) as conn:
             for table in ['menu_items', 'sales', 'forecast_calls', 'context_daily']:
                 self.assertEqual(conn.execute(f'SELECT COUNT(*) FROM {table} WHERE location_id=?', (location_id,)).fetchone()[0], 0)
@@ -385,6 +389,13 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.status, 400, result)
         response, result = client.call('GET', '/api/bootstrap')
         self.assertEqual(len(result['locations']), 3)
+        response, saved = client.call('POST', f'/api/location?location_id={location_id}', {'city':'Unknown town', 'region':'ZZ'})
+        self.assertEqual(response.status, 200, saved)
+        response, changed = client.call('GET', f'/api/bootstrap?location_id={location_id}')
+        moved = next(row for row in changed['locations'] if row['id'] == location_id)
+        self.assertEqual(moved['geography_status'], 'unverified')
+        self.assertEqual(moved['geography_key'], '')
+        self.assertEqual((moved['latitude'], moved['longitude']), (0, 0))
 
     def test_unsigned_payment_webhook_cannot_change_plans(self) -> None:
         response, result = _Client(self.port).call('POST', '/api/webhooks/stripe', {'type': 'customer.subscription.updated'}, with_csrf=False)

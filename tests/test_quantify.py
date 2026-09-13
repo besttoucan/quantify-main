@@ -551,6 +551,7 @@ class QuantifyPlatformTests(unittest.TestCase):
 
         day = TODAY - timedelta(days=1)
         with connect(self.db_path) as conn:
+            costs.save_cost_settings(conn, LOCATION, {"hourly_wage": 17.0, "payroll_load_percent": 18.0})
             context = costs.cost_context(conn, LOCATION)
             orders = day_orders(conn, LOCATION, day)
             revenue = conn.execute(

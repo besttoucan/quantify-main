@@ -926,6 +926,13 @@ input.mini { width: 74px; text-align: right; padding: 6px 8px; margin: 0; }
 
 /* A unit printed inside a number box: $ / hour, %, people. */
 .unitwrap { position: relative; display: block; }
+.cost-reference { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.cost-reference > summary { min-height: 44px; display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--ink); font-size: var(--t-md); }
+.cost-reference > summary::before { content: "+"; }
+.cost-reference[open] > summary::before { content: "-"; }
+.cost-reference-body { padding: 0 0 14px; font-size: var(--t-base); color: var(--ink-2); line-height: 1.55; }
+.cost-reference-body p + p { margin-top: 8px; }
+.cost-reference-body a { text-decoration: underline; text-underline-offset: 2px; color: var(--ink); }
 .unitwrap input { padding-right: 76px; }
 .unitwrap .unit {
   position: absolute; right: 12px; top: 50%; transform: translateY(-50%); pointer-events: none;
@@ -1347,6 +1354,7 @@ body.tour-on { overflow: hidden; }
 /* Fingers, not pointers. On a touch screen every control gets room to be hit
    without the row next to it being hit instead. */
 @media (pointer: coarse) {
+  .costs-table .unitwrap.mini input.mini { min-height: 44px; }
   .btn, .btn.sm, .topbar-tools .btn.sm { min-height: 44px; height: auto; }
   .icon-btn, .topbar-tools .icon-btn { width: 44px; height: 44px; }
   .datebtn, .topbar-tools .datebtn { min-height: 44px; height: 44px; }

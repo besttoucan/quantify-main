@@ -3011,18 +3011,32 @@
     const s = c.settings;
     const w = c.wage;
     const ex = c.example;
-    const wage = s.hourly_wage || w.state_minimum;
+    const wage = s.hourly_wage || "";
+    const reference = w.reference || {};
+    const payroll = w.payroll_reference || { components: [], sources: [], notes: [] };
+    const known = (value) => value !== null && value !== undefined && Number.isFinite(Number(value));
+    const referenceNote = known(reference.rate)
+      ? `${money(reference.rate, true)} is the ${e(reference.place || "state")} reference for ${e(reference.reference_year)}${reference.effective_from ? `, effective ${e(reference.effective_from)}` : ""}. ${e(reference.scope)}`
+      : e(reference.scope || "No verified wage reference for this location. Enter what you pay.");
     return `<form id="f-costs" class="stack-tight" autocomplete="off">
       <section class="card">
         <div class="card-head"><div><h2>What an hour of work costs</h2>
           <p>${e(w.detail)}</p></div></div>
         <div class="card-body form-grid">
           <div class="form-grid two">
-            ${unitField("What you pay an hour", "hourly_wage", wage, "$ / hour", 'step="0.25" min="0"', `Starts at the local minimum, ${money(w.state_minimum, true)}.`)}
-            ${unitField("Payroll on top", "payroll_load_percent", s.payroll_load_percent, "%", 'step="0.5" min="0" max="60"', `Tax and insurance. 18% is typical, so an hour costs ${money(w.loaded, true)}.`)}
+            ${unitField("Average pay per hour", "hourly_wage", wage, "$ / hour", 'step="0.01" min="0"', "From your payroll, before employer taxes and insurance. Blank means unknown.")}
+            ${unitField("Employer payroll costs on top", "payroll_load_percent", w.payroll_load_source === "owner" ? s.payroll_load_percent : "", "%", 'step="0.01" min="0" max="60"', "Employer taxes, insurance and benefits divided by gross wages, from the same payroll period. Blank means unknown.")}
           </div>
+          <p class="field-note">${known(w.loaded) ? `With your figures, an hour costs about ${money(w.loaded, true)} including employer payroll costs.` : "Wages and money kept stay unknown until both pay fields are entered."}</p>
+          <details class="cost-reference"><summary>Wage and payroll references</summary><div class="cost-reference-body">
+            <p>${referenceNote} <a href="${e(reference.source_url || "https://www.dol.gov/agencies/whd/minimum-wage/state")}" target="_blank" rel="noopener">Wage source</a>.</p>
+            ${(payroll.components || []).map((row) => `<p><b>${e(row.name)}: ${e(row.percent)}%.</b> ${e(row.detail)}</p>`).join("")}
+            ${(payroll.notes || []).map((note) => `<p>${e(note)}</p>`).join("")}
+            <p>${(payroll.sources || []).map((source) => `<a href="${e(source.url)}" target="_blank" rel="noopener">${e(source.label)}</a>`).join(" · ")}</p>
+            <p>References checked ${e(reference.checked_on || "")}. They do not replace your payroll report or establish which rules apply to each worker.</p>
+          </div></details>
           <div class="form-grid two">
-            ${unitField("Tickets one person handles an hour", "orders_per_person_per_hour", s.orders_per_person_per_hour, "tickets", 'step="0.5" min="1" max="40"', "Six is typical for table service.")}
+            ${unitField("Tickets one person handles an hour", "orders_per_person_per_hour", s.orders_per_person_per_hour, "tickets", 'step="0.5" min="1" max="40"', "Planning assumption. Set this from your own shifts.")}
             ${unitField("Fewest people on at once", "min_staff", s.min_staff, "people", 'step="1" min="1" max="30"', "Counted for every open hour.")}
           </div>
           <div class="form-grid two">
@@ -3063,7 +3077,7 @@
         </div>
       </section>
 
-      ${ex ? `<section class="card">
+      ${ex && ex.complete !== false ? `<section class="card">
         <div class="card-head"><div><h2>What this does to a real day</h2>
           <p>${e(dMed(ex.date))}, worked through with the numbers above.</p></div></div>
         <div class="card-body"><div class="ledger">
@@ -3073,7 +3087,7 @@
           ${ex.other ? `<div><b>Everything else</b><small>one day's share of what you listed</small></div><div class="num">${money(-ex.other)}</div>` : ""}
           <div class="total"><b>Kept</b><small>about ${ex.margin_percent}% of sales</small></div><div class="num total"><b>${money(ex.left_after_costs)}</b></div>
         </div></div>
-      </section>` : ""}
+      </section>` : ex ? `<section class="card"><div class="card-body"><p>Sales and food estimates are available for ${e(dMed(ex.date))}. Enter pay and employer payroll costs above before estimating wages or money kept.</p></div></section>` : ""}
 
       <div class="savebar"><span class="form-error" id="costs-error"></span><button class="btn accent" type="submit">Save costs</button></div>
     </form>`;

@@ -237,6 +237,8 @@ def _time_minutes(value: str) -> int:
 
 
 def event_impact(event: sqlite3.Row | dict[str, Any], open_hour: int, close_hour: int) -> float:
+    if event["attendance"] is None or event["distance_miles"] is None:
+        return 0.0  # A listing alone does not establish a crowd size or proximity.
     attendance = max(50, int(event["attendance"] or 0))
     distance = max(0.05, float(event["distance_miles"] or 0))
     relevance = clamp(float(event["relevance"] or 0.3), 0.05, 1.0)
@@ -262,21 +264,36 @@ def _load_location(conn: sqlite3.Connection, location_id: str) -> sqlite3.Row:
 
 
 def _weather_map(conn: sqlite3.Connection, location_id: str, start: date, end: date) -> dict[str, dict[str, Any]]:
+    from .geography import for_location
+    location = conn.execute("SELECT * FROM locations WHERE id=?", (location_id,)).fetchone()
+    geo = for_location(location)
+    if not geo["key"]:
+        return {}
     rows = conn.execute(
-        "SELECT * FROM weather WHERE location_id=? AND date>=? AND date<=?",
-        (location_id, start.isoformat(), end.isoformat()),
+        "SELECT * FROM weather WHERE location_id=? AND date>=? AND date<=? AND geography_key=?",
+        (location_id, start.isoformat(), end.isoformat(), geo["key"]),
     ).fetchall()
     return {row["date"]: dict(row) for row in rows}
 
 
 def _events_map(conn: sqlite3.Connection, location_id: str, start: date, end: date) -> dict[str, list[dict[str, Any]]]:
+    from .geography import for_location
+    location = conn.execute("SELECT * FROM locations WHERE id=?", (location_id,)).fetchone()
+    geo = for_location(location)
+    if not geo["key"]:
+        return {}
     rows = conn.execute(
-        "SELECT * FROM events WHERE location_id=? AND date>=? AND date<=?",
-        (location_id, start.isoformat(), end.isoformat()),
+        "SELECT * FROM events WHERE location_id=? AND date>=? AND date<=? AND geography_key=?",
+        (location_id, start.isoformat(), end.isoformat(), geo["key"]),
     ).fetchall()
     output: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        output[row["date"]].append(dict(row))
+        event = dict(row)
+        if event.get("attendance_source") not in {"provider_estimate", "owner"}:
+            event["attendance"] = None
+        if event.get("distance_source") not in {"city_point", "coordinates"}:
+            event["distance_miles"] = None
+        output[row["date"]].append(event)
     return output
 
 
@@ -301,6 +318,11 @@ def build_context(
     events: list[dict[str, Any]],
     weather_history: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    from .geography import for_location
+    geo = for_location(location)
+    if geo["status"] == "unverified":
+        weather_row, events, weather_history = None, [], {}
+    weather_available = bool(weather_row)
     weather_row = weather_row or {
         "temp_high": 68.0, "temp_low": 52.0, "precipitation_mm": 0.0,
         "snowfall_cm": 0.0, "uv_index": 0.0,
@@ -363,7 +385,9 @@ def build_context(
         "uv_scaled": clamp(uv_index / 10.0, 0.0, 1.5),
         "weather_condition": condition,
         "weather_source": weather_row.get("source", "unknown"),
-        "daylight_hours": _daylight_hours(float(location["latitude"]), target),
+        "weather_available": weather_available,
+        "geography": geo,
+        "daylight_hours": _daylight_hours(geo["latitude"], target) if geo["latitude"] is not None else 12.0,
         "event_groups": event_groups,
         "event_total": clamp(sum(event_groups.values()), 0.0, 5.0),
         "events": enriched_events,
@@ -669,6 +693,8 @@ def _driver_effects(
                 detail = f"{context['weekday']}s usually run {direction} the rest of the week here."
             based_on = f"{evidence.get('weekday_samples', 0)} past {context['weekday']}s here"
         elif group == "weather":
+            if not context.get("weather_available"):
+                continue
             bits = [f"{context['weather_condition'].lower()}", f"high {round(context['temp_high'])}°"]
             if context.get("precipitation_mm", 0) >= 0.5:
                 bits.append(f"{context['precipitation_mm'] / 25.4:.1f} in of rain")
@@ -685,10 +711,10 @@ def _driver_effects(
             relevant = [event for event in context["events"] if event["impact"] >= 0.08]
             if relevant:
                 top = relevant[0]
-                detail = (
-                    f"{top['name']} is on, about {float(top['distance_miles']):.1f} miles away, "
-                    f"with roughly {int(top['attendance']):,} people expected during service."
-                )
+                distance_basis = "the city reference point" if top.get("distance_source") == "city_point" else "this location"
+                crowd_source = "The provider estimates" if top.get("attendance_source") == "provider_estimate" else "Your saved estimate is"
+                detail = (f"{top['name']} is listed about {float(top['distance_miles']):.1f} miles from {distance_basis}. "
+                          f"{crowd_source} {int(top['attendance']):,} attendees for the event; that is not a count of visitors to your business.")
                 based_on = f"{len(relevant)} of {len(context['events'])} nearby listings big enough to matter"
             else:
                 detail = "Several smaller things are on nearby. None of them dominates, but together they add up."
@@ -1225,9 +1251,7 @@ def _data_health(conn: sqlite3.Connection, location_id: str, target_date: date) 
             "SELECT provider,status,mode,last_sync FROM integrations WHERE location_id=?", (location_id,)
         ).fetchall()
     }
-    weather = conn.execute(
-        "SELECT source FROM weather WHERE location_id=? AND date=?", (location_id, target_date.isoformat())
-    ).fetchone()
+    weather = _weather_map(conn, location_id, target_date, target_date).get(target_date.isoformat())
     return {
         "history_start": span["first_date"] if span else None,
         "latest_sale_date": span["latest_date"] if span else None,

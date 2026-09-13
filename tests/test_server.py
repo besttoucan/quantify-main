@@ -188,7 +188,7 @@ class ServerTests(unittest.TestCase):
     def test_cost_validation_speaks_plainly(self) -> None:
         response, data = self.one.call("PUT", "/api/costs?location_id=loc-one", {"hourly_wage": 3})
         self.assertEqual(response.status, 400)
-        self.assertEqual(data["error"], "Enter what you pay an hour, or leave the local minimum")
+        self.assertEqual(data["error"], "Enter hourly pay of at least $5, or leave the field blank")
         response, data = self.one.call("PUT", "/api/costs?location_id=loc-one",
                                        {"categories": [{"category": "Coffee", "percent": 0}]})
         self.assertEqual(response.status, 400)

@@ -693,9 +693,15 @@ def seed_workspace(
         local["region"] = region.strip()[:40]
     if timezone and timezone.strip():
         local["timezone"] = timezone.strip()
+    from .geography import resolve_place
+    geo = resolve_place(local["city"], local["region"])
+    # Sample streets and coordinates are never the new owner's premises.
+    local["latitude"] = geo["latitude"] if geo["latitude"] is not None else 0.0
+    local["longitude"] = geo["longitude"] if geo["longitude"] is not None else 0.0
     if latitude is not None and longitude is not None:
         local["latitude"] = float(latitude)
         local["longitude"] = float(longitude)
+        geo = {"status": "owner", "source": "Coordinates entered for this location", "key": ""}
     if open_hour is not None and close_hour is not None:
         opens = max(0, min(23, int(open_hour)))
         closes = max(1, min(28, int(close_hour)))
@@ -719,6 +725,8 @@ def seed_workspace(
         conn, local, organization_id, location_id, today, history_days,
         owner_email=owner_email, seed_key=template["id"],
     )
+    conn.execute("UPDATE locations SET geography_status=?,geography_source=?,geography_key=? WHERE id=?",
+                 (geo["status"], geo["source"], geo["key"], location_id))
     conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('seeded_at',?)", (_utc_now(),))
     conn.commit()
     return location_id

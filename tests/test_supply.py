@@ -401,7 +401,8 @@ class SupplyTests(unittest.TestCase):
             anyday = supply.save_supplier(conn, LOCATION, {"name": "Cash and carry", "lead_days": 1})
             supply.save_item(conn, LOCATION, {"ingredient": "beef patty", "supplier_id": anyday["id"]})
             page = _line(supply.attach(conn, LOCATION, order_plan(conn, LOCATION, TODAY, 7), _now()), "beef patty")
-            per_day = page["per_day"]
+            # Count against exact demand, not the rounded whole-item display.
+            per_day = page["daily_base"][1]
             supply.save_count(conn, LOCATION, {"ingredient": "beef patty", "on_hand": per_day * 3 + 1, "unit": "patty"})
             line = _line(supply.attach(conn, LOCATION, order_plan(conn, LOCATION, TODAY, 7), _now()), "beef patty")
             runs_out = date.fromisoformat(line["runs_out_on"])

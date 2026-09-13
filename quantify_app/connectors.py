@@ -102,6 +102,7 @@ def _upsert_weather_payload(
     location_id: str,
     payload: dict[str, Any],
     source: str,
+    geography_key: str = "",
 ) -> int:
     daily = payload.get("daily") or {}
     dates = daily.get("time") or []
@@ -122,13 +123,13 @@ def _upsert_weather_payload(
         if high is None or low is None:
             continue
         conn.execute(
-            """INSERT INTO weather(location_id,date,temp_high,temp_low,precipitation_mm,snowfall_cm,uv_index,condition,source)
-               VALUES(?,?,?,?,?,?,?,?,?)
+            """INSERT INTO weather(location_id,date,temp_high,temp_low,precipitation_mm,snowfall_cm,uv_index,condition,source,geography_key)
+               VALUES(?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(location_id,date) DO UPDATE SET
                  temp_high=excluded.temp_high,temp_low=excluded.temp_low,
                  precipitation_mm=excluded.precipitation_mm,snowfall_cm=excluded.snowfall_cm,
-                 uv_index=excluded.uv_index,condition=excluded.condition,source=excluded.source""",
-            (location_id, str(day), float(high), float(low), float(precip or 0), float(snow or 0), float(uv or 0), _condition(code), source),
+                 uv_index=excluded.uv_index,condition=excluded.condition,source=excluded.source,geography_key=excluded.geography_key""",
+            (location_id, str(day), float(high), float(low), float(precip or 0), float(snow or 0), float(uv or 0), _condition(code), source, geography_key),
         )
         updated += 1
     return updated
@@ -154,7 +155,8 @@ def refresh_weather(
     Historical records are fetched in date-range batches and cached by location/date.
     This intentionally avoids one external request per sale or transaction.
     """
-    location = _location(conn, location_id)
+    from .geography import external_location
+    location = external_location(_location(conn, location_id))
     today = date.today()
 
     min_sale = conn.execute(
@@ -183,13 +185,13 @@ def refresh_weather(
         for chunk_start, chunk_end in _date_chunks(history_start, history_end):
             params = common | {"start_date": chunk_start.isoformat(), "end_date": chunk_end.isoformat()}
             payload = _request_json(f"{archive_url}?{urllib.parse.urlencode(params)}", timeout=45)
-            historical_updated += _upsert_weather_payload(conn, location_id, payload, "open-meteo-history")
+            historical_updated += _upsert_weather_payload(conn, location_id, payload, "open-meteo-history", location["geography_key"])
 
     forecast_start = start or today
     forecast_end = forecast_start + timedelta(days=max(1, min(days, 16)) - 1)
     params = common | {"start_date": forecast_start.isoformat(), "end_date": forecast_end.isoformat()}
     forecast_payload = _request_json(f"{forecast_url}?{urllib.parse.urlencode(params)}", timeout=30)
-    forecast_updated = _upsert_weather_payload(conn, location_id, forecast_payload, "open-meteo-forecast")
+    forecast_updated = _upsert_weather_payload(conn, location_id, forecast_payload, "open-meteo-forecast", location["geography_key"])
 
     now = _record_integration(
         conn,
@@ -315,35 +317,43 @@ def _refresh_predicthq_events(
         event_id_raw = str(raw.get("id") or uuid.uuid4().hex[:12])
         event_date, start_time, end_time = _event_local_parts(raw.get("start"), raw.get("end"), location["timezone"])
         coordinates = raw.get("location") or []
+        distance_source = "unverified"
         try:
             event_lon = float(coordinates[0])
             event_lat = float(coordinates[1])
+            if not math.isfinite(event_lat) or not math.isfinite(event_lon) or not -90 <= event_lat <= 90 or not -180 <= event_lon <= 180 or not (event_lat or event_lon):
+                raise ValueError("Unverified event coordinates")
             distance = _distance_miles(float(location["latitude"]), float(location["longitude"]), event_lat, event_lon)
+            distance_source = "city_point" if location["geography_key"].startswith("census-") else "coordinates"
         except (TypeError, ValueError, IndexError):
-            distance = float(radius_miles) / 2
+            distance = 0.0  # Schema sentinel, exposed as null without provenance.
         rank = float(raw.get("local_rank") or raw.get("rank") or 35)
         attendance_raw = raw.get("phq_attendance") or raw.get("predicted_attendance")
+        attendance_source = "provider_estimate"
         try:
-            attendance = max(0, int(float(attendance_raw)))
-        except (TypeError, ValueError):
-            attendance = int(max(100, min(50000, 250 + rank * rank * 1.8)))
+            attendance = int(float(attendance_raw))
+            if attendance < 0:
+                raise ValueError("Negative attendance")
+        except (TypeError, ValueError, OverflowError):
+            attendance, attendance_source = 0, "unverified"
         relevance = max(0.18, min(1.0, rank / 100))
         entities = raw.get("entities") or []
         venue = next((entity.get("name") for entity in entities if isinstance(entity, dict) and entity.get("type") in {"venue", "place"}), None)
         conn.execute(
             """INSERT INTO events(
                 id,location_id,name,event_type,date,start_time,end_time,distance_miles,
-                attendance,relevance,source,notes
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                attendance,relevance,source,notes,geography_key,attendance_source,distance_source
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name,event_type=excluded.event_type,date=excluded.date,
                 start_time=excluded.start_time,end_time=excluded.end_time,
                 distance_miles=excluded.distance_miles,attendance=excluded.attendance,
-                relevance=excluded.relevance,source=excluded.source,notes=excluded.notes""",
+                relevance=excluded.relevance,source=excluded.source,notes=excluded.notes,geography_key=excluded.geography_key,
+                attendance_source=excluded.attendance_source,distance_source=excluded.distance_source""",
             (
-                f"evt-predicthq-{event_id_raw}", location["id"], raw.get("title") or "Public event",
+                f"evt-predicthq-{location['id']}-{event_id_raw}", location["id"], raw.get("title") or "Public event",
                 raw.get("category") or "event", event_date, start_time, end_time,
-                round(distance, 2), attendance, relevance, "predicthq", venue,
+                round(distance, 2), attendance, relevance, "predicthq", venue, location["geography_key"], attendance_source, distance_source,
             ),
         )
         updated += 1
@@ -399,39 +409,37 @@ def _refresh_ticketmaster_events(
         start_time = (start_info.get("localTime") or "18:00:00")[:5]
         venue = (raw.get("_embedded", {}).get("venues") or [{}])[0]
         location_data = venue.get("location") or {}
+        distance_source = "unverified"
         try:
             event_lat = float(location_data.get("latitude"))
             event_lon = float(location_data.get("longitude"))
+            if not math.isfinite(event_lat) or not math.isfinite(event_lon) or not -90 <= event_lat <= 90 or not -180 <= event_lon <= 180 or not (event_lat or event_lon):
+                raise ValueError("Unverified event coordinates")
             distance = _distance_miles(float(location["latitude"]), float(location["longitude"]), event_lat, event_lon)
+            distance_source = "city_point" if location["geography_key"].startswith("census-") else "coordinates"
         except (TypeError, ValueError):
-            distance = float(radius_miles) / 2
+            distance = 0.0
         classification = (raw.get("classifications") or [{}])[0]
         segment = (classification.get("segment") or {}).get("name", "event").lower()
-        # Ticketmaster does not consistently expose venue capacity in Discovery results.
-        # A conservative proxy is used until a richer provider or manual attendance is available.
-        attendance = 1500
-        venue_capacity = venue.get("capacity")
-        try:
-            if venue_capacity is not None:
-                attendance = max(100, int(venue_capacity))
-        except (TypeError, ValueError):
-            pass
+        # Venue capacity is not attendance. Discovery does not provide a verified crowd count.
+        attendance = 0
         relevance = max(0.25, min(0.9, 0.82 - distance * 0.025))
-        event_id = f"evt-ticketmaster-{raw.get('id', uuid.uuid4().hex[:12])}"
+        event_id = f"evt-ticketmaster-{location['id']}-{raw.get('id', uuid.uuid4().hex[:12])}"
         conn.execute(
             """INSERT INTO events(
                 id,location_id,name,event_type,date,start_time,end_time,distance_miles,
-                attendance,relevance,source,notes
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                attendance,relevance,source,notes,geography_key,attendance_source,distance_source
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name,event_type=excluded.event_type,date=excluded.date,
                 start_time=excluded.start_time,end_time=excluded.end_time,
                 distance_miles=excluded.distance_miles,attendance=excluded.attendance,
-                relevance=excluded.relevance,source=excluded.source,notes=excluded.notes""",
+                relevance=excluded.relevance,source=excluded.source,notes=excluded.notes,geography_key=excluded.geography_key,
+                attendance_source=excluded.attendance_source,distance_source=excluded.distance_source""",
             (
                 event_id, location["id"], raw.get("name", "Public event"), segment,
                 event_date, start_time, "23:00", round(distance, 2), attendance,
-                relevance, "ticketmaster", venue.get("name"),
+                relevance, "ticketmaster", venue.get("name"), location["geography_key"], "unverified", distance_source,
             ),
         )
         updated += 1
@@ -445,7 +453,8 @@ def refresh_events(
     days: int = 60,
     backfill_days: int = 730,
 ) -> dict[str, Any]:
-    location = _location(conn, location_id)
+    from .geography import external_location
+    location = external_location(_location(conn, location_id))
     radius_miles = max(1, min(int(os.getenv("QUANTIFY_EVENT_RADIUS_MILES", "15")), 100))
     today = date.today()
     if os.getenv("PREDICTHQ_ACCESS_TOKEN"):

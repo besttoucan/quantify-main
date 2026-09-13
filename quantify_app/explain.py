@@ -176,8 +176,10 @@ def build_day_payload(brief: dict[str, Any]) -> dict[str, Any]:
             "events": [
                 {
                     "name": event.get("name"),
-                    "distance_miles": round(float(event.get("distance_miles") or 0), 1),
-                    "attendance": int(event.get("attendance") or 0),
+                    "distance_miles": round(float(event["distance_miles"]), 1) if event.get("distance_miles") is not None else None,
+                    "attendance": int(event["attendance"]) if event.get("attendance") is not None else None,
+                    "distance_source": event.get("distance_source", "unverified"),
+                    "attendance_source": event.get("attendance_source", "unverified"),
                     "start": event.get("start_time"),
                 }
                 for event in events

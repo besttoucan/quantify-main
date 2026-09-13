@@ -565,10 +565,12 @@ def score_range(conn: sqlite3.Connection, location_id: str, start: date, end: da
                 json.dumps(items_detail, separators=(",", ":")),
                 json.dumps(hourly, separators=(",", ":")),
                 json.dumps({
-                    "weather": bucket["condition"]["weather_condition"],
-                    "high": round(bucket["condition"]["temp_high"]),
-                    "low": round(bucket["condition"]["temp_low"]),
-                    "rain_mm": round(bucket["condition"]["precipitation_mm"], 1),
+                    "geography_key": bucket["condition"].get("geography", {}).get("key", ""),
+                    "weather_available": bucket["condition"].get("weather_available", False),
+                    "weather": bucket["condition"]["weather_condition"] if bucket["condition"].get("weather_available") else None,
+                    "high": round(bucket["condition"]["temp_high"]) if bucket["condition"].get("weather_available") else None,
+                    "low": round(bucket["condition"]["temp_low"]) if bucket["condition"].get("weather_available") else None,
+                    "rain_mm": round(bucket["condition"]["precipitation_mm"], 1) if bucket["condition"].get("weather_available") else None,
                     "occasion": bucket["condition"]["occasion_name"],
                     "events": len(bucket["condition"]["events"]),
                 }, separators=(",", ":")),
@@ -742,6 +744,12 @@ def day_detail(conn: sqlite3.Connection, location_id: str, target: date) -> dict
         items_detail = json.loads(score["items_json"] or "[]")
         hourly = json.loads(score["hourly_json"] or "[]")
         conditions = json.loads(score["conditions_json"] or "{}")
+        from .geography import for_location
+        geo = for_location(conn.execute("SELECT * FROM locations WHERE id=?", (location_id,)).fetchone())
+        if not geo["key"] or conditions.get("geography_key") != geo["key"]:
+            conditions = {key: value for key, value in conditions.items() if key not in {"weather", "high", "low", "rain_mm", "events"}}
+        elif not conditions.get("weather_available"):
+            conditions = {key: value for key, value in conditions.items() if key not in {"weather", "high", "low", "rain_mm"}}
 
     order_total = sum(order["total"] for order in orders)
     comparable = conn.execute(

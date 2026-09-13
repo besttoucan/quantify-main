@@ -21,128 +21,9 @@ from typing import Any, Iterable, Sequence
 from . import timezones
 from .intelligence import service_hours
 
-# ---------------------------------------------------------------------------
-# Minimum wage
-# ---------------------------------------------------------------------------
-# Rates in force on 1 January 2026, read from the US Department of Labor state
-# minimum wage table and from each state's own labor department. Twenty states
-# either set no minimum of their own or set one below the federal floor, so they
-# carry the federal 7.25.
-#
-# Four things are deliberately not modelled here, and all four are why the
-# interface calls this an estimate, prints the date it was read, and lets the
-# owner type over it:
-#   1. Alaska, Florida and Oregon step up in the middle of the year, not in
-#      January. Florida goes to 15.00 on 30 September 2026.
-#   2. Cities and counties in California, Colorado, Illinois, Maryland,
-#      Minnesota, New York and Washington run higher local minimums.
-#      LOCAL_MINIMUM_WAGE below covers the ones Quantify already knows by name.
-#   3. Roughly a third of these figures move every January because they are tied
-#      to inflation. MINIMUM_WAGE_REVIEWED records when the table was last
-#      checked, and a test fails when that date is more than a year old.
-#   4. A tipped minimum is a different number again, and a kitchen almost never
-#      pays anybody the minimum.
-FEDERAL_MINIMUM_WAGE = 7.25
-MINIMUM_WAGE_AS_OF = "2026-01-01"
-MINIMUM_WAGE_REVIEWED = "2026-01-01"
-MINIMUM_WAGE_SOURCE = (
-    "US Department of Labor and state labor departments, rates in force 1 January 2026"
-)
-
-STATE_MINIMUM_WAGE: dict[str, float] = {
-    "AL": 7.25, "AK": 13.00, "AZ": 15.15, "AR": 11.00, "CA": 16.90,
-    "CO": 15.16, "CT": 16.94, "DE": 15.00, "DC": 17.95, "FL": 14.00,
-    "GA": 7.25, "HI": 16.00, "ID": 7.25, "IL": 15.00, "IN": 7.25,
-    "IA": 7.25, "KS": 7.25, "KY": 7.25, "LA": 7.25, "ME": 15.10,
-    "MD": 15.00, "MA": 15.00, "MI": 13.73, "MN": 11.41, "MS": 7.25,
-    "MO": 15.00, "MT": 10.85, "NE": 15.00, "NV": 12.00, "NH": 7.25,
-    "NJ": 15.92, "NM": 12.00, "NY": 16.00, "NC": 7.25, "ND": 7.25,
-    "OH": 11.00, "OK": 7.25, "OR": 15.05, "PA": 7.25, "RI": 16.00,
-    "SC": 7.25, "SD": 11.85, "TN": 7.25, "TX": 7.25, "UT": 7.25,
-    "VT": 14.42, "VA": 12.77, "WA": 17.13, "WV": 8.75, "WI": 7.25,
-    "WY": 7.25, "PR": 10.50, "GU": 9.25, "VI": 10.50,
-}
-
-# Alabama, Georgia, Louisiana, Mississippi, South Carolina, Tennessee and
-# Wyoming either have no state minimum or set one below 7.25. The federal floor
-# applies to them, so the copy names the federal minimum, not the state.
-NO_STATE_MINIMUM = {"AL", "GA", "LA", "MS", "SC", "TN", "WY"}
-
-# Where a city or county sets a minimum above its state's, and Quantify already
-# knows the city from timezones.CITIES. This is not a complete list of local
-# minimums in the United States and does not try to be.
-LOCAL_MINIMUM_WAGE: dict[str, tuple[float, str]] = {
-    "new york": (17.00, "New York City"),
-    "new york city": (17.00, "New York City"),
-    "nyc": (17.00, "New York City"),
-    "manhattan": (17.00, "New York City"),
-    "brooklyn": (17.00, "New York City"),
-    "queens": (17.00, "New York City"),
-    "bronx": (17.00, "New York City"),
-    "staten island": (17.00, "New York City"),
-    "yonkers": (17.00, "Westchester County"),
-    "white plains": (17.00, "Westchester County"),
-    "scarsdale": (17.00, "Westchester County"),
-    "new rochelle": (17.00, "Westchester County"),
-    "mount vernon": (17.00, "Westchester County"),
-    "long island": (17.00, "Long Island"),
-    "hempstead": (17.00, "Long Island"),
-}
-
-STATE_NAMES: dict[str, str] = {
-    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
-    "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
-    "DC": "the District of Columbia", "FL": "Florida", "GA": "Georgia",
-    "HI": "Hawaii", "ID": "Idaho", "IL": "Illinois", "IN": "Indiana",
-    "IA": "Iowa", "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana",
-    "ME": "Maine", "MD": "Maryland", "MA": "Massachusetts", "MI": "Michigan",
-    "MN": "Minnesota", "MS": "Mississippi", "MO": "Missouri", "MT": "Montana",
-    "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire", "NJ": "New Jersey",
-    "NM": "New Mexico", "NY": "New York", "NC": "North Carolina",
-    "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma", "OR": "Oregon",
-    "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
-    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
-    "VT": "Vermont", "VA": "Virginia", "WA": "Washington",
-    "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
-    "PR": "Puerto Rico", "GU": "Guam", "VI": "the US Virgin Islands",
-}
-
-
-def resolve_state(region: str, city: str = "") -> str:
-    """The two-letter state code for a location.
-
-    locations.region already holds it for every location Quantify creates. The
-    city fallback exists for rows imported from a register that filled the field
-    with a full state name, or left it empty.
-    """
-    code = (region or "").strip().upper()
-    if code in STATE_MINIMUM_WAGE:
-        return code
-    named = timezones.STATES.get((region or "").strip().lower())
-    if named:
-        return named[0]
-    placed = timezones.CITIES.get((city or "").strip().lower())
-    if placed and placed[0] in STATE_MINIMUM_WAGE:
-        return placed[0]
-    return ""
-
-
-def state_minimum_wage(state: str) -> float:
-    return STATE_MINIMUM_WAGE.get((state or "").upper(), FEDERAL_MINIMUM_WAGE)
-
-
-def minimum_wage(state: str, city: str = "") -> tuple[float, str]:
-    """The floor that applies here, and the name of the place that sets it."""
-    local = LOCAL_MINIMUM_WAGE.get((city or "").strip().lower())
-    state_rate = state_minimum_wage(state)
-    if local and local[0] > state_rate:
-        return local[0], local[1]
-    if not state:
-        return FEDERAL_MINIMUM_WAGE, ""
-    if state in NO_STATE_MINIMUM:
-        return FEDERAL_MINIMUM_WAGE, ""
-    return state_rate, STATE_NAMES.get(state, state)
-
+from .wages import (FEDERAL_MINIMUM_WAGE, MINIMUM_WAGE_AS_OF, MINIMUM_WAGE_REVIEWED,
+                    MINIMUM_WAGE_SOURCE, STATE_MINIMUM_WAGE, STATE_NAMES, NO_STATE_MINIMUM,
+                    resolve_state, state_minimum_wage, minimum_wage, wage_reference, payroll_reference)
 
 # ---------------------------------------------------------------------------
 # Cost of goods
@@ -177,15 +58,12 @@ FAMILY_COST_SHARE: dict[str, float] = {
 PERIOD_DAYS: dict[str, float] = {"day": 1.0, "week": 7.0, "month": 365.0 / 12.0}
 PERIOD_LABELS: dict[str, str] = {"day": "a day", "week": "a week", "month": "a month"}
 
-# Six orders an hour is roughly ten minutes of one person's time per order,
-# counting the register, the line, expo and clean-down together. Twelve, which
-# is what a first pass suggests, puts three people on a burger restaurant doing
-# 295 covers and lands the wage bill near 13 percent of sales against a real
-# 28 to 35. The payroll load is 7.65 for Social Security and Medicare, plus
-# unemployment insurance and workers compensation on top.
+# Staffing and food shares are editable planning assumptions. Pay and employer
+# payroll costs require explicit owner input before a wage total is estimated.
 SETTING_DEFAULTS: dict[str, Any] = {
-    "hourly_wage": 0.0,               # 0 means follow the local minimum wage
-    "payroll_load_percent": 18.0,
+    "hourly_wage": 0.0,               # Storage sentinel for unknown pay.
+    "payroll_load_percent": 0.0,
+    "payroll_load_source": "unverified",
     "orders_per_person_per_hour": 6.0,
     "min_staff": 3,
     "max_staff": 14,
@@ -218,6 +96,7 @@ def cost_settings(conn: sqlite3.Connection, location_id: str) -> dict[str, Any]:
     return {
         "hourly_wage": float(stored["hourly_wage"] or 0),
         "payroll_load_percent": float(stored["payroll_load_percent"]),
+        "payroll_load_source": stored.get("payroll_load_source", "unverified"),
         "orders_per_person_per_hour": float(stored["orders_per_person_per_hour"]),
         "min_staff": int(stored["min_staff"]),
         "max_staff": int(stored["max_staff"]),
@@ -229,37 +108,35 @@ def cost_settings(conn: sqlite3.Connection, location_id: str) -> dict[str, Any]:
     }
 
 
-def wage_for_location(location: sqlite3.Row | dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
-    """The hourly figure, and a sentence saying where it came from."""
+def wage_for_location(location: sqlite3.Row | dict[str, Any], settings: dict[str, Any],
+                      on_date: date | None = None) -> dict[str, Any]:
+    """Separate an owner's pay figure from dated regulatory references."""
     city = str(location["city"] or "")
     state = resolve_state(str(location["region"] or ""), city)
-    floor, place = minimum_wage(state, city)
+    reference = wage_reference(state, city, on_date)
+    floor, place = reference["rate"], reference["place"]
     own = float(settings.get("hourly_wage") or 0)
     load = max(0.0, float(settings.get("payroll_load_percent") or 0))
-    hourly = own if own > 0 else floor
+    hourly = own if own > 0 else None
+    payroll_known = settings.get("payroll_load_source") == "owner"
     if own > 0:
-        source = "your figure"
+        source = "saved pay figure"
         detail = f"You set ${hourly:,.2f} an hour."
-    elif place:
-        source = "local minimum"
-        detail = (
-            f"The minimum wage in {place} is ${floor:,.2f} an hour. "
-            f"Change it to what you pay."
-        )
     else:
-        source = "federal minimum"
-        detail = (
-            f"No state minimum applies here. The federal minimum is "
-            f"${floor:,.2f} an hour. Change it to what you pay."
-        )
+        source = "not entered"
+        detail = "Enter your average hourly pay and employer payroll costs to estimate wages. A legal wage floor is not your average pay."
     return {
         "state": state,
         "state_name": STATE_NAMES.get(state, ""),
         "place": place,
-        "state_minimum": round(floor, 2),
-        "hourly": round(hourly, 2),
-        "payroll_load_percent": round(load, 1),
-        "loaded": round(hourly * (1.0 + load / 100.0), 2),
+        "state_minimum": round(floor, 2) if floor is not None else None,
+        "hourly": round(hourly, 2) if hourly is not None else None,
+        "payroll_load_percent": round(load, 2) if payroll_known else None,
+        "loaded": round(hourly * (1.0 + load / 100.0), 2) if hourly is not None and payroll_known else None,
+        "payroll_load_source": settings.get("payroll_load_source", "unverified"),
+        "reference": reference,
+        "payroll_reference": payroll_reference(state, on_date),
+        "saved_at": settings.get("updated_at", ""),
         "source": source,
         "detail": detail,
         "as_of": MINIMUM_WAGE_AS_OF,
@@ -332,13 +209,14 @@ def cost_context(conn: sqlite3.Connection, location_id: str) -> dict[str, Any]:
     if location is None:
         raise ValueError("Unknown location")
     settings = cost_settings(conn, location_id)
+    wage = wage_for_location(location, settings)
     return {
         "location": location,
         "settings": settings,
-        "wage": wage_for_location(location, settings),
+        "wage": wage,
         "basis": item_cost_basis(conn, location_id, settings),
         "recurring": recurring_costs(conn, location_id),
-        "configured": settings["configured"],
+        "configured": settings["configured"] and wage["loaded"] is not None,
     }
 
 
@@ -393,20 +271,22 @@ def _cogs(rows: Iterable[sqlite3.Row], basis: dict[str, dict[str, Any]], fallbac
     return total
 
 
-def _assemble(revenue: float, cogs: float, labour: float, other: float,
+def _assemble(revenue: float, cogs: float, labour: float | None, other: float,
               shift: dict[str, Any]) -> dict[str, Any]:
     """The per-day figures only. Location-level detail is merged by day_costs."""
-    total = cogs + labour + other
-    profit = revenue - total
+    total = cogs + labour + other if labour is not None else None
+    profit = revenue - total if total is not None else None
     return {
         "revenue": round(revenue, 2),
         "cogs": round(cogs, 2),
-        "labour": round(labour, 2),
+        "labour": round(labour, 2) if labour is not None else None,
         "other": round(other, 2),
-        "costs": round(total, 2),
+        "costs": round(total, 2) if total is not None else None,
         # Not gross profit: labour and the owner's fixed costs are already out.
-        "left_after_costs": round(profit, 2),
-        "margin_percent": round(profit / revenue * 100) if revenue > 0 else None,
+        "left_after_costs": round(profit, 2) if profit is not None else None,
+        "margin_percent": round(profit / revenue * 100) if revenue > 0 and profit is not None else None,
+        "complete": labour is not None,
+        "missing": [] if labour is not None else ["hourly pay or employer payroll costs"],
         "cogs_percent": round(cogs / revenue * 100) if revenue > 0 else None,
         "staff_hours": shift["staff_hours"],
         "busiest_staff": shift["busiest_staff"],
@@ -475,7 +355,7 @@ def forecast_costs(
         for row in curve
     }
     shift = staffing(orders_by_hour, settings, context["location"])
-    labour = shift["staff_hours"] * context["wage"]["loaded"]
+    labour = shift["staff_hours"] * context["wage"]["loaded"] if context["wage"]["loaded"] is not None else None
     return {
         **_assemble(revenue, cogs, labour, context["recurring"]["daily"], shift),
         **_location_detail(context),
@@ -507,7 +387,7 @@ def day_costs(
     ).fetchall()
     cogs = _cogs(rows, context["basis"], float(context["settings"]["default_cost_share"]))
     shift = staffing(_hours_of(orders), context["settings"], context["location"])
-    labour = shift["staff_hours"] * context["wage"]["loaded"]
+    labour = shift["staff_hours"] * context["wage"]["loaded"] if context["wage"]["loaded"] is not None else None
     return {
         **_assemble(revenue, cogs, labour, context["recurring"]["daily"], shift),
         **_location_detail(context),
@@ -542,7 +422,7 @@ def day_costs_many(
     output: dict[str, dict[str, Any]] = {}
     for key, payload in days.items():
         shift = staffing(_hours_of(payload["orders"]), context["settings"], context["location"])
-        labour = shift["staff_hours"] * context["wage"]["loaded"]
+        labour = shift["staff_hours"] * context["wage"]["loaded"] if context["wage"]["loaded"] is not None else None
         cogs = _cogs(grouped.get(key, []), context["basis"], fallback)
         output[key] = _assemble(
             float(payload["revenue"]), cogs, labour, context["recurring"]["daily"], shift
@@ -626,15 +506,20 @@ def save_cost_settings(conn: sqlite3.Connection, location_id: str, payload: dict
     Operators think and talk in percent, so the form sends 33, not 0.33. The
     conversion happens once, here, and nowhere in the browser.
 
-    What is refused is said in a sentence the person typing can act on. A
-    blank wage means "use the local minimum"; a wage that is typed but too low
-    to be real is a typo, not a choice. A blank category share means "use the
-    estimate"; a share of 0 would make food free.
+    Blank pay or employer costs means unknown. A blank category share keeps
+    the visible food estimate; a share of 0 would make food free.
     """
     now = _utc_now()
     wage = _number_or_none(payload.get("hourly_wage"))
+    if str(payload.get("hourly_wage") or "").strip() and wage is None:
+        raise ValueError("Enter a number for hourly pay, or leave the field blank")
+    payroll = _number_or_none(payload.get("payroll_load_percent"))
+    if payroll is not None and (not math.isfinite(payroll) or payroll < 0 or payroll > 60):
+        raise ValueError("Enter employer payroll costs between 0% and 60%, or leave the field blank")
+    if str(payload.get("payroll_load_percent") or "").strip() and payroll is None:
+        raise ValueError("Enter a number for employer payroll costs, or leave the field blank")
     if wage is not None and (wage < 0 or 0 < wage < 5):
-        raise ValueError("Enter what you pay an hour, or leave the local minimum")
+        raise ValueError("Enter hourly pay of at least $5, or leave the field blank")
     if wage is not None and wage > 200:
         raise ValueError("An hourly wage over $200 does not look right")
     categories = [row for row in (_as_list(payload.get("categories"))) if isinstance(row, dict)]
@@ -648,19 +533,20 @@ def save_cost_settings(conn: sqlite3.Connection, location_id: str, payload: dict
     conn.execute(
         """INSERT INTO cost_settings(
                location_id, hourly_wage, payroll_load_percent, orders_per_person_per_hour,
-               min_staff, max_staff, prep_hours, close_hours, default_cost_share, updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?)
+               min_staff, max_staff, prep_hours, close_hours, default_cost_share, updated_at, payroll_load_source)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(location_id) DO UPDATE SET
                hourly_wage=excluded.hourly_wage,
                payroll_load_percent=excluded.payroll_load_percent,
                orders_per_person_per_hour=excluded.orders_per_person_per_hour,
                min_staff=excluded.min_staff, max_staff=excluded.max_staff,
                prep_hours=excluded.prep_hours, close_hours=excluded.close_hours,
-               default_cost_share=excluded.default_cost_share, updated_at=excluded.updated_at""",
+               default_cost_share=excluded.default_cost_share, updated_at=excluded.updated_at,
+               payroll_load_source=excluded.payroll_load_source""",
         (
             location_id,
             _clamp(payload.get("hourly_wage"), 0.0, 200.0, 0.0),
-            _clamp(payload.get("payroll_load_percent"), 0.0, 60.0, 18.0),
+            payroll if payroll is not None else 0.0,
             _clamp(payload.get("orders_per_person_per_hour"), 1.0, 120.0, 6.0),
             int(_clamp(payload.get("min_staff"), 1, 40, 3)),
             int(_clamp(payload.get("max_staff"), 1, 80, 14)),
@@ -668,6 +554,7 @@ def save_cost_settings(conn: sqlite3.Connection, location_id: str, payload: dict
             _clamp(payload.get("close_hours"), 0.0, 12.0, 1.0),
             _clamp(payload.get("default_cost_share"), 1.0, 95.0, 30.0) / 100.0,
             now,
+            "owner" if payroll is not None else "unverified",
         ),
     )
 

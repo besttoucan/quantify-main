@@ -262,51 +262,6 @@ def _data_version(conn: sqlite3.Connection, organization_id: str, location_id: s
 _SHOWCASE: dict[str, Any] = {"at": 0.0, "value": None}
 
 
-def _sample_parts(conn: sqlite3.Connection, location_id: str) -> dict[str, list[str]]:
-    """What every item at one sample location is actually made of.
-
-    A stored composition wins when there is one, so anything the owner has
-    corrected shows through. When there is none, the same local writer that
-    would have written it is run here in memory.
-
-    Nothing is written back. This runs on a public, unauthenticated request, so
-    it must not take a write lock, and it must not reach the writing path: an
-    anonymous page view is not allowed to spend an API credit. Writing the local
-    text into `item_composition` would also be worse than useless, because
-    `/api/menu` only generates for items with no row, so one landing page visit
-    would pin the demo menu to the local text forever.
-    """
-    rows = conn.execute(
-        """SELECT m.id, m.name, i.normalized_name, i.item_family, i.confidence, c.components_json
-           FROM menu_items m
-           LEFT JOIN menu_interpretations i ON i.menu_item_id = m.id
-           LEFT JOIN item_composition c ON c.menu_item_id = m.id
-           WHERE m.location_id=? AND m.active=1""",
-        (location_id,),
-    ).fetchall()
-    parts: dict[str, list[str]] = {}
-    for row in rows:
-        components: list[dict[str, Any]] = []
-        if row["components_json"]:
-            try:
-                components = json.loads(row["components_json"]) or []
-            except json.JSONDecodeError:
-                components = []
-        if not components:
-            components = local_composition({
-                "raw_name": row["name"],
-                "normalized_name": row["normalized_name"] or row["name"],
-                "family": row["item_family"] or "menu-item",
-                "interpretation_confidence": float(row["confidence"] or 0),
-            })["components"]
-        parts[row["id"]] = [
-            str(part.get("name", "")).strip()
-            for part in components
-            if str(part.get("name", "")).strip()
-        ][:6]
-    return parts
-
-
 def _location_today(conn: sqlite3.Connection, location_id: str) -> date:
     """The trading date this location is in, on its own clock.
 
@@ -353,8 +308,9 @@ def _showcase(conn: sqlite3.Connection) -> dict[str, Any]:
     """Real numbers for the landing page, computed from the sample dataset.
 
     Nothing here is a marketing figure typed into a template. It is the same
-    forecast and the same scored accuracy the product shows once you are in,
-    which is the only claim worth making on a landing page.
+    day, the same order list and the same closed days the product shows once
+    you are in, which is the only claim worth making on a landing page. The
+    browser draws them with the app's own screen code.
     """
     if _SHOWCASE["value"] is not None and time.time() - _SHOWCASE["at"] < 90:
         return _SHOWCASE["value"]
@@ -373,94 +329,72 @@ def _showcase(conn: sqlite3.Connection) -> dict[str, Any]:
         _SHOWCASE.update({"at": time.time(), "value": {"available": False}})
         return _SHOWCASE["value"]
 
-    trend = transactions.accuracy_trend(conn, location["id"], days=45)
+    location_id = location["id"]
+    today = _location_today(conn, location_id)
+    trend = transactions.accuracy_trend(conn, location_id, days=30)
     history = conn.execute(
         "SELECT COUNT(DISTINCT date) AS days, MIN(date) AS first FROM sales WHERE location_id=?",
-        (location["id"],),
+        (location_id,),
     ).fetchone()
+
+    # The day, trimmed to what the landing draws. Items and actions keep their
+    # full shape so the make list is painted by the same code as Today.
+    brief: dict[str, Any] | None
     try:
-        brief = daily_brief(conn, location["id"], date.today(), week_days=2)
-        summary = brief["summary"]
-        comparison = brief["comparison"]
-        signal = (brief["context"]["signals"] or [{}])[0]
-        peak_hour_value = max((row["revenue"] for row in brief["service_curve"]), default=1) or 1
-        parts = _sample_parts(conn, location["id"])
-        forecast = {
-            "location": location["name"],
-            "concept": location["concept"],
-            "city": f"{location['city']}, {location['region']}",
-            "weekday": date.today().strftime("%A"),
-            "date_label": brief["date_label"],
-            "expected_sales": summary["expected_revenue"],
-            "normal_sales": comparison["sales"],
-            "difference_sales": summary["difference_sales"],
-            "difference_units": summary["difference_units"],
-            "expected_units": summary["expected_units"],
-            "normal_units": comparison["units"],
-            "expected_orders": summary["expected_orders"],
-            "average_order": summary["average_order"],
-            "peak_hour": summary["peak_hour"],
-            "peak_units": summary["peak_units"],
-            "peak_share": summary["peak_share_percent"],
-            "confidence": summary["confidence"],
-            "comparable_days": comparison["based_on_days"],
-            "headline": brief["headline"],
-            "top_reason": {"label": signal.get("label"), "detail": signal.get("detail"), "effect": signal.get("effect")},
-            "reasons": [
-                {"label": row["label"], "effect": row["effect"], "units": row["units"],
-                 "detail": row["detail"], "based_on": row.get("based_on", "")}
-                for row in brief["context"]["signals"][:3]
-            ],
-            "hours": [
-                {"label": row["label"], "share": round(row["revenue"] / peak_hour_value, 3),
-                 "revenue": row["revenue"], "units": row["units"]}
-                for row in brief["service_curve"]
-            ],
-            "items": [
-                {"name": row["name"], "expected": row["expected"], "normal": row["baseline"],
-                 "make": row.get("make", row["expected"]), "sell_out_percent": row.get("sell_out_percent"),
-                 "difference": row["vs_baseline_units"], "low": row["lower"], "high": row["upper"],
-                 "confidence": row["confidence"], "parts": parts.get(row["item_id"], [])}
-                for row in brief["items"][:6]
-            ],
-            "actions": [
-                {"title": row["title"], "detail": row["detail"], "metric": row["metric"]}
-                for row in brief["actions"][:3]
-            ],
-            "steps": [
-                {"text": "Reading this location's register history",
-                 "value": f"{history['days']} days" if history and history["days"] else "no history yet"},
-                {"text": f"Matching today against every past {date.today().strftime('%A')}",
-                 "value": f"{comparison['based_on_days']} found"},
-                {"text": f"Testing {signal.get('label', 'conditions').lower()} against what actually sold",
-                 "value": (f"{signal['units']:+g} items" if signal.get("units") else "no clear effect")},
-                {"text": "What is on nearby",
-                 "value": f"{len(brief['context']['material_events'])} of {brief['context']['event_candidates_reviewed']} matter"},
-                {"text": "Checking yesterday's call against the till",
-                 "value": f"{trend.get('average')}% right" if trend.get("average") else "not scored yet"},
-            ],
-            "week": [
-                {"date": row["date"], "sales": row["expected_revenue"], "change": row["change_percent"],
-                 "top_item": row["top_item"]}
-                for row in brief.get("week_ahead", [])[:6]
-            ],
-        }
+        full = daily_brief(conn, location_id, today, week_days=7)
+        keep = (
+            "date", "date_label", "generated_at", "headline", "summary", "comparison", "trust",
+            "service_curve", "context", "data_health", "data_note", "costs", "location", "week_ahead",
+        )
+        brief = {key: full[key] for key in keep if key in full}
+        brief["items"] = full["items"][:6]
+        brief["actions"] = full["actions"][:2]
+        brief["no_history"] = bool(full.get("no_history"))
     except Exception:  # noqa: BLE001 - the landing page must never fail to load
-        forecast = None
+        brief = None
 
-    days = transactions.day_list(conn, location["id"], limit=6)["days"]
+    # One supplier's part of the order list, straight from the ordering code.
+    # When the sample has no supplier yet the unassigned group is shown, which
+    # is exactly what a new account sees.
+    order: dict[str, Any] | None
+    try:
+        plan = ordering.order_plan(conn, location_id, today, 3)
+        if plan.get("ready"):
+            plan = supply.attach(conn, location_id, plan)
+        lines = [row for row in plan.get("lines") or [] if row.get("orderable")]
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for row in lines:
+            groups.setdefault(row.get("supplier_id") or "", []).append(row)
+        supplier_id = max(groups, key=lambda key: (bool(key), len(groups[key])), default="")
+        supplier = next((row for row in plan.get("suppliers") or [] if row["id"] == supplier_id), None)
+        order = {
+            "start": plan.get("start"), "end": plan.get("end"), "days": plan.get("days", 3),
+            "supplier": supplier,
+            "lines": groups.get(supplier_id, [])[:5],
+            "counts_taken": plan.get("counts_taken", 0),
+        } if lines else None
+    except Exception:  # noqa: BLE001
+        order = None
 
+    email = conn.execute(
+        "SELECT send_time FROM email_preferences WHERE location_id=?", (location_id,)
+    ).fetchone()
     value = {
         "available": True,
         "accuracy": trend.get("average"),
         "days_scored": trend.get("days") or 0,
-        "within_ten": trend.get("within_ten"),
-        "series": [row["accuracy"] for row in (trend.get("series") or [])][-30:],
         "history_days": int(history["days"] or 0) if history else 0,
-        "forecast": forecast,
-        "days": days,
+        "location": {
+            "id": location_id, "name": location["name"], "concept": location["concept"],
+            "city": location["city"], "region": location["region"],
+            "timezone": location["timezone"], "timezone_label": timezones.describe(location["timezone"]),
+            "open_hour": location["open_hour"], "close_hour": location["close_hour"],
+            "email_time": email["send_time"] if email else "05:30",
+        },
+        "brief": brief,
+        "order": order,
+        "days": transactions.day_list(conn, location_id, limit=6)["days"],
         "pricing": {"monthly": billing.PLANS["standard"]["monthly"], "annual_monthly": billing.PLANS["standard"]["annual_monthly"]},
-        "writer": ai.status()["state"],
     }
     _SHOWCASE.update({"at": time.time(), "value": value})
     return value
@@ -980,6 +914,20 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                 str(data.get("new_password", "")), session_id=session.get("id"), ip=self._client_ip(),
             ))
             return True
+        if path == "/api/auth/profile" and method == "POST":
+            # The name on the account, as shown in the rail and on the morning
+            # email. The address is not changed here.
+            self._csrf(session)
+            data = self._read_json()
+            name = str(data.get("display_name", "")).strip()[:80]
+            if len(name) < 2:
+                raise ValueError("Enter a name of at least two characters")
+            changed = conn.execute("UPDATE users SET display_name=? WHERE id=? AND active=1", (name, session["user_id"]))
+            if changed.rowcount == 0:
+                raise PermissionError("Account not found")
+            conn.commit()
+            self.json_response({"ok": True, "display_name": name})
+            return True
         return False
 
     def _workspace_routes(self, conn: sqlite3.Connection, session: dict[str, Any], method: str, path: str, query: dict[str, list[str]]) -> bool:
@@ -1050,14 +998,21 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                 "SELECT 1 FROM locations WHERE organization_id=? AND active=1 LIMIT 1", (organization_id,)
             ).fetchone()
             sample_location = None
+            opens, closes = _trading_hours(data)
             if not has_location:
                 sample_location = seed_workspace(
                     conn, organization_id,
                     concept=str(data.get("concept", "")),
                     name=company,
                     owner_email=session["email"],
+                    city=str(data.get("city", place))[:80],
+                    region=str(data.get("region", ""))[:40],
+                    timezone=resolved["timezone"],
+                    latitude=resolved.get("latitude"),
+                    longitude=resolved.get("longitude"),
+                    open_hour=opens,
+                    close_hour=closes,
                 )
-            opens, closes = _trading_hours(data)
             target_location = created_location or sample_location
             if target_location:
                 conn.execute(

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import math
 import sqlite3
 import statistics
 import threading
+import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
@@ -18,6 +21,9 @@ MODEL_VERSION = "quantify-context-ensemble-2.0"
 _CACHE_LOCK = threading.RLock()
 _CONTEXT_CACHE: dict[tuple[Any, ...], tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]] = {}
 _MODEL_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_BRIEF_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+_BRIEF_LOCKS = [threading.RLock() for _ in range(32)]
+_BRIEF_CACHE_SECONDS = 300
 
 
 def _db_identity(conn: sqlite3.Connection) -> str:
@@ -28,10 +34,75 @@ def _db_identity(conn: sqlite3.Connection) -> str:
     return f"connection:{id(conn)}"
 
 
-def _data_version(conn: sqlite3.Connection, location_id: str) -> str:
-    seeded = conn.execute("SELECT value FROM metadata WHERE key='seeded_at'").fetchone()
-    synced = conn.execute("SELECT MAX(last_sync) AS value FROM integrations WHERE location_id=?", (location_id,)).fetchone()
-    return f"{seeded['value'] if seeded else ''}|{synced['value'] if synced and synced['value'] else ''}"
+def _data_version(conn: sqlite3.Connection, location_id: str, *, training: bool = False) -> str:
+    # Include values as well as timestamps: two edits can land in one second,
+    # and a register can correct an existing date without adding a sale row.
+    revision = (conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0])
+    memo = getattr(conn, "_quantify_data_versions", {})
+    memo_key = (location_id, training)
+    if memo_key in memo and memo[memo_key][0] == revision:
+        return memo[memo_key][1]
+    parts = []
+    queries = [
+        "SELECT COUNT(*),MAX(date),SUM(quantity),SUM(revenue),SUM(stockout_minutes) FROM sales WHERE location_id=?",
+        "SELECT COUNT(*),MAX(date),SUM(quantity),SUM(quantity*hour) FROM sales_hourly WHERE location_id=?",
+        "SELECT * FROM locations WHERE id=?",
+        "SELECT * FROM menu_items WHERE location_id=? ORDER BY id",
+        "SELECT * FROM integrations WHERE location_id=? ORDER BY provider",
+        "SELECT * FROM settings WHERE location_id=? ORDER BY key",
+        "SELECT * FROM weather WHERE location_id=? ORDER BY date",
+        "SELECT * FROM events WHERE location_id=? ORDER BY id",
+    ]
+    if not training:
+        queries += [
+            "SELECT * FROM forecast_overrides WHERE location_id=? ORDER BY item_id,date",
+            "SELECT * FROM stock_counts WHERE location_id=? ORDER BY ingredient",
+            "SELECT COUNT(*),MAX(sent_at) FROM purchase_orders WHERE location_id=?",
+            "SELECT COUNT(*),MAX(scored_at) FROM day_accuracy WHERE location_id=?",
+            "SELECT * FROM recurring_costs WHERE location_id=? ORDER BY id",
+        ]
+    for sql in queries:
+        parts.append([tuple(row) for row in conn.execute(sql, (location_id,)).fetchall()])
+    value = hashlib.sha256(json.dumps(parts, separators=(",", ":"), default=str).encode()).hexdigest()
+    memo[memo_key] = (revision, value)
+    try:
+        conn._quantify_data_versions = memo
+    except AttributeError:
+        pass  # Plain sqlite connections used by integrations need no memo.
+    return value
+
+
+# An item with fewer selling days than this has no number yet. It is listed,
+# flagged, and kept out of every total until it has sold for a week.
+NEW_ITEM_DAYS = 7
+
+
+def plural_name(name: str, count: int) -> str:
+    """An item's name for a count, keeping the item's own capitalisation."""
+    if abs(int(count)) == 1:
+        return name
+    lowered = name.lower()
+    if lowered.endswith("s"):
+        return name
+    if lowered.endswith(("x", "z", "ch", "sh")):
+        return name + "es"
+    if lowered.endswith("y") and len(name) > 1 and lowered[-2] not in "aeiou":
+        return name[:-1] + "ies"
+    return name + "s"
+
+
+def demand_level(change_percent: float) -> str:
+    """One threshold for the level tag and the headline: 4% either side is normal."""
+    change = float(change_percent or 0)
+    if change >= 15:
+        return "Well above normal"
+    if change >= 4:
+        return "Above normal"
+    if change <= -15:
+        return "Well below normal"
+    if change <= -4:
+        return "Below normal"
+    return "Normal"
 
 
 def _trim_cache(cache: dict[Any, Any], maximum: int) -> None:
@@ -412,7 +483,7 @@ def _history_for_item(
     end = target_date + timedelta(days=31)
     context_key = (
         _db_identity(conn), location["id"], start.isoformat(), end.isoformat(),
-        _data_version(conn, location["id"]),
+        _data_version(conn, location["id"], training=True),
     )
     with _CACHE_LOCK:
         cached = _CONTEXT_CACHE.get(context_key)
@@ -554,7 +625,7 @@ def _normal_context_vector(history: list[HistoryRow], target: date) -> list[floa
 
 
 DRIVER_LABELS = {
-    "calendar": "The date itself",
+    "calendar": "Day of the week",
     "weather": "Weather",
     "events": "What is on nearby",
     "trend": "Recent trend",
@@ -582,36 +653,41 @@ def _driver_effects(
 
         detail = ""
         based_on = ""
+        label = DRIVER_LABELS[group]
         if group == "calendar":
+            direction = "above" if percent > 0 else "below"
             if context.get("occasion_name"):
-                detail = f"{context['occasion_name']} falls on this date, and this location trades differently on it."
+                label = str(context["occasion_name"])
+                detail = f"{context['occasion_name']} falls on this date, and it runs {direction} a normal {context['weekday']} here."
             elif context.get("long_weekend"):
-                detail = "This date sits inside a long weekend, which shifts when people eat out."
+                label = "Long weekend"
+                detail = f"This date sits inside a long weekend, which runs {direction} normal here."
             elif context.get("payday"):
-                detail = "Pay dates land around now, and spend at this location tracks that cycle."
+                label = "Pay day"
+                detail = f"Pay dates land around now, and they run {direction} normal here."
             else:
-                detail = f"{context['weekday']}s follow their own pattern here, separate from the rest of the week."
-            based_on = f"{evidence.get('weekday_samples', 0)} past {context['weekday']}s at this location"
+                detail = f"{context['weekday']}s usually run {direction} the rest of the week here."
+            based_on = f"{evidence.get('weekday_samples', 0)} past {context['weekday']}s here"
         elif group == "weather":
-            bits = [f"{context['weather_condition'].lower()}", f"high {round(context['temp_high'])}°F"]
+            bits = [f"{context['weather_condition'].lower()}", f"high {round(context['temp_high'])}°"]
             if context.get("precipitation_mm", 0) >= 0.5:
-                bits.append(f"{context['precipitation_mm']:.1f} mm of rain")
+                bits.append(f"{context['precipitation_mm'] / 25.4:.1f} in of rain")
             if context.get("snowfall_cm", 0) > 0:
-                bits.append(f"{context['snowfall_cm']:.1f} cm of snow")
+                bits.append(f"{context['snowfall_cm'] / 2.54:.1f} in of snow")
             anomaly = float(context.get("temp_anomaly") or 0)
             comparison = (
-                f"about {abs(round(anomaly))}° {'warmer' if anomaly > 0 else 'cooler'} than this location's normal for the date"
-                if abs(anomaly) >= 3 else "close to the normal temperature for the date"
+                f"about {abs(round(anomaly))}° {'warmer' if anomaly > 0 else 'cooler'} than usual for the date"
+                if abs(anomaly) >= 3 else "close to the usual temperature for the date"
             )
             detail = f"Forecast is {', '.join(bits)}, {comparison}."
-            based_on = f"{evidence.get('weather_samples', 0)} past days here with similar conditions"
+            based_on = f"{evidence.get('weather_samples', 0)} past days here with similar weather"
         elif group == "events":
             relevant = [event for event in context["events"] if event["impact"] >= 0.08]
             if relevant:
                 top = relevant[0]
                 detail = (
                     f"{top['name']} is on, about {float(top['distance_miles']):.1f} miles away, "
-                    f"with roughly {int(top['attendance']):,} people expected and its timing overlapping service."
+                    f"with roughly {int(top['attendance']):,} people expected during service."
                 )
                 based_on = f"{len(relevant)} of {len(context['events'])} nearby listings big enough to matter"
             else:
@@ -622,15 +698,15 @@ def _driver_effects(
             prior = evidence.get("prior_average")
             if recent is not None and prior is not None:
                 detail = (
-                    f"The last four weeks have averaged {recent:,.0f} units a day against {prior:,.0f} "
-                    "in the four weeks before, so the level itself has moved."
+                    f"The last four weeks averaged {recent:,.0f} a day against {prior:,.0f} "
+                    "in the four weeks before."
                 )
             else:
                 detail = "The last four weeks sit at a different level from the four before them."
-            based_on = "56 days of sales, split into two four-week blocks"
+            based_on = "the last eight weeks of sales"
         effects.append({
             "key": group,
-            "label": DRIVER_LABELS[group],
+            "label": label,
             "effect": percent,
             "detail": detail,
             "based_on": based_on,
@@ -670,7 +746,7 @@ def _future_model_bundle(
     cutoff = latest + timedelta(days=1)
     key = (
         _db_identity(conn), item["id"], sale_meta["latest"], int(sale_meta["n"] or 0),
-        _data_version(conn, location["id"]),
+        _data_version(conn, location["id"], training=True),
     )
     with _CACHE_LOCK:
         bundle = _MODEL_CACHE.get(key)
@@ -741,11 +817,27 @@ def forecast_item(
     )
     model_expected = max(0.0, model_expected)
 
-    override = conn.execute(
-        "SELECT quantity,reason,updated_at FROM forecast_overrides WHERE location_id=? AND item_id=? AND date=?",
+    # An adjustment is the number to make, never the forecast. What is expected
+    # to sell stays the same whoever typed what, so the advice, the totals and
+    # the score all keep reading the same number.
+    override_row = conn.execute(
+        "SELECT * FROM forecast_overrides WHERE location_id=? AND item_id=? AND date=?",
         (item["location_id"], item["id"], target_date.isoformat()),
     ).fetchone()
-    expected = float(override["quantity"]) if override else model_expected
+    override = None
+    if override_row is not None:
+        override = {
+            "quantity": int(override_row["quantity"]),
+            "reason": override_row["reason"] or "",
+            "updated_at": override_row["updated_at"],
+            "updated_by": (override_row["updated_by"] if "updated_by" in override_row.keys() else "") or "",
+        }
+    expected = model_expected
+    new_item = len(history) < NEW_ITEM_DAYS
+    if new_item:
+        # Fewer than a week of sales: no number yet, and nothing built on one.
+        expected = 0.0
+        baseline = 0.0
 
     recent = [row.quantity for row in history if row.target_date >= target_date - timedelta(days=28)]
     prior = [row.quantity for row in history if target_date - timedelta(days=56) <= row.target_date < target_date - timedelta(days=28)]
@@ -763,20 +855,16 @@ def forecast_item(
         "recent_average": safe_mean(recent) if recent else None,
         "prior_average": safe_mean(prior) if prior else None,
     }
-    drivers = _driver_effects(coefficients, target_x, normal_x, target_context, trend_factor, evidence)
-    if override:
-        effect = round((expected / max(1.0, model_expected) - 1.0) * 100)
-        drivers.insert(0, {
-            "key": "override", "label": "Your adjustment", "effect": effect,
-            "detail": override["reason"], "based_on": "entered by a manager",
-        })
+    drivers = [] if new_item else _driver_effects(coefficients, target_x, normal_x, target_context, trend_factor, evidence)
 
-    residual_scale = max(0.11, min(0.48, float(calibration["wape"]) * 1.15))
-    width = max(2.0, expected * (0.10 + residual_scale * 0.75))
-    lower = max(0, int(math.floor(expected - width)))
-    upper = max(lower, int(math.ceil(expected + width)))
     data_coverage = clamp(len(history) / 365.0, 0.0, 1.0)
-    confidence = int(round(clamp(100 - calibration["wape"] * 88 + data_coverage * 8, 48, 95)))
+    confidence = 0 if new_item else int(round(clamp(100 - calibration["wape"] * 88 + data_coverage * 8, 48, 95)))
+    production = _production_quantity(
+        history if not new_item else [], target_date, target_context, int(round(expected)), int(round(baseline)),
+        float(item["price"]),
+        cost_share if cost_share is not None else cost_share_for(conn, item["location_id"], item["id"]),
+        override["quantity"] if override else None,
+    )
 
     interpretation = conn.execute(
         "SELECT * FROM menu_interpretations WHERE menu_item_id=?", (item["id"],)
@@ -795,16 +883,18 @@ def forecast_item(
         "interpretation_confidence": float(interpretation["confidence"]) if interpretation else 0.0,
         "price": float(item["price"]),
         "baseline": int(round(baseline)),
-        "model_expected": int(round(model_expected)),
+        "model_expected": int(round(expected)),
         "expected": int(round(expected)),
-        "lower": lower,
-        "upper": upper,
+        "new_item": new_item,
+        "selling_days": len(history),
+        "lower": production.pop("lower"),
+        "upper": production.pop("upper"),
         "confidence": confidence,
-        "vs_baseline_percent": round((expected / max(1.0, baseline) - 1.0) * 100),
+        "vs_baseline_percent": 0 if new_item else round((expected / max(1.0, baseline) - 1.0) * 100),
         "vs_baseline_units": int(round(expected)) - int(round(baseline)),
         "evidence": evidence,
         "drivers": drivers,
-        "override": dict(override) if override else None,
+        "override": override,
         "model": {
             "version": MODEL_VERSION,
             "history_days": (target_date - history[0].target_date).days if history else 0,
@@ -817,45 +907,75 @@ def forecast_item(
         },
         "analog_days": analog_summary,
         "context": target_context,
-        **_production_quantity(
-            history, target_date, target_context, int(round(expected)), float(item["price"]),
-            cost_share if cost_share is not None else cost_share_for(conn, item["location_id"], item["id"]),
-        ),
+        **production,
     }
 
 
 def _production_quantity(
     history: list[HistoryRow], target_date: date, context: dict[str, Any], expected: int,
-    price: float, cost_share: float | None = None,
+    baseline: int, price: float, cost_share: float | None = None, override_quantity: int | None = None,
 ) -> dict[str, Any]:
     """How many to actually make, which is not the same as how many will sell.
 
-    Imported here rather than at module load because the analysis module reads
-    from this one. The cost is a few milliseconds an item.
+    Imported inside the function because the analysis module reads from this
+    one. The cost is a few milliseconds an item.
 
     `cost_share` is the owner's own food cost figure for this item, resolved by
     the caller. It decides how far above the forecast the make number sits, so
     it has to be their number and not a constant.
+
+    Returns the make number, the make number a normal day would get (so the
+    advice can say "12 more than a normal Tuesday"), the number that would have
+    been suggested when an adjustment is in place, the chance of running out at
+    the make number, and the range of a normal such day (`lower`, `upper`), the
+    same range the item sheet shows.
     """
+    make = override_quantity if override_quantity is not None else expected
+    empty = {
+        "make": make, "suggested_make": expected, "normal_make": baseline, "make_reason": "",
+        "sell_out_percent": None, "lower": expected, "upper": expected,
+    }
     if not history:
-        return {"make": expected, "make_reason": "", "sell_out_percent": None}
+        return empty
     try:
         from .item_analysis import comparable_days, prep_advice
+        from .statistics import exceedance
 
         distribution = comparable_days(history, target_date, context, expected)
         prep = prep_advice(distribution, price, cost_share)
     except Exception:  # the forecast must survive a failure in the extra detail
-        return {"make": expected, "make_reason": "", "sell_out_percent": None}
+        return empty
     if not prep.get("quantity"):
-        return {"make": expected, "make_reason": "", "sell_out_percent": None}
-    quantity = max(int(prep["quantity"]), expected)
+        return empty
+    values = distribution.get("today_values") or []
+    suggested = max(int(prep["quantity"]), expected)
+    normal_make = baseline
+    if values and expected > 0 and baseline > 0:
+        scale = baseline / expected
+        try:
+            normal_prep = prep_advice({"today_values": [value * scale for value in values]}, price, cost_share)
+            normal_make = max(int(normal_prep.get("quantity") or baseline), baseline)
+        except Exception:  # noqa: BLE001 - the normal make is advice, never a blocker
+            normal_make = baseline
+    make = override_quantity if override_quantity is not None else suggested
+    if override_quantity is not None and values:
+        sell_out = round(exceedance(values, float(override_quantity)) * 100)
+    else:
+        sell_out = prep.get("sell_out_percent")
+    if override_quantity is not None:
+        reason = ""
+    elif suggested > expected:
+        reason = f"{suggested - expected} more than the {expected} expected to sell, because running out costs more than a leftover"
+    else:
+        reason = "the same as expected to sell"
     return {
-        "make": quantity,
-        "make_reason": (
-            f"{quantity - expected} more than the {expected} we expect to sell, because running out costs more"
-            if quantity > expected else "the same as we expect to sell"
-        ),
-        "sell_out_percent": prep.get("sell_out_percent"),
+        "make": make,
+        "suggested_make": suggested,
+        "normal_make": normal_make,
+        "make_reason": reason,
+        "sell_out_percent": sell_out,
+        "lower": int(distribution.get("today_low", expected)),
+        "upper": int(distribution.get("today_high", expected)),
     }
 
 
@@ -933,7 +1053,7 @@ def hour_label(slot):
 def opening_calls(conn, location_id, start, end):
     """What was said before service on each of these days, keyed (date, item_id).
 
-    A bare read, kept here rather than in intraday so both the day scorer and
+    A bare read, kept here instead of in intraday so both the day scorer and
     the results backtest can use it without either importing the other.
     """
     return {
@@ -963,7 +1083,7 @@ def location_hour_curve(conn, location, target_date, settings):
 
     It reports how many same-weekday services it is built from, and whether it
     was learned at all. A curve invented from nothing is a flat one, and
-    treating a flat curve as a measurement is how a perfectly ordinary morning
+    treating a flat curve as a measurement is how a perfectly normal morning
     gets reported as running ahead.
     """
     slots = service_slots(location)
@@ -1030,7 +1150,7 @@ def item_hour_curves(conn, location, target_date, base):
     A croissant and a lunch sandwich do not follow the same clock. Judged
     against the location's average, the croissant reads far ahead at ten in the
     morning and the sandwich far behind, when both are exactly on their own
-    pattern and the day is ordinary. Each item therefore gets its own curve,
+    pattern and the day is normal. Each item therefore gets its own curve,
     blended toward the location's in proportion to how much of its own hourly
     history there is to go on.
 
@@ -1202,18 +1322,24 @@ def _day_drivers(
     baseline_units: float,
     baseline_sales: float,
 ) -> list[dict[str, Any]]:
-    """Roll per-item drivers up to the day, in units and money rather than percentages alone."""
+    """Roll per-item drivers up to the day, in units and money as well as a percentage.
+
+    The recent trend is written from store totals, so the sentence and the
+    percentage next to it come from the same two numbers. Everything else
+    takes the median item effect and the sentence of the biggest item.
+    """
     grouped: dict[str, list[int]] = defaultdict(list)
     details: dict[str, str] = {}
+    labels: dict[str, str] = {}
     based_on: dict[str, str] = {}
     for item in items:
         for driver in item["drivers"]:
-            if driver["key"] == "override":
+            if driver["key"] in {"override", "trend"}:
                 continue
             grouped[driver["key"]].append(int(driver["effect"]))
-            if driver["key"] not in details or item["expected"] * item["price"] > 0:
-                details.setdefault(driver["key"], driver["detail"])
-                based_on.setdefault(driver["key"], driver.get("based_on", ""))
+            details.setdefault(driver["key"], driver["detail"])
+            labels.setdefault(driver["key"], driver.get("label") or DRIVER_LABELS.get(driver["key"], driver["key"].title()))
+            based_on.setdefault(driver["key"], driver.get("based_on", ""))
 
     output = []
     for key, values in grouped.items():
@@ -1223,23 +1349,50 @@ def _day_drivers(
         share = median / 100.0
         output.append({
             "key": key,
-            "label": DRIVER_LABELS.get(key, key.title()),
+            "label": labels.get(key, DRIVER_LABELS.get(key, key.title())),
             "effect": median,
             "units": int(round(baseline_units * share)),
             "sales": round(baseline_sales * share, 2),
             "detail": details.get(key, ""),
             "based_on": based_on.get(key, ""),
         })
+
+    recent = sum(float(item["evidence"].get("recent_average") or 0) for item in items)
+    prior = sum(float(item["evidence"].get("prior_average") or 0) for item in items)
+    if recent > 0 and prior > 0:
+        percent = round((recent / prior - 1.0) * 100)
+        if abs(percent) >= 2:
+            output.append({
+                "key": "trend",
+                "label": DRIVER_LABELS["trend"],
+                "effect": percent,
+                "units": int(round(baseline_units * percent / 100.0)),
+                "sales": round(baseline_sales * percent / 100.0, 2),
+                "detail": (
+                    f"The last four weeks averaged {recent:,.0f} items a day against {prior:,.0f} "
+                    "in the four weeks before."
+                ),
+                "based_on": "the last eight weeks of sales",
+            })
     output.sort(key=lambda row: abs(row["effect"]), reverse=True)
     return output[:5]
 
 
-def forecast_day(conn: sqlite3.Connection, location_id: str, target_date: date, record_run: bool = False) -> dict[str, Any]:
+def forecast_day(
+    conn: sqlite3.Connection, location_id: str, target_date: date, record_run: bool = False,
+    data_version: str | None = None,
+) -> dict[str, Any]:
     location = _load_location(conn, location_id)
     ensure_location_interpretations(conn, location_id)
-    item_rows = conn.execute("SELECT * FROM menu_items WHERE location_id=? AND active=1 ORDER BY category,name", (location_id,)).fetchall()
-    # Resolved once for the whole menu rather than per item, so the make number
-    # follows the owner's costs screen without a query per row.
+    # Menu order is the order items were put on the menu, and categories follow
+    # the first item of theirs that appears. The make list keeps that order, so
+    # a station reads its own items together.
+    item_rows = conn.execute("SELECT * FROM menu_items WHERE location_id=? AND active=1 ORDER BY rowid", (location_id,)).fetchall()
+    category_rank: dict[str, int] = {}
+    for row in item_rows:
+        category_rank.setdefault(row["category"], len(category_rank))
+    # Resolved once for the whole menu, so the make number follows the owner's
+    # costs screen without a query per row.
     shares: dict[str, float] = {}
     try:
         from .costs import cost_settings, item_cost_basis
@@ -1252,37 +1405,32 @@ def forecast_day(conn: sqlite3.Connection, location_id: str, target_date: date, 
     except Exception:  # a costing failure must never stop a forecast
         shares = {}
     items = [forecast_item(conn, item, target_date, shares.get(item["id"])) for item in item_rows]
-    items.sort(key=lambda row: row["expected"] * row["price"], reverse=True)
-    expected_revenue = round(sum(row["expected"] * row["price"] for row in items), 2)
-    baseline_revenue = round(sum(row["baseline"] * row["price"] for row in items), 2)
-    expected_units = sum(row["expected"] for row in items)
-    confidence = int(round(safe_mean(row["confidence"] for row in items))) if items else 0
-    context = items[0]["context"] if items else build_context(location, target_date, None, [])
+    items.sort(key=lambda row: (category_rank.get(row["category"], len(category_rank)), -(row["model_expected"] * row["price"])))
+    # Items with under a week of sales are listed but stay out of every total.
+    live = [row for row in items if not row.get("new_item")]
+    expected_revenue = round(sum(row["expected"] * row["price"] for row in live), 2)
+    baseline_revenue = round(sum(row["baseline"] * row["price"] for row in live), 2)
+    expected_units = sum(row["expected"] for row in live)
+    make_units = sum(row["make"] for row in live)
+    confidence = int(round(safe_mean(row["confidence"] for row in live))) if live else 0
+    context = live[0]["context"] if live else (items[0]["context"] if items else build_context(location, target_date, None, []))
     curve = _service_curve(conn, location, target_date, expected_revenue, expected_units, context)
     peak = max(curve, key=lambda row: row["revenue"], default=None)
     change = round((expected_revenue / max(1.0, baseline_revenue) - 1.0) * 100)
-    level = "Normal"
-    if change >= 15:
-        level = "Very strong"
-    elif change >= 6:
-        level = "Above normal"
-    elif change <= -15:
-        level = "Very soft"
-    elif change <= -6:
-        level = "Below normal"
+    level = demand_level(change)
 
-    movers = sorted(items, key=lambda row: abs(row["vs_baseline_units"]), reverse=True)
+    movers = sorted(live, key=lambda row: abs(row["vs_baseline_units"]), reverse=True)
     top_surges = [row for row in movers if row["vs_baseline_units"] >= 2 and row["vs_baseline_percent"] >= 4][:5]
     top_drops = [row for row in movers if row["vs_baseline_units"] <= -2 and row["vs_baseline_percent"] <= -4][:4]
-    top_volume = sorted(items, key=lambda row: row["expected"], reverse=True)[:6]
+    top_volume = sorted(live, key=lambda row: row["make"], reverse=True)
 
     weekday_name = target_date.strftime("%A")
-    baseline_units = sum(row["baseline"] for row in items)
-    average_price = safe_mean([row["price"] for row in items], 8.0)
+    baseline_units = sum(row["baseline"] for row in live)
+    average_price = safe_mean([row["price"] for row in live], 8.0)
     basket = 2.4 if average_price <= 6 else (2.1 if average_price <= 11 else 1.9)
-    expected_orders = max(1, int(round(expected_units / basket)))
-    baseline_orders = max(1, int(round(baseline_units / basket)))
-    comparable_days = int(round(safe_median([row["evidence"]["weekday_samples"] for row in items]))) if items else 0
+    expected_orders = max(1, int(round(expected_units / basket))) if expected_units else 0
+    baseline_orders = max(1, int(round(baseline_units / basket))) if baseline_units else 0
+    comparable_days = int(round(safe_median([row["evidence"]["weekday_samples"] for row in live]))) if live else 0
     data_health = _data_health(conn, location_id, target_date)
     history_days = data_health["history_days"]
     recent = conn.execute(
@@ -1292,88 +1440,42 @@ def forecast_day(conn: sqlite3.Connection, location_id: str, target_date: date, 
     measured_accuracy = float(recent["accuracy"]) if recent and recent["accuracy"] is not None else None
     days_tested = int(recent["days"] or 0) if recent else 0
     # Once there are enough closed days, the score people see is grounded in how
-    # this location's forecasts have actually landed, not in the model's opinion
+    # this location's forecasts have actually landed, not in an estimate
     # of itself. Claiming 95% confidence beside a measured 9% error is the kind
     # of thing that costs trust the first time someone checks.
     if measured_accuracy is not None and days_tested >= 7:
         confidence = int(round(clamp(0.35 * confidence + 0.65 * measured_accuracy, 40, 97)))
 
+    # What to do: only where the make number differs from what a normal such
+    # day would make. Same number, nothing to say. The busiest hour lives in
+    # the summary and is not repeated here.
     actions: list[dict[str, Any]] = []
-    if top_surges:
-        top = top_surges[0]
+    moved = [row for row in live if abs(int(row["make"]) - int(row["normal_make"])) >= 2]
+    moved.sort(key=lambda row: abs((row["make"] - row["normal_make"]) * row["price"]), reverse=True)
+    for row in moved[:4]:
+        diff = int(row["make"]) - int(row["normal_make"])
+        word = "more" if diff > 0 else "fewer"
+        override = row.get("override") or {}
+        if override:
+            who = override.get("updated_by") or "a manager"
+            why = override.get("reason") or ""
+            detail = f"Set by {who}" + (f": {why}." if why else ".") + f" Quantify suggested {row['suggested_make']}."
+        else:
+            detail = (
+                f"About {row['expected']} are expected to sell against {row['baseline']} on a normal "
+                f"{weekday_name}, which usually means making {row['normal_make']}."
+            )
         actions.append({
             "type": "prep",
-            "title": f"Prep {top['vs_baseline_units']} more {top['name'].lower()} than usual",
-            "detail": (
-                f"{top['expected']} expected against a normal {weekday_name} of {top['baseline']}. "
-                f"Anywhere from {top['lower']} to {top['upper']} is reasonable, so overshooting by a few costs less than running out."
-            ),
-            "metric": f"{top['expected']} units",
-            "item_id": top["item_id"],
-        })
-    if top_drops:
-        drop = top_drops[0]
-        actions.append({
-            "type": "prep",
-            "title": f"Pull back {abs(drop['vs_baseline_units'])} {drop['name'].lower()}",
-            "detail": (
-                f"{drop['expected']} expected against a normal {weekday_name} of {drop['baseline']}. "
-                "Prepping to the usual number would leave stock over at close."
-            ),
-            "metric": f"{drop['expected']} units",
-            "item_id": drop["item_id"],
-        })
-    if not actions and top_volume:
-        # A steady day still has one number worth building around.
-        lead = top_volume[0]
-        lead_share = round(lead["expected"] * lead["price"] / max(1.0, expected_revenue) * 100)
-        actions.append({
-            "type": "anchor",
-            "title": f"Build the day around {lead['expected']} {lead['name'].lower()}",
-            "detail": (
-                f"It is the biggest single line today at {money_units(lead['expected'] * lead['price'])}, "
-                f"{lead_share}% of expected sales, against a normal {weekday_name} of {lead['baseline']}. "
-                f"Everything else moves less than this does."
-            ),
-            "metric": f"{lead['expected']} units",
-            "item_id": lead["item_id"],
-        })
-    if peak and len(actions) < 3:
-        share = round(peak["revenue"] / max(1.0, expected_revenue) * 100)
-        actions.append({
-            "type": "timing",
-            "title": f"Have the line covered by {peak['label']}",
-            "detail": (
-                f"That hour alone is expected to take about ${peak['revenue']:,.0f} and {peak['units']} items, "
-                f"which is {share}% of the whole day."
-            ),
-            "metric": peak["label"],
-        })
-    low_confidence = sorted(
-        [row for row in items if row["confidence"] < 68 and row["expected"] * row["price"] > expected_revenue * 0.04],
-        key=lambda row: row["expected"] * row["price"], reverse=True,
-    )
-    if low_confidence and len(actions) < 3:
-        watch = low_confidence[0]
-        actions.append({
-            "type": "watch",
-            "title": f"Keep an eye on {watch['name'].lower()}",
-            "detail": (
-                f"It sells enough to matter but its recent numbers jump around. "
-                f"Expect {watch['lower']} to {watch['upper']}."
-            ),
-            "metric": f"{watch['confidence']}% sure",
-            "item_id": watch["item_id"],
-        })
-    if not actions:
-        actions.append({
-            "type": "steady",
-            "title": "Run the normal plan",
-            "detail": (
-                f"Nothing today is far enough from a normal {weekday_name} to change prep. "
-                f"Expect about {expected_units:,} items and {money_units(expected_revenue)}."
-            ),
-            "metric": "No change",
+            "title": f"Make {abs(diff)} {word} {plural_name(row['name'], abs(diff))} than a normal {weekday_name}",
+            "detail": detail,
+            "metric": f"{row['make']} to make",
+            "item_id": row["item_id"],
+            "make": int(row["make"]),
+            "normal_make": int(row["normal_make"]),
+            "expected": int(row["expected"]),
+            "normal": int(row["baseline"]),
+            "adjusted": bool(override),
         })
 
     difference_sales = round(expected_revenue - baseline_revenue, 2)
@@ -1383,7 +1485,7 @@ def forecast_day(conn: sqlite3.Connection, location_id: str, target_date: date, 
     else:
         word = "busier" if change > 0 else "quieter"
         headline = f"{abs(change)}% {word} than a normal {weekday_name}"
-    context_signals = _day_drivers(items, context, baseline_units, baseline_revenue)
+    context_signals = _day_drivers(live, context, baseline_units, baseline_revenue)
     menu_summary = menu_intelligence_view(conn, location_id)["summary"]
 
     result = {
@@ -1392,12 +1494,14 @@ def forecast_day(conn: sqlite3.Connection, location_id: str, target_date: date, 
         "date_label": target_date.strftime("%A, %B %d, %Y").replace(" 0", " "),
         "generated_at": utc_now(),
         "headline": headline,
+        "no_history": history_days == 0,
         "summary": {
             "demand_level": level,
             "expected_revenue": expected_revenue,
             "baseline_revenue": baseline_revenue,
             "revenue_change_percent": change,
             "expected_units": expected_units,
+            "make_units": make_units,
             "baseline_units": int(round(baseline_units)),
             "expected_orders": expected_orders,
             "baseline_orders": baseline_orders,
@@ -1446,22 +1550,38 @@ def forecast_day(conn: sqlite3.Connection, location_id: str, target_date: date, 
             "material_events": [event for event in context["events"] if event["impact"] >= 0.12][:5],
             "event_candidates_reviewed": len(context["events"]),
         },
-        "material_pressure": _material_pressure(items, conn),
+        "material_pressure": _material_pressure(live, conn),
         "menu_intelligence": menu_summary,
         "data_health": data_health,
         "data_note": "",
     }
     if record_run:
-        conn.execute(
-            "INSERT INTO forecast_runs(id,location_id,target_date,generated_at,model_version,history_days,context_json,summary_json) VALUES(?,?,?,?,?,?,?,?)",
-            (
-                f"run-{uuid.uuid4().hex}", location_id, target_date.isoformat(), result["generated_at"], MODEL_VERSION,
-                max((row["model"]["history_days"] for row in items), default=0),
-                json.dumps(result["context"], separators=(",", ":")), json.dumps(result["summary"], separators=(",", ":")),
-            ),
-        )
-        conn.commit()
+        _record_run(conn, location_id, target_date, result, items, data_version or _data_version(conn, location_id))
     return result
+
+
+def _record_run(
+    conn: sqlite3.Connection, location_id: str, target_date: date, result: dict[str, Any],
+    items: list[dict[str, Any]], data_version: str,
+) -> bool:
+    """Write the run once per (location, date, data version, model version).
+
+    Reading the plan is not an event. A row is written the first time this
+    combination is computed and never again, so the table records what changed
+    and not how many tablets were open.
+    """
+    saved = conn.execute(
+        "INSERT OR IGNORE INTO forecast_runs(id,location_id,target_date,generated_at,model_version,history_days,context_json,summary_json,data_version) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            f"run-{uuid.uuid4().hex}", location_id, target_date.isoformat(), result["generated_at"], MODEL_VERSION,
+            max((row["model"]["history_days"] for row in items), default=0),
+            json.dumps(result["context"], separators=(",", ":")),
+            json.dumps(result["summary"] | {"data_version": data_version}, separators=(",", ":")),
+            data_version,
+        ),
+    )
+    conn.commit()
+    return saved.rowcount > 0
 
 
 def forecast_range(conn: sqlite3.Connection, location_id: str, start_date: date, days: int = 14) -> dict[str, Any]:
@@ -1487,40 +1607,66 @@ def forecast_range(conn: sqlite3.Connection, location_id: str, start_date: date,
     }
 
 
-def daily_brief(conn: sqlite3.Connection, location_id: str, target_date: date, week_days: int = 7) -> dict[str, Any]:
-    today = forecast_day(conn, location_id, target_date, record_run=True)
+def daily_brief(
+    conn: sqlite3.Connection, location_id: str, target_date: date, week_days: int = 7,
+    data_version: str | None = None, refresh: bool = False,
+) -> dict[str, Any]:
+    version = data_version or _data_version(conn, location_id)
+    key = (_db_identity(conn), location_id, target_date.isoformat(), version, max(2, min(14, week_days)), MODEL_VERSION)
+    # Serialize just this cache shard, so simultaneous tablets share one build.
+    with _BRIEF_LOCKS[hash(key) % len(_BRIEF_LOCKS)]:
+        with _CACHE_LOCK:
+            cached = _BRIEF_CACHE.get(key)
+        if not refresh and cached and time.monotonic() - cached[0] < _BRIEF_CACHE_SECONDS:
+            return copy.deepcopy(cached[1])
+        value = _build_daily_brief(conn, location_id, target_date, week_days, version)
+        with _CACHE_LOCK:
+            _BRIEF_CACHE[key] = (time.monotonic(), value)
+            _trim_cache(_BRIEF_CACHE, 96)
+        return copy.deepcopy(value)
+
+
+def _build_daily_brief(
+    conn: sqlite3.Connection, location_id: str, target_date: date, week_days: int,
+    data_version: str,
+) -> dict[str, Any]:
+    today = forecast_day(conn, location_id, target_date, record_run=True, data_version=data_version)
     week = []
     for index in range(1, max(2, min(14, week_days))):
         row = forecast_day(conn, location_id, target_date + timedelta(days=index))
         week.append({
             "date": row["date"], "date_label": row["date_label"],
             "expected_revenue": row["summary"]["expected_revenue"],
+            "expected_units": row["summary"]["expected_units"],
             "change_percent": row["summary"]["revenue_change_percent"],
             "demand_level": row["summary"]["demand_level"],
             "confidence": row["summary"]["confidence"],
             "peak_hour": row["summary"]["peak_hour"],
             "top_item": row["top_volume"][0]["name"] if row["top_volume"] else None,
+            "top_item_units": row["top_volume"][0]["expected"] if row["top_volume"] else 0,
             "occasion_name": row["context"]["occasion_name"],
         })
     today["week_ahead"] = week
     return today
 
 
-def set_override(conn: sqlite3.Connection, location_id: str, item_id: str, target_date: date, quantity: int, reason: str) -> dict[str, Any]:
+def set_override(
+    conn: sqlite3.Connection, location_id: str, item_id: str, target_date: date, quantity: int,
+    reason: str = "", updated_by: str = "",
+) -> dict[str, Any]:
     if quantity < 0 or quantity > 100_000:
-        raise ValueError("Quantity must be between 0 and 100,000")
-    reason = reason.strip()
-    if len(reason) < 4:
-        raise ValueError("Add a brief reason so the adjustment is auditable")
+        raise ValueError("The number to make must be between 0 and 100,000")
+    reason = (reason or "").strip()[:200]
     item = conn.execute("SELECT * FROM menu_items WHERE id=? AND location_id=?", (item_id, location_id)).fetchone()
     if item is None:
-        raise ValueError("Unknown menu item")
+        raise ValueError("That item is not on this location")
     conn.execute(
-        """INSERT INTO forecast_overrides(location_id,item_id,date,quantity,reason,updated_at)
-           VALUES(?,?,?,?,?,?)
+        """INSERT INTO forecast_overrides(location_id,item_id,date,quantity,reason,updated_at,updated_by)
+           VALUES(?,?,?,?,?,?,?)
            ON CONFLICT(location_id,item_id,date) DO UPDATE SET
-             quantity=excluded.quantity,reason=excluded.reason,updated_at=excluded.updated_at""",
-        (location_id, item_id, target_date.isoformat(), quantity, reason, utc_now()),
+             quantity=excluded.quantity,reason=excluded.reason,updated_at=excluded.updated_at,
+             updated_by=excluded.updated_by""",
+        (location_id, item_id, target_date.isoformat(), quantity, reason, utc_now(), (updated_by or "").strip()[:80]),
     )
     conn.commit()
     return forecast_item(conn, item, target_date)
@@ -1531,96 +1677,179 @@ def clear_override(conn: sqlite3.Connection, location_id: str, item_id: str, tar
     conn.commit()
 
 
-def performance(conn: sqlite3.Connection, location_id: str, as_of: date, days: int = 30) -> dict[str, Any]:
-    days = max(7, min(days, 90))
-    requested_start = as_of - timedelta(days=days)
-    evaluation_start = max(requested_start, as_of - timedelta(days=21))
-    location = _load_location(conn, location_id)
-    item_rows = conn.execute("SELECT * FROM menu_items WHERE location_id=? AND active=1", (location_id,)).fetchall()
-    daily: dict[str, dict[str, float]] = defaultdict(lambda: {"actual": 0.0, "predicted": 0.0, "revenue": 0.0})
-    item_errors: list[dict[str, Any]] = []
+ACCURACY_WINDOW_DAYS = 30
 
-    # The same rule the day score follows, because this is the number the track
-    # record tab prints and the two must not be computed different ways. Where a
-    # call was locked before that day opened, that call is what is measured.
-    # Where none was, the prediction is rebuilt from sales up to the day before,
-    # which is a fair reconstruction of the same call. Nothing produced during
-    # service is read here.
-    calls = opening_calls(conn, location_id, evaluation_start, as_of - timedelta(days=1))
-    call_days: set[str] = set()
 
-    for item in item_rows:
-        training, weather_map, events_map = _history_for_item(conn, location, item["id"], evaluation_start)
-        coefficients, calibration = _fit_model_bundle(training)
-        available = training[:]
-        first_date = available[0].target_date if available else evaluation_start - timedelta(days=365)
-        actual_rows = conn.execute(
-            "SELECT date,quantity,revenue,stockout_minutes FROM sales WHERE location_id=? AND item_id=? AND date>=? AND date<? ORDER BY date",
-            (location_id, item["id"], evaluation_start.isoformat(), as_of.isoformat()),
+def lean_words(bias: float) -> str:
+    """Which way the calls usually miss, in words."""
+    if bias > 0.5:
+        return "usually low"
+    if bias < -0.5:
+        return "usually high"
+    return "no steady lean"
+
+
+def performance(conn: sqlite3.Connection, location_id: str, as_of: date, days: int = ACCURACY_WINDOW_DAYS) -> dict[str, Any]:
+    """The track record over the last `days` closed trading days, item by item.
+
+    One window for the tiles, the chart and the table, counted in days the
+    place actually traded, so a gap in register data does not shrink the
+    sample. Every figure is read from the same day scores the History rows and
+    the day sheet show, so no two screens can disagree about a day. Days in the
+    window that have not been scored yet are scored here, once, with the same
+    walk-forward the background scorer uses.
+    """
+    days = max(7, min(int(days), 90))
+    closed = [
+        row["date"] for row in conn.execute(
+            "SELECT DISTINCT date FROM sales WHERE location_id=? AND date<? ORDER BY date DESC LIMIT ?",
+            (location_id, as_of.isoformat(), days),
         ).fetchall()
-        actual_total = 0.0
-        error_total = 0.0
-        for actual in actual_rows:
-            target = date.fromisoformat(actual["date"])
-            context = build_context(location, target, weather_map.get(actual["date"]), events_map.get(actual["date"], []), weather_map)
-            target_x = feature_vector(context, target, first_date)
-            baseline = _baseline_prediction(available, target) if available else _cold_start_estimate(conn, item, target)
-            analog_value, _ = _analog_prediction(available, target, context) if available else (baseline, [])
-            ridge_value = max(0.0, math.expm1(dot(target_x, coefficients))) if len(available) >= 28 else baseline
-            predicted = (
-                baseline * calibration["weights"]["baseline"]
-                + ridge_value * calibration["weights"]["ridge"]
-                + analog_value * calibration["weights"]["analogs"]
-            )
-            called = calls.get((actual["date"], item["id"]))
-            if called is not None:
-                predicted = max(0.0, float(called["expected"]))
-                call_days.add(actual["date"])
-            quantity = float(actual["quantity"])
-            actual_total += quantity
-            error_total += abs(quantity - predicted)
-            daily[actual["date"]]["actual"] += quantity
-            daily[actual["date"]]["predicted"] += predicted
-            daily[actual["date"]]["revenue"] += float(actual["revenue"])
-            available.append(HistoryRow(
-                target_date=target,
-                quantity=quantity,
-                revenue=float(actual["revenue"]),
-                stockout_minutes=int(actual["stockout_minutes"] or 0),
-                context=context,
-                x=target_x,
-            ))
-        if actual_total > 0:
-            wape = error_total / actual_total * 100
-            item_errors.append({
-                "item_id": item["id"], "name": item["name"],
-                "wape": round(wape, 1),
-                "accuracy": round(max(0.0, 100 - wape), 1),
-                "actual_units": int(round(actual_total)),
-            })
+    ]
+    dates = sorted(closed)
+    empty = {
+        "location_id": location_id,
+        "start_date": dates[0] if dates else None,
+        "end_date": dates[-1] if dates else None,
+        "summary": {
+            "forecast_accuracy": None, "wape": None, "average_day_accuracy": None,
+            "days_evaluated": 0, "days_pending": len(dates), "items_evaluated": 0,
+            "days_from_stored_call": 0, "window_days": days, "manual_inventory_required": False,
+        },
+        "daily": [],
+        "item_accuracy": [],
+        "trend": {"series": [], "average": None, "days": 0, "best": None, "worst": None,
+                  "best_date": None, "worst_date": None, "within_ten": None},
+        "note": "Accuracy is measured against what the registers actually rang.",
+    }
+    if not dates:
+        return empty
 
-    total_actual = sum(row["actual"] for row in daily.values())
-    total_error = sum(abs(row["actual"] - row["predicted"]) for row in daily.values())
+    def scored_rows() -> dict[str, dict[str, Any]]:
+        from .transactions import normalized_score
+        marks = ",".join("?" * len(dates))
+        return {
+            row["date"]: normalized_score(dict(row))
+            for row in conn.execute(
+                f"SELECT * FROM day_accuracy WHERE location_id=? AND date IN ({marks})",
+                (location_id, *dates),
+            ).fetchall()
+        }
+
+    scored = scored_rows()
+    missing = [day for day in dates if day not in scored]
+    if missing:
+        from .transactions import score_range  # imported here: transactions reads this module
+
+        # Contiguous runs, so each run is one walk-forward fit.
+        start = previous = date.fromisoformat(missing[0])
+        runs: list[tuple[date, date]] = []
+        for day in missing[1:]:
+            current = date.fromisoformat(day)
+            if (current - previous).days > 3:
+                runs.append((start, previous))
+                start = current
+            previous = current
+        runs.append((start, previous))
+        for first, last in runs:
+            try:
+                score_range(conn, location_id, first, last)
+            except Exception:  # noqa: BLE001 - a day that will not score is left pending
+                continue
+        scored = scored_rows()
+
+    per_item: dict[str, dict[str, Any]] = {}
+    daily_rows: list[dict[str, Any]] = []
+    total_actual = 0.0
+    total_error = 0.0
+    stored_calls = 0
+    for day in dates:
+        row = scored.get(day)
+        if row is None:
+            continue
+        try:
+            entries = json.loads(row["items_json"] or "[]")
+        except (TypeError, ValueError):
+            entries = []
+        for entry in entries:
+            actual = float(entry.get("actual") or 0)
+            predicted = float(entry.get("predicted") or 0)
+            bucket = per_item.setdefault(entry.get("item_id"), {
+                "item_id": entry.get("item_id"), "name": entry.get("name"),
+                "actual": 0.0, "predicted": 0.0, "error": 0.0, "days": 0, "bias": 0.0,
+            })
+            bucket["actual"] += actual
+            bucket["predicted"] += predicted
+            bucket["error"] += abs(actual - predicted)
+            bucket["bias"] += actual - predicted
+            bucket["days"] += 1
+            total_actual += actual
+            total_error += abs(actual - predicted)
+        if row.get("call_source") == "stored":
+            stored_calls += 1
+        daily_rows.append({
+            "date": day,
+            "actual": int(round(float(row["actual_units"] or 0))),
+            "predicted": int(round(float(row["predicted_units"] or 0))),
+            "revenue": round(float(row["actual_sales"] or 0), 2),
+            "accuracy": round(float(row["accuracy"] or 0), 1),
+            "call_source": row.get("call_source") or "reconstructed",
+        })
+    if not daily_rows:
+        return empty
+
     wape_total = total_error / max(1.0, total_actual) * 100
     accuracy = round(max(0.0, 100 - wape_total), 1)
-    daily_rows = [
-        {"date": key, "actual": round(value["actual"]), "predicted": round(value["predicted"]), "revenue": round(value["revenue"], 2)}
-        for key, value in sorted(daily.items())
-    ]
+    item_errors = []
+    for bucket in per_item.values():
+        if bucket["actual"] <= 0 or bucket["days"] == 0:
+            continue
+        wape = bucket["error"] / bucket["actual"] * 100
+        item_errors.append({
+            "item_id": bucket["item_id"],
+            "name": bucket["name"],
+            "wape": round(wape, 1),
+            "accuracy": round(max(0.0, 100 - wape), 1),
+            "actual_units": int(round(bucket["actual"])),
+            "days": bucket["days"],
+            "average_miss": round(bucket["error"] / bucket["days"], 1),
+            "usually": lean_words(bucket["bias"] / bucket["days"]),
+        })
     item_errors.sort(key=lambda row: row["wape"], reverse=True)
+
+    values = [row["accuracy"] for row in daily_rows]
+    best = max(daily_rows, key=lambda row: row["accuracy"])
+    worst = min(daily_rows, key=lambda row: row["accuracy"])
+    within = sum(1 for value in values if value >= 90)
     return {
         "location_id": location_id,
-        "start_date": evaluation_start.isoformat(),
-        "end_date": (as_of - timedelta(days=1)).isoformat(),
+        "start_date": daily_rows[0]["date"],
+        "end_date": daily_rows[-1]["date"],
         "summary": {
             "forecast_accuracy": accuracy,
             "wape": round(wape_total, 1),
+            "average_day_accuracy": round(sum(values) / len(values), 1),
             "days_evaluated": len(daily_rows),
+            "days_pending": len(dates) - len(daily_rows),
             "items_evaluated": len(item_errors),
-            "days_from_stored_call": len(call_days),
+            "days_from_stored_call": stored_calls,
+            "window_days": days,
             "manual_inventory_required": False,
         },
         "daily": daily_rows,
         "item_accuracy": item_errors,
+        "trend": {
+            "series": [
+                {"date": row["date"], "accuracy": row["accuracy"], "predicted": row["predicted"], "actual": row["actual"]}
+                for row in daily_rows
+            ],
+            "average": round(sum(values) / len(values), 1),
+            "days": len(values),
+            "best": best["accuracy"],
+            "best_date": best["date"],
+            "worst": worst["accuracy"],
+            "worst_date": worst["date"],
+            "within_ten": round(within / len(values) * 100),
+        },
         "note": "Accuracy is measured against what the registers actually rang.",
     }

@@ -22,6 +22,7 @@ import json
 import math
 import random
 import sqlite3
+import statistics
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Iterator
@@ -248,32 +249,31 @@ def day_list(
     start: date | None = None,
     with_costs: bool = False,
 ) -> dict[str, Any]:
-    """A page of closed days, newest first, for the scrolling history list."""
+    """A bounded calendar page, including dates missing from the register."""
     limit = max(1, min(60, limit))
-    params: list[Any] = [location_id]
-    clause = ""
-    if before is not None:
-        clause += " AND date<?"
-        params.append(before.isoformat())
-    if start is not None:
-        clause += " AND date>=?"
-        params.append(start.isoformat())
-    rows = conn.execute(
-        f"""SELECT date, SUM(quantity) AS units, SUM(revenue) AS revenue, COUNT(DISTINCT item_id) AS items
-            FROM sales WHERE location_id=?{clause}
-            GROUP BY date ORDER BY date DESC LIMIT ?""",
-        (*params, limit + 1),
-    ).fetchall()
-
-    has_more = len(rows) > limit
-    rows = rows[:limit]
-    if not rows:
+    bounds = conn.execute("SELECT MIN(date) AS first, MAX(date) AS last FROM sales WHERE location_id=?", (location_id,)).fetchone()
+    newest_sale_date = bounds["last"] if bounds else None
+    newest = min(last_closed_day(conn, location_id), before - timedelta(days=1)) if before else last_closed_day(conn, location_id)
+    earliest = date.fromisoformat(bounds["first"]) if bounds and bounds["first"] else newest + timedelta(days=1)
+    if start:
+        earliest = max(earliest, start)
+    if newest < earliest:
         return {"days": [], "has_more": False, "next_before": None,
+                "newest_sale_date": newest_sale_date,
                 "source": order_source(conn, location_id), "costs": None}
-
+    oldest = max(earliest, newest - timedelta(days=limit - 1))
+    rows = conn.execute(
+        """SELECT date, SUM(quantity) AS units, SUM(revenue) AS revenue, COUNT(DISTINCT item_id) AS items
+            FROM sales WHERE location_id=? AND date>=? AND date<=?
+            GROUP BY date ORDER BY date DESC""",
+        (location_id, oldest.isoformat(), newest.isoformat()),
+    ).fetchall()
+    has_more = oldest > earliest
     dates = [row["date"] for row in rows]
+    for day in dates:
+        ensure_day_scored(conn, location_id, date.fromisoformat(day))
     scored = {
-        row["date"]: dict(row)
+        row["date"]: normalized_score(dict(row))
         for row in conn.execute(
             f"SELECT * FROM day_accuracy WHERE location_id=? AND date IN ({','.join('?' * len(dates))})",
             (location_id, *dates),
@@ -283,8 +283,6 @@ def day_list(
     # nothing, so the honest reading is that the place was shut. Saying so beats
     # a gap in the list that makes somebody think data went missing.
     covered = {row["date"] for row in rows}
-    oldest = date.fromisoformat(rows[-1]["date"])
-    newest = date.fromisoformat(rows[0]["date"])
     closed: list[dict[str, Any]] = []
     cursor = oldest
     while cursor <= newest:
@@ -296,7 +294,7 @@ def day_list(
                 "sales": 0.0, "units": 0, "orders": 0, "average_order": 0.0,
                 "distinct_items": 0, "accuracy": None, "predicted_units": None,
                 "predicted_sales": None, "scored": False, "costs": None,
-                "note": "Nothing was recorded on this date, so we take it you were closed.",
+                "note": "Nothing was recorded on this date.",
             })
         cursor += timedelta(days=1)
 
@@ -353,6 +351,7 @@ def day_list(
         "next_before": days[-1]["date"] if days and has_more else None,
         "source": order_source(conn, location_id),
         "costs": costs_summary,
+        "newest_sale_date": newest_sale_date,
     }
 
 
@@ -488,6 +487,7 @@ def score_range(conn: sqlite3.Connection, location_id: str, start: date, end: da
                 "error": 0.0, "items": [], "condition": context,
                 "from_call": 0, "from_rebuild": 0, "overridden": 0,
             })
+            predicted = int(round(predicted))
             bucket["predicted_units"] += predicted
             bucket["actual_units"] += quantity
             bucket["predicted_sales"] += predicted * unit_price
@@ -498,7 +498,7 @@ def score_range(conn: sqlite3.Connection, location_id: str, start: date, end: da
             bucket["items"].append({
                 "item_id": item["id"],
                 "name": item["name"],
-                "predicted": round(predicted, 1),
+                "predicted": predicted,
                 "actual": int(round(quantity)),
                 "gap": int(round(quantity - predicted)),
                 "sold_out": bool(int(actual["stockout_minutes"] or 0) > 0),
@@ -697,9 +697,28 @@ def ensure_day_scored(conn: sqlite3.Connection, location_id: str, target: date) 
     return dict(row) if row else None
 
 
+def normalized_score(score: dict[str, Any]) -> dict[str, Any]:
+    """Present older fractional scores using the same whole items as new scores."""
+    items = json.loads(score.get("items_json") or "[]")
+    if not items:
+        return score
+    for item in items:
+        item["predicted"] = int(round(float(item.get("predicted") or 0)))
+        item["actual"] = int(round(float(item.get("actual") or 0)))
+        item["gap"] = item["actual"] - item["predicted"]
+    actual = sum(item["actual"] for item in items)
+    return score | {
+        "predicted_units": sum(item["predicted"] for item in items),
+        "accuracy": max(0.0, 100 - sum(abs(item["gap"]) for item in items) / max(1, actual) * 100),
+        "items_json": json.dumps(items, separators=(",", ":")),
+    }
+
+
 def day_detail(conn: sqlite3.Connection, location_id: str, target: date) -> dict[str, Any]:
     """Everything about one closed day: what sold, and how close the call was."""
     score = ensure_day_scored(conn, location_id, target)
+    if score:
+        score = normalized_score(score)
     orders = day_orders(conn, location_id, target)
     totals = _day_totals(conn, location_id, target, target).get(target.isoformat(), {"units": 0.0, "revenue": 0.0})
 
@@ -725,16 +744,29 @@ def day_detail(conn: sqlite3.Connection, location_id: str, target: date) -> dict
         conditions = json.loads(score["conditions_json"] or "{}")
 
     order_total = sum(order["total"] for order in orders)
+    comparable = conn.execute(
+        """SELECT date, SUM(revenue) AS sales, SUM(quantity) AS units FROM sales
+           WHERE location_id=? AND date<? AND strftime('%w',date)=?
+           GROUP BY date ORDER BY date DESC LIMIT 8""",
+        (location_id, target.isoformat(), target.strftime("%w")),
+    ).fetchall()
+    normal_sales = statistics.median([row["sales"] for row in comparable]) if comparable else None
+    normal_units = statistics.median([row["units"] for row in comparable]) if comparable else None
     return {
         "date": target.isoformat(),
         "weekday": target.strftime("%A"),
         "sales": round(totals["revenue"], 2),
         "units": int(round(totals["units"])),
+        "closed": not bool(totals["units"]),
+        "normal_sales": round(normal_sales, 2) if normal_sales is not None else None,
+        "normal_units": int(round(normal_units)) if normal_units is not None else None,
         "orders": len(orders),
         "average_order": round(order_total / len(orders), 2) if orders else 0.0,
         "busiest_hour": max(hourly, key=lambda row: row["actual"], default=None),
         "channels": [
-            {"channel": name, "orders": int(value["orders"]), "sales": round(value["sales"], 2)}
+            {"channel": name, "orders": int(value["orders"]), "sales": round(value["sales"], 2),
+             "ticket_share_percent": round(value["orders"] / max(1, len(orders)) * 100, 1),
+             "sales_share_percent": round(value["sales"] / max(1, order_total) * 100, 1)}
             for name, value in sorted(channels.items(), key=lambda row: -row[1]["sales"])
         ],
         "top_items": sorted(top_items.values(), key=lambda row: -row["units"])[:8],
@@ -742,7 +774,7 @@ def day_detail(conn: sqlite3.Connection, location_id: str, target: date) -> dict
         "predicted_units": int(round(float(score["predicted_units"]))) if score else None,
         "predicted_sales": round(float(score["predicted_sales"]), 2) if score else None,
         "costs": day_costs(conn, location_id, target, orders, totals["revenue"]),
-        "item_scores": items_detail[:12],
+        "item_scores": items_detail,
         "hourly": hourly,
         "conditions": conditions,
         "source": orders[0]["source"] if orders else order_source(conn, location_id),
@@ -752,21 +784,27 @@ def day_detail(conn: sqlite3.Connection, location_id: str, target: date) -> dict
 def review_payload(detail: dict[str, Any]) -> dict[str, Any]:
     """The record handed to the writing layer for a closed day."""
     conditions = detail.get("conditions") or {}
-    misses = [row for row in detail.get("item_scores", []) if abs(int(row.get("gap") or 0)) >= 3][:4]
+    misses = [row for row in detail.get("item_scores", []) if abs(int(row.get("gap") or 0)) >= 5 or row.get("sold_out")][:5]
+    named = {row.get("item_id") for row in misses[:3]}
+    remaining = [abs(int(row.get("gap") or 0)) for row in detail.get("item_scores", []) if row.get("item_id") not in named]
     note = None
     if conditions.get("occasion"):
         note = f"{conditions['occasion']} fell on this date."
     elif float(conditions.get("rain_mm") or 0) >= 4:
-        note = f"{conditions['rain_mm']} mm of rain fell, which usually shifts the mix toward delivery."
+        note = f"{conditions['rain_mm']} mm of rain fell."
     elif conditions.get("events"):
         note = f"{conditions['events']} nearby events overlapped service hours."
     return {
         "date": detail.get("date"),
         "weekday": detail.get("weekday"),
+        "normal_units": detail.get("normal_units"),
+        "normal_sales": detail.get("normal_sales"),
         "actual": {"items": detail.get("units"), "sales": detail.get("sales"), "orders": detail.get("orders")},
         "predicted": {"items": detail.get("predicted_units"), "sales": detail.get("predicted_sales")},
         "accuracy_percent": detail.get("accuracy"),
         "item_misses": misses,
+        "all_items": detail.get("item_scores", []),
+        "others_within": max(remaining, default=0),
         "condition_note": note,
         "conditions": conditions,
     }

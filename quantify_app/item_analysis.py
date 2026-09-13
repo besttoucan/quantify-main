@@ -17,8 +17,8 @@ Method, in order:
 2. Test each candidate driver against the residual with a proper t-test, then
    correct the whole family of tests for false discovery. A dozen tests at the
    5% level will hand you a false positive; this refuses to report it.
-3. Build the predictive distribution from genuinely comparable past days rather
-   than assuming a bell curve, and read the prep quantity off it at the fractile
+3. Build the predictive distribution from genuinely comparable past days, not
+   from an assumed bell curve, and read the prep quantity off it at the fractile
    the economics actually call for.
 """
 
@@ -211,8 +211,10 @@ def driver_effects(history: list[Any], target_context: dict[str, Any]) -> list[d
         else:
             row["note"] = ""
 
+        binary = key in {"snow", "holiday", "occasion", "holiday_eve", "long_weekend", "payday", "month_end"}
         row["evidence"] = (
-            f"{row['days_observed']} days carried this condition out of {row['sample']} in the record"
+            f"{row['days_observed']} of {row['sample']} days carried this condition"
+            if binary else f"measured on {row['sample']} days"
         )
         row["effect_percent"] = round(row["per_unit"] / average * 100, 1)
         row["today_effect_units"] = round(row["today_effect_units"], 1)
@@ -323,7 +325,7 @@ def comparable_days(
     Past same-weekday trading tells you the *shape* of the spread: how wide it
     is, how lopsided, where the long tail sits. It does not know that today is
     sunny and last Tuesday was not, and if the item has been growing all year
-    then the raw pool is stretched by that growth rather than by real day-to-day
+    then the raw pool is stretched by that growth and not by real day-to-day
     risk. So each past day is turned into a ratio against its own local level,
     which cancels the drift, and those ratios are then applied to what the model
     expects today. Reading a prep quantity straight off the unshifted pool would
@@ -401,7 +403,7 @@ def prep_advice(
     `food_cost_share` must come from `costs.item_cost_basis`, which resolves the
     owner's own figure for the item's category before falling back to anything
     built in. This number decides how many the kitchen makes every morning, so
-    it has to be the one the owner entered on the costs screen rather than a
+    it has to be the one the owner entered on the costs screen, not a
     constant that quietly disagrees with it.
     """
     values = distribution.get("today_values") or distribution.get("values") or []
@@ -432,7 +434,8 @@ def prep_advice(
         "quantity": quantity,
         "sell_out_percent": at_quantity["sell_out_percent"] if at_quantity else None,
         "typical_leftover": at_quantity["typical_leftover"] if at_quantity else None,
-        "fractile_percent": round(result["fractile"] * 100),
+        # One number derived from the other, so the two never add to 101.
+        "fractile_percent": (100 - at_quantity["sell_out_percent"]) if at_quantity else round(result["fractile"] * 100),
         "median": int(round(result["median"])),
         "cost_share_percent": round(share * 100),
         "reason": (
@@ -473,7 +476,7 @@ def item_accuracy(conn: sqlite3.Connection, location_id: str, item_id: str) -> d
         "accuracy": round(max(0.0, 100 - error / total * 100), 1),
         "average_miss": round(error / len(sold), 1),
         "bias": round(bias, 1),
-        "bias_direction": "we call it low" if bias > 0.5 else "we call it high" if bias < -0.5 else "no consistent lean",
+        "bias_direction": "usually low" if bias > 0.5 else "usually high" if bias < -0.5 else "no steady lean",
         "sold_out_days": sold_out_days,
     }
 
@@ -487,7 +490,7 @@ def related_items(
     """Items whose day-to-day movement lines up with this one, once weekday is removed.
 
     A negative pairing means people are choosing between them, so one going up is
-    the other going down rather than extra trade. That is the kind of thing
+    the other going down, not extra trade. That is the kind of thing
     nobody spots by eye and it changes how you prep both.
     """
     residualised = _residualise(history)
@@ -542,7 +545,7 @@ def related_items(
     return candidates[:6]
 
 
-def unusual_days(history: list[Any], limit: int = 6) -> list[dict[str, Any]]:
+def unusual_days(history: list[Any], limit: int = 3) -> list[dict[str, Any]]:
     """Days this item did something its own record cannot account for.
 
     A busy Saturday swings by more units than a quiet Monday simply because it is
@@ -570,22 +573,24 @@ def unusual_days(history: list[Any], limit: int = 6) -> list[dict[str, Any]]:
         if abs(score) < 2.5:
             continue
         occasion = calendar_occasions(day.year).get(day)
-        note = occasion[0] if occasion else None
+        note = f"{occasion[0]}." if occasion else None
         if not note and row.context.get("precipitation_mm", 0) >= 8:
-            note = f"{row.context['precipitation_mm']:.0f} mm of rain"
+            note = f"{row.context['precipitation_mm'] / 25.4:.1f} in of rain."
         if not note and row.context.get("event_total", 0) >= 0.6:
-            note = "something big on nearby"
+            note = "Something big on nearby."
         if not note and row.stockout_minutes:
-            note = "ran out during service"
+            note = "Ran out during service."
         flagged.append({
             "date": day.isoformat(),
             "weekday": WEEKDAYS[day.weekday()],
             "sold": int(round(row.quantity)),
-            "above_normal": round(value, 1),
+            "above_normal": int(round(value)),
             "sigma": round(score, 1),
-            "note": note or "nothing in the data explains it",
+            "explained": bool(note),
+            "note": note or "Nothing in the record explains it.",
         })
-    flagged.sort(key=lambda row: -abs(row["sigma"]))
+    # Days with a cause first, then the biggest swings.
+    flagged.sort(key=lambda row: (not row["explained"], -abs(row["sigma"])))
     return flagged[:limit]
 
 
@@ -636,6 +641,11 @@ def item_profile(conn: sqlite3.Connection, location_id: str, item_id: str, targe
     composition = conn.execute(
         "SELECT summary, confidence, components_json FROM item_composition WHERE menu_item_id=?", (item_id,)
     ).fetchone()
+    last_sale = conn.execute(
+        "SELECT MAX(date) AS last FROM sales WHERE location_id=? AND item_id=?", (location_id, item_id)
+    ).fetchone()
+    last_sale_date = last_sale["last"] if last_sale else None
+    new_item = bool(forecast.get("new_item"))
 
     return {
         "item": {
@@ -649,6 +659,11 @@ def item_profile(conn: sqlite3.Connection, location_id: str, item_id: str, targe
         },
         "date": target.isoformat(),
         "weekday": WEEKDAYS[target.weekday()],
+        "new_item": new_item,
+        "selling_days": int(forecast.get("selling_days") or len(history)),
+        "last_sale_date": last_sale_date,
+        # What a normal such weekday sells, the number every other figure is read against.
+        "normal": {"weekday": WEEKDAYS[target.weekday()], "units": forecast["baseline"], "make": forecast.get("normal_make", forecast["baseline"])},
         "today": {
             "date": target.isoformat(),
             "weekday": WEEKDAYS[target.weekday()],
@@ -657,6 +672,10 @@ def item_profile(conn: sqlite3.Connection, location_id: str, item_id: str, targe
             "difference": forecast["vs_baseline_units"],
             "low": forecast["lower"],
             "high": forecast["upper"],
+            "make": forecast["make"],
+            "suggested_make": forecast.get("suggested_make", forecast["make"]),
+            "normal_make": forecast.get("normal_make", forecast["baseline"]),
+            "sell_out_percent": forecast.get("sell_out_percent"),
             "confidence": forecast["confidence"],
             "revenue": round(forecast["expected"] * price, 2),
             "override": forecast["override"],
@@ -686,9 +705,4 @@ def item_profile(conn: sqlite3.Connection, location_id: str, item_id: str, targe
             "confidence": composition["confidence"],
             "components": __import__("json").loads(composition["components_json"] or "[]"),
         } if composition else None,
-        "method": (
-            "Weekday and long-run drift are removed first, then every condition is tested "
-            "against what is left. The whole family of tests is corrected for false discovery, "
-            "so a driver only appears here if it would be unlikely to show up by chance."
-        ),
     }

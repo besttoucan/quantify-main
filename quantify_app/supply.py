@@ -16,28 +16,46 @@ from __future__ import annotations
 import html
 import json
 import math
+import re
 import sqlite3
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from . import localtime
-from .ordering import MASS_IN_GRAMS, VOLUME_IN_ML, _normalise_unit, order_plan, readable
+from .ordering import MASS_IN_GRAMS, VOLUME_IN_ML, _normalise_unit, merge_key, order_plan, readable
 
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 WEEKDAY_LABELS = {"mon": "Mon", "tue": "Tue", "wed": "Wed", "thu": "Thu", "fri": "Fri", "sat": "Sat", "sun": "Sun"}
 PACK_LABELS = ["case", "box", "bag", "tray", "flat", "tub", "bucket", "sleeve", "carton", "sack", "pack", "each"]
-CHANNELS = {"email", "mail-app", "site", "copy"}
+# How an order can go out. Copying the text is not a channel: it records
+# nothing, because nothing has been sent.
+CHANNELS = {"email", "mail-app", "site"}
+# Orders that are on their way. An email that never left (outbox, failed) is
+# not, and a mail-app draft is only recorded once the operator says it went.
+OPEN_STATUSES = ("sent", "opened")
 
 # The volume table in ordering.py stops at litres. Kitchens buy in gallons.
 _VOLUME = dict(VOLUME_IN_ML) | {"gal": 3785.41, "gallon": 3785.41, "gallons": 3785.41, "qt": 946.353, "quart": 946.353, "quarts": 946.353}
 _MASS = dict(MASS_IN_GRAMS) | {"lbs": 453.592, "pound": 453.592, "pounds": 453.592, "ounce": 28.3495, "ounces": 28.3495, "kilo": 1000.0, "kilos": 1000.0}
 
 ATTENTION_DAYS = 7
+# Ten years. Past that a run-out date is not a date, and the calendar arithmetic
+# would overflow long before it mattered.
+MAX_COVER_DAYS = 3650.0
+MAX_COUNT = 10_000_000.0
 _CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _CACHE_SECONDS = 300.0
+_CACHE_LIMIT = 64
+
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_HOST = re.compile(r"^[a-z0-9.-]+\.[a-z]{2,}$")
+_PLURALS = {
+    "patty": "patties", "box": "boxes", "batch": "batches", "bunch": "bunches", "dish": "dishes",
+    "each": "each", "dozen": "dozen", "pack": "packs",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -57,9 +75,63 @@ def _number(value: Any, low: float, high: float, fallback: float) -> float:
         number = float(value)
     except (TypeError, ValueError):
         return fallback
-    if number != number:  # NaN
+    if number != number or number in (math.inf, -math.inf):
         return fallback
     return max(low, min(high, number))
+
+
+def _count_value(raw: Any) -> float:
+    """A shelf count as typed, or the sentence that says what to type instead."""
+    if isinstance(raw, bool):
+        raise ValueError("Enter a number, like 12 or 2.5")
+    try:
+        number = float(str(raw).strip().replace(",", ""))
+    except (TypeError, ValueError):
+        raise ValueError("Enter a number, like 12 or 2.5") from None
+    if number != number or number in (math.inf, -math.inf):
+        raise ValueError("Enter a number, like 12 or 2.5")
+    if number < 0:
+        raise ValueError("A count cannot be below zero")
+    return min(number, MAX_COUNT)
+
+
+def _plural(quantity: Any, unit: str) -> str:
+    """"6 cases", "1 case", "80 patties"; weights and volumes are left alone."""
+    unit = _clean(unit, 30)
+    if not unit:
+        return unit
+    lowered = unit.lower()
+    if lowered in _MASS or lowered in _VOLUME or lowered in {"g", "kg", "lb", "oz", "ml", "l", "gal", "qt"}:
+        return unit
+    try:
+        one = abs(float(quantity) - 1.0) < 1e-9
+    except (TypeError, ValueError):
+        one = False
+    if one:
+        return unit
+    if lowered in _PLURALS:
+        return _PLURALS[lowered]
+    if lowered.endswith("s"):
+        return unit
+    return unit + "s"
+
+
+def _moment(text: str) -> datetime | None:
+    """A stored timestamp as an aware datetime; naive ones are read as UTC."""
+    try:
+        moment = datetime.fromisoformat(str(text))
+    except (TypeError, ValueError):
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
+def _age_days(counted_at: str, now: datetime) -> float:
+    """How long ago a count was taken, in days, never negative."""
+    taken = _moment(counted_at)
+    if taken is None:
+        return 0.0
+    reference = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    return max(0.0, (reference - taken).total_seconds() / 86400.0)
 
 
 def _location(conn: sqlite3.Connection, location_id: str) -> sqlite3.Row:
@@ -198,21 +270,36 @@ def get_supplier(conn: sqlite3.Connection, location_id: str, supplier_id: str) -
 
 
 def _website(value: Any) -> str:
+    """A link that opens: http or https, a host with a dot, no spaces."""
     text = _clean(value, 300)
     if not text:
         return ""
-    if not text.lower().startswith(("http://", "https://")):
+    if " " in text:
+        raise ValueError("The ordering site should look like shop.supplier.com")
+    if "://" not in text:
         text = "https://" + text
-    if not text.lower().startswith(("http://", "https://")):
-        return ""
+    parts = urlsplit(text)
+    host = (parts.hostname or "").lower()
+    if parts.scheme.lower() not in {"http", "https"} or not _HOST.match(host):
+        raise ValueError("The ordering site should look like shop.supplier.com")
     return text
+
+
+def _email(value: Any) -> str:
+    email = _clean(value, 120).lower()
+    if email and not _EMAIL.match(email):
+        raise ValueError("The order email should look like orders@supplier.com")
+    return email
 
 
 def save_supplier(conn: sqlite3.Connection, location_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     name = _clean(payload.get("name"), 80)
     if len(name) < 2:
         raise ValueError("Give the supplier a name")
-    days = [d for d in (payload.get("delivery_days") or []) if d in WEEKDAY_LABELS]
+    raw_days = payload.get("delivery_days")
+    if not isinstance(raw_days, list):
+        raw_days = []
+    days = [d for d in raw_days if isinstance(d, str) and d in WEEKDAY_LABELS]
     days = [d for d in WEEKDAYS if d in days]
     cutoff = _clean(payload.get("cutoff_time"), 5)
     if cutoff and _parse_time(cutoff) is None:
@@ -220,7 +307,7 @@ def save_supplier(conn: sqlite3.Connection, location_id: str, payload: dict[str,
     now = _utc_now()
     supplier_id = _clean(payload.get("id"), 40)
     values = (
-        name, _clean(payload.get("rep_name"), 80), _clean(payload.get("order_email"), 120).lower(),
+        name, _clean(payload.get("rep_name"), 80), _email(payload.get("order_email")),
         _clean(payload.get("phone"), 40), _website(payload.get("website")),
         _clean(payload.get("account_number"), 60), ",".join(days), cutoff,
         int(_number(payload.get("lead_days"), 0, 14, 1)), _clean(payload.get("notes"), 400), now,
@@ -228,6 +315,8 @@ def save_supplier(conn: sqlite3.Connection, location_id: str, payload: dict[str,
     existing = conn.execute(
         "SELECT id FROM suppliers WHERE location_id=? AND id=?", (location_id, supplier_id)
     ).fetchone() if supplier_id else None
+    if supplier_id and existing is None:
+        raise ValueError("That supplier was removed. Refresh and add it again if you still need it.")
     if existing:
         conn.execute(
             """UPDATE suppliers SET name=?, rep_name=?, order_email=?, phone=?, website=?, account_number=?,
@@ -252,7 +341,9 @@ def save_supplier(conn: sqlite3.Connection, location_id: str, payload: dict[str,
 
 
 def delete_supplier(conn: sqlite3.Connection, location_id: str, supplier_id: str) -> None:
-    conn.execute("DELETE FROM suppliers WHERE location_id=? AND id=?", (location_id, supplier_id))
+    cursor = conn.execute("DELETE FROM suppliers WHERE location_id=? AND id=?", (location_id, supplier_id))
+    if cursor.rowcount == 0:
+        raise ValueError("That supplier is already gone.")
     conn.commit()
     _CACHE.clear()
 
@@ -409,7 +500,7 @@ def save_count(conn: sqlite3.Connection, location_id: str, payload: dict[str, An
         conn.commit()
         _CACHE.clear()
         return {"ingredient": ingredient, "cleared": True}
-    value = _number(raw, 0, 10_000_000, 0)
+    value = _count_value(raw)
     unit = _clean(payload.get("unit"), 30)
     kind = _clean(payload.get("kind"), 10) or _kind_of_unit(unit)
     if kind not in {"mass", "volume", "count", "share"}:
@@ -418,6 +509,10 @@ def save_count(conn: sqlite3.Connection, location_id: str, payload: dict[str, An
         setting = item_settings(conn, location_id).get(ingredient)
         if not setting or setting["pack_size"] <= 0:
             raise ValueError("Say how this is bought first, then count it in packs")
+        # A pack of "20 lb" is weight whatever the screen was counting in.
+        pack_kind = _kind_of_unit(setting["pack_unit"] or "")
+        if pack_kind != "count":
+            kind = pack_kind
         base = value * to_base(setting["pack_size"], setting["pack_unit"], kind)
     else:
         base = to_base(value, unit, kind)
@@ -434,88 +529,229 @@ def save_count(conn: sqlite3.Connection, location_id: str, payload: dict[str, An
     return {"ingredient": ingredient, "on_hand_base": base, "kind": kind}
 
 
+def lines_for(conn: sqlite3.Connection, location_id: str, ingredients: list[str], days: int = 3,
+              now: datetime | None = None) -> list[dict[str, Any] | None]:
+    """The order lines for these ingredients, exactly as /api/ordering would send them.
+
+    Computed once for the whole window so a count can patch its own row on the
+    screen. None where no recipe uses the ingredient.
+    """
+    now = now or local_now(conn, location_id)
+    plan = order_plan(conn, location_id, now.date(), max(1, min(14, int(days or 3))))
+    if not plan.get("ready"):
+        return [None for _ in ingredients]
+    attach(conn, location_id, plan, now)
+    by_key: dict[str, dict[str, Any]] = {}
+    for line in plan.get("lines") or []:
+        for alias in _line_keys(line):
+            by_key.setdefault(alias, line)
+    return [by_key.get(_clean(name, 120).lower()) for name in ingredients]
+
+
 # ---------------------------------------------------------------------------
 # Putting it on the order list
 # ---------------------------------------------------------------------------
+
+def _line_keys(line: dict[str, Any]) -> list[str]:
+    """Every name a count or a supplier setting may have been saved under."""
+    keys = [str(line.get("name", "")).lower()]
+    for alias in line.get("aliases") or []:
+        if alias not in keys:
+            keys.append(str(alias).lower())
+    return keys
+
+
+def _first(mapping: dict[str, Any], keys: list[str]) -> Any:
+    for key in keys:
+        if key in mapping:
+            return mapping[key]
+    return None
+
+
+def open_orders(conn: sqlite3.Connection, location_id: str, today: date) -> list[dict[str, Any]]:
+    """Orders that have gone out and not landed yet.
+
+    An order with no delivery date on it counts for two days after it was sent,
+    which is how long a cash and carry run or an emailed order usually takes to
+    turn into stock on the shelf.
+    """
+    placeholders = ",".join("?" for _ in OPEN_STATUSES)
+    rows = conn.execute(
+        f"""SELECT * FROM purchase_orders
+            WHERE location_id=? AND status IN ({placeholders})
+              AND (expected_on >= ? OR (expected_on = '' AND substr(sent_at, 1, 10) >= ?))
+            ORDER BY sent_at""",
+        (location_id, *OPEN_STATUSES, today.isoformat(), (today - timedelta(days=2)).isoformat()),
+    ).fetchall()
+    return [_order_dict(row) for row in rows]
+
+
+def _incoming(orders: list[dict[str, Any]], keys: list[str], kind: str, unit: str,
+              pack_base: float, pack_label: str, count: dict[str, Any] | None) -> tuple[float, str]:
+    """What is already on its way for one line: base units, and the day it lands.
+
+    An order is skipped when the shelf was counted after it went out and it
+    landed on or before the count, because the count already includes it.
+    """
+    total = 0.0
+    arrives = ""
+    counted_at = _moment(str((count or {}).get("counted_at") or ""))
+    counted_day = counted_at.date().isoformat() if counted_at else ""
+    for order in orders:
+        sent_at = _moment(str(order.get("sent_at") or ""))
+        expected = str(order.get("expected_on") or "")
+        if counted_at and sent_at and sent_at < counted_at and (not expected or expected <= counted_day):
+            continue
+        for row in order.get("lines") or []:
+            if str(row.get("name", "")).lower() not in keys:
+                continue
+            try:
+                quantity = float(row.get("quantity") or 0)
+            except (TypeError, ValueError):
+                continue
+            if quantity <= 0:
+                continue
+            row_unit = _normalise_unit(str(row.get("unit") or ""))
+            pack_size = _number(row.get("pack_size"), 0, 1_000_000, 0)
+            pack_unit = str(row.get("pack_unit") or "")
+            if pack_size > 0 and pack_unit and row_unit != _normalise_unit(unit):
+                base = quantity * to_base(pack_size, pack_unit, kind)
+            elif pack_base and row_unit == _normalise_unit(pack_label):
+                base = quantity * pack_base
+            elif kind == "count" or _kind_of_unit(row_unit) == kind:
+                base = to_base(quantity, row_unit, kind)
+            else:
+                continue
+            total += base
+            if expected and (not arrives or expected < arrives):
+                arrives = expected
+    return total, arrives
+
 
 def attach(conn: sqlite3.Connection, location_id: str, plan: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
     """Add supplier, pack, on-hand and run-out facts to every line of an order plan.
 
     The plan's own numbers are not touched. What is added sits beside them:
-    what is on the shelf, how long that lasts, what is short, and how many packs
-    that is once somebody has said how the thing is bought.
+    what is on the shelf, how long that lasts, what is already on its way, what
+    is short, and how many packs that is once somebody has said how the thing
+    is bought.
+
+    The daily rate is tomorrow's forecast usage, whatever window the plan
+    covers, so the Order page and the Running low card never disagree about
+    when a thing runs out. A count is aged: what was counted on Tuesday has had
+    two days of use taken off it by Thursday.
     """
     now = now or local_now(conn, location_id)
     today = now.date()
     suppliers = {row["id"]: row for row in list_suppliers(conn, location_id, now)}
     settings = item_settings(conn, location_id)
     counts = stock_counts(conn, location_id)
+    orders = open_orders(conn, location_id, today)
     days = max(1, int(plan.get("days") or 1))
     counted = 0
     latest_count = ""
 
     for line in plan.get("lines") or []:
-        key = str(line["name"]).lower()
+        keys = _line_keys(line)
         kind = line.get("kind", "count")
+        unit = line["unit"]
         base_typical = (float(line.get("base_low") or 0) + float(line.get("base_high") or 0)) / 2.0
-        per_day_base = base_typical / days
-        setting = settings.get(key) or {}
+        daily = [float(value) for value in (line.get("daily_base") or [])]
+        if len(daily) >= 2:
+            per_day_base = daily[1]
+        elif daily:
+            per_day_base = daily[0]
+        else:
+            per_day_base = base_typical / days
+        setting = _first(settings, keys) or {}
         supplier = suppliers.get(setting.get("supplier_id") or "")
-        count = counts.get(key)
+        count = _first(counts, keys)
 
         pack_base = 0.0
         pack_note = ""
         if setting.get("pack_size", 0) > 0:
-            pack_kind = _kind_of_unit(setting["pack_unit"]) if kind in {"mass", "volume"} else "count"
-            if kind in {"mass", "volume"} and pack_kind != kind:
-                pack_note = f"The pack is in {setting['pack_unit']} but the recipe counts this in {line['unit']}"
+            pack_kind = _kind_of_unit(setting["pack_unit"])
+            if pack_kind != kind:
+                pack_note = f"The pack is in {setting['pack_unit']} but the recipe counts this in {unit}"
             else:
                 pack_base = to_base(setting["pack_size"], setting["pack_unit"], kind)
 
         line["supplier_id"] = supplier["id"] if supplier else ""
         line["supplier_name"] = supplier["name"] if supplier else ""
+        line["no_supplier"] = supplier is None
         line["pack_size"] = _tidy(setting["pack_size"]) if setting.get("pack_size") else 0
-        line["pack_unit"] = setting.get("pack_unit", "") or line["unit"]
+        line["pack_unit"] = setting.get("pack_unit", "") or unit
         line["pack_label"] = setting.get("pack_label", "case") if setting else "case"
         line["product_code"] = setting.get("product_code", "")
         line["pack_note"] = pack_note
-        line["per_day"] = _tidy(from_base(per_day_base, line["unit"], kind)) if kind != "share" else 0
+        line["per_day"] = _tidy(from_base(per_day_base, unit, kind)) if kind != "share" else 0
+        line["whole"] = kind == "count" or pack_base > 0
+
+        on_order_base, arrives = _incoming(orders, keys, kind, unit, pack_base, line["pack_label"], count) if kind != "share" else (0.0, "")
+        line["on_order"] = _tidy(from_base(on_order_base, unit, kind)) if on_order_base > 0 else 0
+        line["on_order_packs"] = int(math.ceil(on_order_base / pack_base - 1e-9)) if pack_base and on_order_base > 0 else 0
+        line["arrives"] = arrives
+        line["arrives_label"] = _day_label(date.fromisoformat(arrives), today) if arrives else ""
 
         if count:
             counted += 1
             latest_count = max(latest_count, count["counted_at"])
             on_hand_base = count["on_hand_base"]
-            line["on_hand"] = _tidy(from_base(on_hand_base, line["unit"], kind))
+            age = _age_days(count["counted_at"], now)
+            remaining_base = max(0.0, on_hand_base - per_day_base * age)
+            line["on_hand"] = _tidy(from_base(on_hand_base, unit, kind))
             line["on_hand_packs"] = _tidy(on_hand_base / pack_base) if pack_base else None
             line["counted_at"] = count["counted_at"]
-            shortfall_base = max(0.0, base_typical - on_hand_base)
+            line["counted_by"] = count.get("counted_by", "")
+            line["count_age_days"] = round(age, 1)
+            shortfall_base = max(0.0, base_typical - remaining_base - on_order_base)
             if per_day_base > 0:
-                cover = on_hand_base / per_day_base
+                cover = min(remaining_base / per_day_base, MAX_COVER_DAYS)
                 runs_out = today + timedelta(days=int(math.floor(cover)))
+                # Stock on its way that lands before the shelf is empty pushes
+                # the run-out day back. Stock that lands after it does not.
+                if on_order_base > 0 and (not arrives or date.fromisoformat(arrives) <= runs_out):
+                    cover = min((remaining_base + on_order_base) / per_day_base, MAX_COVER_DAYS)
+                    runs_out = today + timedelta(days=int(math.floor(cover)))
                 line["days_of_cover"] = round(cover, 1)
                 line["runs_out_on"] = runs_out.isoformat()
-                line["runs_out_label"] = _day_label(runs_out, today)
-                line["order"] = order_by_for_runout(supplier, runs_out, now)
+                line["runs_out_label"] = "more than ten years" if cover >= MAX_COVER_DAYS else _day_label(runs_out, today)
+                if supplier is None:
+                    # Nobody to order from yet, so no delivery day is invented.
+                    line["order"] = {
+                        "order_by": "", "order_by_label": "", "arrives": "", "arrives_label": "",
+                        "late": False, "days_short": 0, "urgent": cover < 2, "no_supplier": True,
+                    }
+                else:
+                    # The truck has to land the day before the shelf is empty,
+                    # not on the day service uses the last of it.
+                    target = runs_out - timedelta(days=1) if cover >= 1 else runs_out
+                    line["order"] = {**order_by_for_runout(supplier, target, now), "no_supplier": False}
             else:
                 line["days_of_cover"] = None
                 line["runs_out_on"] = ""
                 line["runs_out_label"] = ""
                 line["order"] = None
         else:
-            on_hand_base = None
             line["on_hand"] = None
             line["on_hand_packs"] = None
             line["counted_at"] = ""
+            line["counted_by"] = ""
+            line["count_age_days"] = None
             line["days_of_cover"] = None
             line["runs_out_on"] = ""
             line["runs_out_label"] = ""
             line["order"] = None
-            shortfall_base = base_typical
+            shortfall_base = max(0.0, base_typical - on_order_base)
 
-        shortfall_value, _unit = readable(shortfall_base, kind, line["unit"]) if kind in {"mass", "volume"} else (_tidy(shortfall_base), line["unit"])
-        # readable() may pick a different unit for a smaller number; keep the
-        # line's unit so the column reads consistently top to bottom.
-        line["short"] = _tidy(from_base(shortfall_base, line["unit"], kind)) if kind != "share" else 0
+        # The line's own unit is kept for the column so it reads consistently
+        # top to bottom, and countable things come out whole.
+        if kind == "share":
+            line["short"] = 0
+        elif kind == "count":
+            line["short"] = int(math.ceil(shortfall_base - 1e-9)) if shortfall_base > 0 else 0
+        else:
+            line["short"] = _tidy(from_base(shortfall_base, unit, kind))
         if pack_base:
             line["packs_short"] = int(math.ceil(shortfall_base / pack_base - 1e-9)) if shortfall_base > 0 else 0
             line["packs_for_window"] = int(math.ceil(base_typical / pack_base - 1e-9))
@@ -523,7 +759,8 @@ def attach(conn: sqlite3.Connection, location_id: str, plan: dict[str, Any], now
         else:
             line["packs_short"] = None
             line["packs_for_window"] = None
-            line["suggested"] = {"quantity": line["short"], "unit": line["unit"]}
+            line["suggested"] = {"quantity": line["short"], "unit": unit}
+        line["needs_action"] = bool(line.get("orderable", kind != "share")) and (count is None or line["short"] > 0)
 
     plan["suppliers"] = list(suppliers.values())
     plan["counts_taken"] = counted
@@ -540,11 +777,31 @@ def _mail_provider() -> str:
         return "outbox"
 
 
+ATTENTION_KEYS = (
+    "name", "unit", "on_hand", "per_day", "days_of_cover", "runs_out_on", "runs_out_label",
+    "order_by_date", "order_by_label", "late", "arrives", "arrives_label", "supplier", "supplier_id",
+    "no_supplier", "counted_at", "count_age_days", "on_order", "short", "suggested",
+)
+
+
+def _remember(key: tuple[Any, ...], result: dict[str, Any], location_id: str) -> None:
+    """Keep one fresh answer per location, and never more than a few dozen in all."""
+    now_ts = datetime.now(timezone.utc).timestamp()
+    stale = [k for k, (stamp, _) in list(_CACHE.items()) if k[0] == location_id or now_ts - stamp > _CACHE_SECONDS]
+    for old in stale:
+        _CACHE.pop(old, None)
+    while len(_CACHE) >= _CACHE_LIMIT:
+        _CACHE.pop(next(iter(_CACHE)), None)
+    _CACHE[key] = (now_ts, result)
+
+
 def attention(conn: sqlite3.Connection, location_id: str, now: datetime | None = None) -> dict[str, Any]:
     """Everything that runs out inside the week, soonest first.
 
     Empty until somebody has counted something, because a run-out date with no
-    count behind it would be a guess dressed as a warning.
+    count behind it would be a guess dressed as a warning. Each line carries
+    exactly the keys in ATTENTION_KEYS, computed by the same arithmetic as the
+    Order page, so the two never disagree.
     """
     now = now or local_now(conn, location_id)
     today = now.date()
@@ -557,8 +814,17 @@ def attention(conn: sqlite3.Connection, location_id: str, now: datetime | None =
     items_stamp = conn.execute(
         "SELECT MAX(updated_at) AS s FROM supplier_items WHERE location_id=?", (location_id,)
     ).fetchone()["s"] or ""
+    orders_stamp = conn.execute(
+        "SELECT MAX(sent_at) AS s FROM purchase_orders WHERE location_id=?", (location_id,)
+    ).fetchone()["s"] or ""
     latest = max(row["counted_at"] for row in counts.values())
-    key = (location_id, today.isoformat(), now.hour, latest, stamp, items_stamp)
+    from .intelligence import _data_version, _db_identity
+    recipe_version = [tuple(row) for row in conn.execute(
+        "SELECT c.menu_item_id,c.components_json FROM item_composition c JOIN menu_items m ON m.id=c.menu_item_id WHERE m.location_id=? ORDER BY c.menu_item_id",
+        (location_id,),
+    )]
+    key = (location_id, _db_identity(conn), today.isoformat(), now.hour, latest, stamp, items_stamp,
+           orders_stamp, _data_version(conn, location_id), json.dumps(recipe_version))
     cached = _CACHE.get(key)
     if cached and (datetime.now(timezone.utc).timestamp() - cached[0]) < _CACHE_SECONDS:
         return cached[1]
@@ -581,18 +847,23 @@ def attention(conn: sqlite3.Connection, location_id: str, now: datetime | None =
             "days_of_cover": line["days_of_cover"],
             "runs_out_on": line["runs_out_on"],
             "runs_out_label": line["runs_out_label"],
-            "order_by": order.get("order_by", ""),
+            "order_by_date": str(order.get("order_by") or "")[:10],
             "order_by_label": order.get("order_by_label", ""),
-            "arrives": order.get("arrives", ""),
             "late": bool(order.get("late")),
+            "arrives": order.get("arrives", "") or "",
+            "arrives_label": order.get("arrives_label", "") or "",
             "supplier": line.get("supplier_name", ""),
             "supplier_id": line.get("supplier_id", ""),
+            "no_supplier": bool(line.get("no_supplier")),
+            "counted_at": line.get("counted_at", ""),
+            "count_age_days": line.get("count_age_days") or 0,
+            "on_order": line.get("on_order") or 0,
             "short": line["short"],
             "suggested": line["suggested"],
         })
     lines.sort(key=lambda row: (row["runs_out_on"], row["days_of_cover"]))
     result = {"lines": lines, "counted": plan.get("counts_taken", 0), "as_of": latest}
-    _CACHE[key] = (datetime.now(timezone.utc).timestamp(), result)
+    _remember(key, result, location_id)
     return result
 
 
@@ -606,9 +877,10 @@ def _line_text(line: dict[str, Any]) -> str:
     name = _clean(line.get("name"), 120)
     pack = ""
     if line.get("pack_size") and line.get("pack_unit") and unit not in ("", line.get("pack_unit")):
-        pack = f" ({_tidy(float(line['pack_size']))} {line['pack_unit']} each)"
+        size = _tidy(float(line["pack_size"]))
+        pack = f" ({size} {_plural(size, str(line['pack_unit']))} each)"
     code = f", code {_clean(line.get('product_code'), 60)}" if line.get("product_code") else ""
-    return f"{name}: {quantity} {unit}{pack}{code}".strip()
+    return f"{name}: {quantity} {_plural(quantity, unit)}{pack}{code}".strip()
 
 
 def order_text(location: sqlite3.Row | dict[str, Any], supplier: dict[str, Any] | None,
@@ -658,11 +930,24 @@ def order_text(location: sqlite3.Row | dict[str, Any], supplier: dict[str, Any] 
 
 def record_order(conn: sqlite3.Connection, root: Path, location_id: str, payload: dict[str, Any],
                  sent_by: str = "") -> dict[str, Any]:
-    """Send an order the way the operator chose, and keep a record either way."""
+    """Send an order the way the operator chose, and keep a record of what went.
+
+    Three channels. "email" sends it from here. "site" means the operator typed
+    it into the supplier's own site and is telling us so. "mail-app" writes the
+    message for the operator's own mail program and records nothing until the
+    client comes back with `confirmed: true`, because opening a draft is not
+    sending it. Copying the text is not a channel: nothing has been sent.
+    """
     channel = _clean(payload.get("channel"), 12)
+    if channel == "copy":
+        raise ValueError("Copying does not send an order. Use Email order, or tell Quantify you placed it.")
     if channel not in CHANNELS:
         raise ValueError("How is this order going out?")
-    raw_lines = payload.get("lines") or []
+    raw_lines = payload.get("lines")
+    if raw_lines is None:
+        raw_lines = []
+    if not isinstance(raw_lines, list):
+        raise ValueError("Send the order lines as a list")
     lines = []
     for row in raw_lines[:200]:
         if not isinstance(row, dict) or not _clean(row.get("name")):
@@ -684,11 +969,25 @@ def record_order(conn: sqlite3.Connection, root: Path, location_id: str, payload
     location = _location(conn, location_id)
     supplier_id = _clean(payload.get("supplier_id"), 40)
     supplier = get_supplier(conn, location_id, supplier_id) if supplier_id else None
+    if supplier_id and supplier is None:
+        raise ValueError("That supplier is not on this location. Refresh and try again.")
     now = local_now(conn, location_id)
     window = (_clean(payload.get("window_start"), 10), _clean(payload.get("window_end"), 10))
     requested = _clean(payload.get("requested_delivery"), 10)
+    if requested:
+        try:
+            date.fromisoformat(requested)
+        except ValueError:
+            raise ValueError("The delivery date should look like 2026-08-11") from None
     expected = requested or (schedule(supplier, now)["next_delivery"] if supplier else "")
     subject, text, html_body = order_text(location, supplier, lines, window, sent_by, expected, _clean(payload.get("note"), 400))
+    supplier_name = (supplier or {}).get("name") or "the supplier"
+    lands = ""
+    if expected:
+        try:
+            lands = f" Lands {_day_label(date.fromisoformat(expected), now.date())}."
+        except ValueError:
+            lands = ""
 
     status, artifact, error, mailto = "sent", "", "", ""
     if channel == "email":
@@ -696,20 +995,42 @@ def record_order(conn: sqlite3.Connection, root: Path, location_id: str, payload
         if not recipient:
             raise ValueError("This supplier has no order email yet. Add one in Settings, or open it in your mail app.")
         from .email_brief import send_transactional
+        provider = _mail_provider()
         result = send_transactional(root, recipient, subject, text, html_body)
         if result.get("provider") == "blocked":
             raise ValueError(result.get("error") or "That address cannot be sent to")
-        status = "sent" if result.get("delivered") else "outbox"
         artifact = str(result.get("path") or "")
         error = str(result.get("error") or "")
+        if result.get("delivered"):
+            status = "sent"
+            message = f"Sent to {supplier_name}.{lands}"
+        elif provider != "outbox" or error:
+            status = "failed"
+            message = "The email did not go through. The order is saved; try again or copy it."
+        else:
+            status = "outbox"
+            message = "Email is not connected on this account yet, so the order was saved, not sent."
     elif channel == "mail-app":
         recipient = (supplier or {}).get("order_email", "")
+        if not recipient:
+            raise ValueError("This supplier has no order email yet. Add one in Settings.")
         mailto = f"mailto:{quote(recipient)}?subject={quote(subject)}&body={quote(text)}"
-        status = "drafted"
-    elif channel == "site":
-        status = "opened"
+        if not bool(payload.get("confirmed")):
+            # A draft in someone's mail program is not an order yet. Nothing is
+            # written until the operator says it went.
+            return {
+                "order": {"id": "", "status": "drafted", "channel": channel, "expected_on": expected,
+                          "line_count": len(lines), "subject": subject, "recorded": False},
+                "recorded": False,
+                "text": text,
+                "mailto": mailto,
+                "message": "Your mail app should open with the order written out.",
+            }
+        status = "sent"
+        message = f"Noted.{lands}"
     else:
-        status = "copied"
+        status = "opened"
+        message = f"Noted.{lands}"
 
     order_id = uuid.uuid4().hex
     conn.execute(
@@ -722,21 +1043,10 @@ def record_order(conn: sqlite3.Connection, root: Path, location_id: str, payload
     )
     conn.commit()
     _CACHE.clear()
-    message = {
-        "sent": f"Sent to {(supplier or {}).get('name', 'the supplier')}.",
-        "outbox": "No mail service is set up, so the order was written to data/outbox instead of sent.",
-        "drafted": "Opening it in your mail app.",
-        "opened": f"Opening {(supplier or {}).get('name', 'the site')}.",
-        "copied": "Copied. Paste it wherever the order goes.",
-    }[status]
-    if expected and status in {"sent", "drafted"}:
-        try:
-            message += f" Arriving {_day_label(date.fromisoformat(expected), now.date())}."
-        except ValueError:
-            pass
     return {
         "order": {"id": order_id, "status": status, "channel": channel, "expected_on": expected,
-                  "line_count": len(lines), "subject": subject},
+                  "line_count": len(lines), "subject": subject, "recorded": True},
+        "recorded": True,
         "text": text,
         "mailto": mailto,
         "message": message,
@@ -744,10 +1054,13 @@ def record_order(conn: sqlite3.Connection, root: Path, location_id: str, payload
 
 
 def _order_dict(row: sqlite3.Row) -> dict[str, Any]:
+    # The supplier's name as it is now when the supplier still exists; the
+    # name as it was for one that has been removed since.
+    live_name = row["live_name"] if "live_name" in row.keys() else None
     return {
         "id": row["id"],
         "supplier_id": row["supplier_id"] or "",
-        "supplier_name": row["supplier_name"],
+        "supplier_name": live_name or row["supplier_name"],
         "channel": row["channel"],
         "status": row["status"],
         "window_start": row["window_start"],
@@ -762,23 +1075,27 @@ def _order_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 def recent_orders(conn: sqlite3.Connection, location_id: str, limit: int = 12) -> list[dict[str, Any]]:
     rows = conn.execute(
-        "SELECT * FROM purchase_orders WHERE location_id=? ORDER BY sent_at DESC LIMIT ?", (location_id, limit)
+        """SELECT p.*, s.name AS live_name FROM purchase_orders p
+           LEFT JOIN suppliers s ON s.id = p.supplier_id
+           WHERE p.location_id=? ORDER BY p.sent_at DESC, p.rowid DESC LIMIT ?""",
+        (location_id, limit),
     ).fetchall()
     return [_order_dict(row) for row in rows]
 
 
 def last_orders(conn: sqlite3.Connection, location_id: str) -> dict[str, dict[str, Any]]:
-    """The most recent order per supplier, for "sent Tue, arriving Thu"."""
+    """The most recent order per supplier, for "sent Tue, lands Thu"."""
     rows = conn.execute(
-        """SELECT * FROM purchase_orders WHERE location_id=? AND supplier_id IS NOT NULL
-           ORDER BY sent_at DESC""",
+        """SELECT * FROM (
+               SELECT p.*, s.name AS live_name,
+                      ROW_NUMBER() OVER (PARTITION BY p.supplier_id ORDER BY p.sent_at DESC, p.rowid DESC) AS rn
+               FROM purchase_orders p
+               LEFT JOIN suppliers s ON s.id = p.supplier_id
+               WHERE p.location_id=? AND p.supplier_id IS NOT NULL
+           ) WHERE rn = 1""",
         (location_id,),
     ).fetchall()
-    out: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        if row["supplier_id"] not in out:
-            out[row["supplier_id"]] = _order_dict(row)
-    return out
+    return {row["supplier_id"]: _order_dict(row) for row in rows}
 
 
 def supplier_view(conn: sqlite3.Connection, location_id: str) -> dict[str, Any]:

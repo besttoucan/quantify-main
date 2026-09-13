@@ -148,17 +148,13 @@ def _new_organization(conn: sqlite3.Connection, name: str = "Your company") -> s
 
 
 def _organization_for_new_account(conn: sqlite3.Connection) -> str:
-    """The first account joins whatever workspace already exists; later ones get their own.
+    """Every account gets a workspace of its own, the first one included.
 
-    On a fresh install the sample data has already been created, so the first
-    person to sign up lands in a product that works. Anyone signing up after
-    that gets a workspace of their own and their own sample location, because
-    two businesses must never see each other's sales.
+    The sample workspace (org-demo) is only ever entered through
+    QUANTIFY_AUTH_BYPASS. A person who signs up gets their own organisation
+    and, at the end of onboarding, a sample location built from their own
+    answers, so nobody is ever dropped into somebody else's restaurant.
     """
-    if user_count(conn) == 0:
-        row = conn.execute("SELECT id FROM organizations ORDER BY created_at LIMIT 1").fetchone()
-        if row is not None:
-            return str(row["id"])
     return _new_organization(conn)
 
 

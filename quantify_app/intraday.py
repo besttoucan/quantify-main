@@ -262,6 +262,10 @@ def lock_opening_call(
     stamp, local = _utc_now(), now.strftime("%H:%M")
     written = 0
     for item in items:
+        if item.get("new_item"):
+            # Under a week of sales: there is no call to lock, and scoring a
+            # zero against whatever it sells would put a miss on the record.
+            continue
         conn.execute(
             """INSERT OR IGNORE INTO forecast_calls(
                    location_id,date,item_id,expected,lower,upper,price,overridden,

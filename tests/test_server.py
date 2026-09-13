@@ -275,7 +275,7 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(data["register"]["connected"])
         self.assertEqual(data["register"]["mode"], "live")
         self.assertEqual(data["register"]["environment"], "sandbox")
-        self.assertNotIn("skills", data["writer"])
+        self.assertNotIn("writer", data)
         with connect(self.db_path) as conn:
             stored = {row["key"]: row["value"] for row in conn.execute(
                 "SELECT key,value FROM settings WHERE location_id='loc-one'").fetchall()}

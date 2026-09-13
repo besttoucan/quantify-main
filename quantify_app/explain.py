@@ -46,28 +46,38 @@ def band(score: float) -> str:
     return "low"
 
 
+def sure_words(score: float) -> str:
+    """How sure, said once in words."""
+    if score >= 80:
+        return "sure"
+    if score >= 65:
+        return "fairly sure"
+    return "not sure"
+
+
+def span_words(days: int) -> str:
+    """A number of days of sales as a phrase a person would say."""
+    days = int(days or 0)
+    if days < 45:
+        return plural(days, "day")
+    if days < 330:
+        return plural(round(days / 30.4), "month")
+    years = round(days / 365.25)
+    words = {1: "a year", 2: "two years", 3: "three years", 4: "four years", 5: "five years"}
+    return words.get(years, f"{years} years")
+
+
 def band_sentence(payload: dict[str, Any]) -> str:
+    """One sentence on what today's number rests on. No percentage, no score."""
     confidence = payload.get("confidence", {})
-    score = int(confidence.get("score") or 0)
     history = int(confidence.get("history_days") or 0)
-    tested = int(confidence.get("days_tested") or 0)
-    error = float(confidence.get("recent_error_percent") or 0)
     comparable = int(confidence.get("comparable_days") or 0)
+    weekday = str(payload.get("weekday") or "day")
+    if history == 0:
+        return "No sales here yet, so there is nothing to go on."
     if history < 60:
-        return (
-            f"Confidence is {band(score)} at {score}%. There are only {plural(history, 'day')} of sales history "
-            "here, so the range is wide. It narrows as more days close."
-        )
-    if tested < 5:
-        return (
-            f"Confidence is {band(score)} at {score}%, based on {plural(comparable, 'comparable day')} in "
-            f"{plural(history, 'day')} of sales."
-        )
-    return (
-        f"Confidence is {band(score)} at {score}%. Across the last {plural(tested, 'closed day')} the forecast "
-        f"has been off by {error:.1f}% on average here, and today is built from "
-        f"{plural(comparable, 'comparable day')} in {plural(history, 'day')} of sales."
-    )
+        return f"Only {plural(history, 'day')} of sales here, so the range is wide."
+    return f"Rests on {plural(comparable, 'comparable ' + weekday)} in {span_words(history)} of sales."
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +159,7 @@ def build_day_payload(brief: dict[str, Any]) -> dict[str, Any]:
         },
         "drivers": [
             {
+                "key": row.get("key", ""),
                 "label": row["label"],
                 "percent": row["effect"],
                 "units": row["units"],
@@ -184,47 +195,35 @@ def local_day_narrative(payload: dict[str, Any]) -> dict[str, Any]:
     difference = payload.get("difference", {})
     weekday = payload.get("weekday", "today")
     percent = int(difference.get("percent") or 0)
-    sales_gap = float(difference.get("sales") or 0)
-    item_gap = int(difference.get("items") or 0)
-    direction = "above" if percent > 0 else "below"
 
+    # The headline uses the same 4% threshold as the level tag, so the two
+    # never disagree on whether the day is normal.
     if abs(percent) < 4:
-        headline = f"An ordinary {weekday}, close to what this location normally does"
-        summary = (
-            f"Plan for {money(expected.get('sales'))} and {plural(expected.get('items'), 'item')}. "
-            f"A normal {weekday} here runs {money(normal.get('sales'))}, so today sits inside the usual range. "
-            f"{payload.get('busiest_hour', {}).get('label', 'The busiest hour')} is still the hour to staff for, "
-            f"carrying about {money(payload.get('busiest_hour', {}).get('sales'))}."
-        )
+        headline = f"A normal {weekday}"
     else:
-        top_item = (payload.get("items_moving") or [{}])[0]
-        lead = top_item.get("name") or "the core menu"
-        headline = f"{weekday} runs {abs(percent)}% {direction} normal, {money(abs(sales_gap))} {'more' if percent > 0 else 'less'}"
-        summary = (
-            f"Plan for {money(expected.get('sales'))} against a normal {weekday} of {money(normal.get('sales'))}. "
-            f"That is {money(abs(sales_gap))} {'more' if percent > 0 else 'less'} and about "
-            f"{plural(abs(item_gap), 'item')} {'more' if percent > 0 else 'fewer'} across the menu. "
-        )
-        if top_item:
-            summary += (
-                f"{lead} carries most of it: {plural(top_item.get('expected'), 'unit')} against a normal "
-                f"{plural(top_item.get('normal'), 'unit')}."
-            )
+        word = "busier" if percent > 0 else "quieter"
+        headline = f"{abs(percent)}% {word} than a normal {weekday}"
+    summary = (
+        f"Plan for {money(expected.get('sales'))} and {plural(expected.get('items'), 'item')}. "
+        f"A normal {weekday} here does {money(normal.get('sales'))}."
+    )
 
     factors: list[dict[str, Any]] = []
     for driver in payload.get("drivers", []):
         factors.append({
-            "heading": driver.get("label", "Signal"),
+            "key": driver.get("key", ""),
+            "heading": driver.get("label", "Condition"),
             "explanation": driver.get("evidence", ""),
             "confidence": driver.get("confidence", "medium"),
             "based_on": driver.get("based_on", ""),
         })
     if not factors:
         factors.append({
-            "heading": "Recurring pattern",
+            "key": "pattern",
+            "heading": f"A usual {weekday}",
             "explanation": (
-                f"Nothing outside the restaurant moved the number today. The forecast is the location's own "
-                f"{weekday} pattern, built from {plural(payload.get('confidence', {}).get('history_days', 0), 'day')} of sales."
+                f"Nothing outside the restaurant moves the number today. It follows the "
+                f"{weekday} pattern here, from {span_words(payload.get('confidence', {}).get('history_days', 0))} of sales."
             ),
             "confidence": band(payload.get("confidence", {}).get("score", 70)),
             "based_on": f"{plural(normal.get('based_on_days', 0), 'comparable ' + str(weekday))}",
@@ -271,26 +270,19 @@ FAMILY_COMPONENTS: dict[str, list[tuple[str, str, int, str]]] = {
     "entree": [("Protein", "protein", 40, "about 6 oz"), ("Starch", "base", 22, "1 portion"), ("Vegetables", "produce", 18, "1 portion"), ("Sauce", "sauce", 10, "1 portion"), ("Container", "packaging", 10, "1 container")],
 }
 
-FAMILY_DESCRIPTIONS: dict[str, str] = {
-    "burger": "a griddled beef sandwich served in a bun",
-    "chicken-sandwich": "a breaded or grilled chicken fillet served in a bun",
-    "pizza-whole": "a whole pizza built on a dough base",
-    "pizza-slice": "a single slice cut from a whole pizza",
-    "fries-side": "a fried potato side",
-    "bread-loaf": "a baked loaf sold whole",
-    "pastry": "a laminated or enriched baked good",
-    "bagel": "a boiled and baked roll",
-    "breakfast-sandwich": "an egg-based sandwich served in the morning",
-    "sandwich": "a made-to-order sandwich",
-    "salad": "a cold assembled bowl",
-    "coffee-hot": "a hot espresso or filter drink",
-    "coffee-cold": "a cold coffee drink served over ice",
-    "shake": "a blended ice cream drink",
-    "smoothie": "a blended fruit drink",
-    "dessert": "a sweet baked or plated item",
-    "beverage": "a poured cold drink",
-    "entree": "a plated or bowled main",
-}
+def parts_sentence(name: str, parts: list[str]) -> str:
+    """"Foundry classic: patty, bun, cheese, lettuce, tomato, onion, sauce, wrap and box."
+
+    A list of what goes in, in the order it is built. Nobody who makes burgers
+    needs a burger explained to them.
+    """
+    words = [part.strip() for part in parts if part and part.strip()]
+    words = [word[0].lower() + word[1:] if word[:1].isupper() and not word[:2].isupper() else word for word in words]
+    if not words:
+        return f"{name}: no parts on file yet."
+    if len(words) == 1:
+        return f"{name}: {words[0]}."
+    return f"{name}: {', '.join(words[:-1])} and {words[-1]}."
 
 
 def local_composition(payload: dict[str, Any]) -> dict[str, Any]:
@@ -299,17 +291,16 @@ def local_composition(payload: dict[str, Any]) -> dict[str, Any]:
     rows = FAMILY_COMPONENTS.get(family)
     if not rows:
         return {
-            "summary": f"{name} is on the menu, but what it is made of is not on file yet.",
+            "summary": f"{name}: no parts on file yet.",
             "confidence": "low",
             "verify_note": "Add the recipe to fill this in.",
             "components": [],
         }
-    description = FAMILY_DESCRIPTIONS.get(family, "a menu item")
     confidence = "medium" if float(payload.get("interpretation_confidence") or 0) >= 0.68 else "low"
     return {
-        "summary": f"{name} reads as {description}. ",
+        "summary": parts_sentence(name, [row[0] for row in rows]),
         "confidence": confidence,
-        "verify_note": "Confirm against the recipe card before ordering to these numbers.",
+        "verify_note": "Read from the till label. Confirm it against the recipe card.",
         "components": [
             {"name": row[0], "role": row[1], "share": row[2], "quantity": row[3], "confidence": confidence}
             for row in rows
@@ -321,47 +312,61 @@ def local_composition(payload: dict[str, Any]) -> dict[str, Any]:
 # Day review
 # ---------------------------------------------------------------------------
 
+def _lower_first(name: str) -> str:
+    """"Vanilla shake" -> "vanilla shake" mid-sentence; an all-caps start is left alone."""
+    if name[:1].isupper() and not name[:2].isupper():
+        return name[0].lower() + name[1:]
+    return name
+
+
 def local_day_review(payload: dict[str, Any]) -> dict[str, Any]:
+    """How the day went, written about the restaurant.
+
+    Sold 434 items, 9 more than the 425 expected. A normal Wednesday here
+    does about 420. / Crispy chicken sandwich came in 12 under, vanilla shake
+    11 over. Everything else was within 4. / (a reason only when there is a
+    named cause) / Nothing here would have changed prep.
+    """
     actual = payload.get("actual", {})
     predicted = payload.get("predicted", {})
-    unit_gap = int(round(float(actual.get("items") or 0) - float(predicted.get("items") or 0)))
-    sales_gap = float(actual.get("sales") or 0) - float(predicted.get("sales") or 0)
+    sold = int(round(float(actual.get("items") or 0)))
+    expected = int(round(float(predicted.get("items") or 0)))
+    unit_gap = sold - expected
     accuracy = float(payload.get("accuracy_percent") or 0)
-    direction = "under" if unit_gap > 0 else "over"
+    weekday = payload.get("weekday") or "day"
+    normal = payload.get("normal_units")
 
-    # Accuracy is measured item by item, so a day whose totals match can still
-    # score poorly if two items missed in opposite directions. Saying both keeps
-    # that from reading like a contradiction.
-    if abs(unit_gap) <= 2:
-        headline = (
-            f"Item by item the forecast landed {accuracy:.1f}% right. The day total was almost exact, "
-            f"{plural(predicted.get('items'), 'item')} called against {plural(actual.get('items'), 'item')} sold, "
-            "so what error there was cancelled out across the menu."
-        )
+    if unit_gap == 0:
+        headline = f"Sold {plural(sold, 'item')}, exactly the {expected} expected."
     else:
-        headline = (
-            f"Item by item the forecast landed {accuracy:.1f}% right. On the day total it called "
-            f"{plural(predicted.get('items'), 'item')} against {plural(actual.get('items'), 'item')} sold, "
-            f"{plural(abs(unit_gap), 'item')} {direction} on {money(abs(sales_gap))}."
-        )
+        word = "more" if unit_gap > 0 else "fewer"
+        headline = f"Sold {plural(sold, 'item')}, {abs(unit_gap)} {word} than the {expected} expected."
+    if normal:
+        headline += f" A normal {weekday} here does about {int(round(float(normal)))}."
 
     misses = payload.get("item_misses", [])
+    others_within = payload.get("others_within")
     if misses:
-        parts = [
-            f"{row['name']} ({int(row['predicted'])} called, {int(row['actual'])} sold)"
-            for row in misses[:3]
-        ]
-        where = "Most of the gap sat in " + ", ".join(parts) + "."
+        parts = []
+        for index, row in enumerate(misses[:3]):
+            gap = int(round(float(row.get("actual") or 0) - float(row.get("predicted") or 0)))
+            name = row["name"] if index == 0 else _lower_first(row["name"])
+            parts.append(f"{name}{' came in' if index == 0 else ''} {abs(gap)} {'over' if gap > 0 else 'under'}")
+        where = ", ".join(parts) + "."
+        if others_within is not None and len(payload.get("all_items", [])) > len(misses[:3]):
+            where += f" Everything else was within {int(others_within)}."
+    elif others_within is not None:
+        where = f"No item was more than {int(others_within)} off."
     else:
-        where = "The gap was spread evenly across the menu rather than concentrated in one item."
+        where = ""
 
-    reason = payload.get("condition_note") or "Nothing in the day's conditions explains the gap, so it reads as ordinary variation."
+    reason = payload.get("condition_note") or ""
 
     if accuracy >= 92 or abs(unit_gap) <= 15:
-        matters = "A gap this size would not have changed prep or staffing."
+        matters = "Nothing here would have changed prep."
     elif misses and misses[0].get("sold_out"):
-        matters = f"{misses[0]['name']} ran out during service, so this one did cost sales."
+        matters = f"{misses[0]['name']} ran out during service, so that miss cost sales."
     else:
-        matters = "Worth a look if the same item keeps missing in the same direction, which usually means the recipe or portion changed."
+        matters = ""
 
     return {"headline": headline, "where_error_sat": where, "likely_reason": reason, "matters": matters}

@@ -252,8 +252,18 @@ def menu_intelligence_view(conn: sqlite3.Connection, location_id: str) -> dict[s
     }
 
 
+NO_PRICE = "No price found, so this line is skipped"
+
+
 def parse_menu_text(text: str) -> list[dict[str, Any]]:
-    """Parse pasted menu text or simple CSV-like rows without requiring a template."""
+    """Parse pasted menu text or simple CSV-like rows without requiring a template.
+
+    A line is "name, category, price" or "name price", with a "Category:"
+    line setting the category for the lines under it. The last comma-separated
+    part before the price is the category and everything before it is the
+    name, however long the name is. A line with no price comes back flagged
+    (`ok` false) so the preview can say so and the import can skip it.
+    """
     rows: list[dict[str, Any]] = []
     current_category = "Imported"
     for raw_line in text.replace("\r", "\n").split("\n"):
@@ -263,21 +273,30 @@ def parse_menu_text(text: str) -> list[dict[str, Any]]:
         if len(line) < 42 and not re.search(r"\d", line) and line.endswith(":"):
             current_category = line[:-1].strip() or current_category
             continue
-        price_match = re.search(r"(?:\$\s*)?(\d{1,3}(?:\.\d{2})?)\s*$", line)
+        price_match = re.search(r"(?:\$\s*)?(\d{1,4}(?:\.\d{1,2})?)\s*$", line)
         price = float(price_match.group(1)) if price_match else 0.0
-        name = line[:price_match.start()].strip(" ,.-") if price_match else line
+        name = line[:price_match.start()].strip(" ,.-\t") if price_match else line.strip(" ,.-\t")
+        category = current_category
         if "," in name:
             parts = [part.strip() for part in name.split(",") if part.strip()]
-            if len(parts) >= 2 and len(parts[0]) < 28:
-                name = parts[0]
-                current_category = parts[1]
+            if len(parts) >= 2:
+                if price_match:
+                    category = parts[-1]
+                    current_category = category
+                    name = ", ".join(parts[:-1])
+                else:
+                    # "name, category" with nothing to price it by.
+                    category = parts[-1]
+                    name = ", ".join(parts[:-1])
         if len(name) < 2:
             continue
-        interpretation = interpret_menu_item(name, current_category)
+        interpretation = interpret_menu_item(name, category)
         rows.append({
-            "name": name,
-            "category": current_category,
-            "price": price,
+            "name": name[:120],
+            "category": category,
+            "price": round(price, 2),
+            "ok": price > 0,
+            "reason": "" if price > 0 else NO_PRICE,
             "interpretation": interpretation.as_dict(),
         })
     return rows

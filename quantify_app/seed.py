@@ -540,7 +540,7 @@ def _seed_location(
                attendance,relevance,source,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (f"evt-{location_id[4:]}-hist-{index}", location_id, name, event_type, cursor.isoformat(),
              event["start_time"], event["end_time"], distance, event["attendance"], relevance,
-             "demo-context-feed", "Historical impact-ranked signal"),
+             "demo-context-feed", "Past event"),
         )
         event_loads[cursor.isoformat()] = event_loads.get(cursor.isoformat(), 0.0) + event_impact(event, template["open_hour"], template["close_hour"])
         index += 1
@@ -552,7 +552,7 @@ def _seed_location(
             """INSERT INTO events(id,location_id,name,event_type,date,start_time,end_time,distance_miles,
                attendance,relevance,source,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (f"evt-{location_id[4:]}-future-{idx}", location_id, name, event_type, target.isoformat(),
-             start_time, end_time, distance, attendance, relevance, "demo-context-feed", "Upcoming public signal"),
+             start_time, end_time, distance, attendance, relevance, "demo-context-feed", "Upcoming event"),
         )
         event_loads[target.isoformat()] = event_loads.get(target.isoformat(), 0.0) + event_impact(event, template["open_hour"], template["close_hour"])
 
@@ -650,22 +650,71 @@ def seed_workspace(
     organization_id: str,
     concept: str = "",
     name: str | None = None,
-    owner_email: str = "owner@example.com",
+    owner_email: str = "",
     history_days: int = 400,
     today: date | None = None,
+    city: str = "",
+    region: str = "",
+    timezone: str = "",
+    latitude: float | None = None,
+    longitude: float | None = None,
+    open_hour: int | None = None,
+    close_hour: int | None = None,
 ) -> str:
     """Give a brand new account one sample location so the product works on day one.
 
     This is not the same as the sample reset. It adds a single location to one
     organization and touches nothing else, so a new signup never disturbs an
     account that already exists.
+
+    The location carries what the owner typed: their business name, what they
+    serve, their city, state, time zone and hours. Only the sales history is
+    borrowed from the closest sample template, and the register row is marked
+    as sample data so the interface can say so.
     """
     today = today or date.today()
     template = pick_template(concept)
     location_id = f"loc-{uuid.uuid4().hex[:10]}"
     local = dict(template)
     if name:
-        local["name"] = f"{name} (sample data)"
+        local["name"] = str(name).strip()[:120]
+    if concept and concept.strip():
+        local["concept"] = concept.strip()[:80]
+    if city and city.strip():
+        from .timezones import resolve
+        place = resolve(city)
+        local["city"] = str(place.get("city") or city).strip()[:80]
+        local["region"] = str(region or place.get("region") or "").strip()[:40]
+        local["timezone"] = str(timezone or place["timezone"])
+        # A new city never inherits a street address from the sample template.
+        local["address"] = ""
+        local["postal_code"] = ""
+    if region and region.strip():
+        local["region"] = region.strip()[:40]
+    if timezone and timezone.strip():
+        local["timezone"] = timezone.strip()
+    if latitude is not None and longitude is not None:
+        local["latitude"] = float(latitude)
+        local["longitude"] = float(longitude)
+    if open_hour is not None and close_hour is not None:
+        opens = max(0, min(23, int(open_hour)))
+        closes = max(1, min(28, int(close_hour)))
+        if closes <= opens:
+            closes += 24
+        if closes - opens > 24:
+            closes = opens + 24
+        local["open_hour"] = opens
+        local["close_hour"] = closes
+        # The sample hour curve follows the owner's hours, so the day shape is
+        # theirs and not the template's.
+        hours = list(range(opens, closes))
+        template_curve = sorted((int(k), float(v)) for k, v in template["hour_curve"].items())
+        if hours and template_curve:
+            weights = [v for _, v in template_curve]
+            local["hour_curve"] = {
+                str(hour % 24): weights[min(len(weights) - 1, int(index * len(weights) / len(hours)))]
+                for index, hour in enumerate(hours)
+            }
     _seed_location(
         conn, local, organization_id, location_id, today, history_days,
         owner_email=owner_email, seed_key=template["id"],

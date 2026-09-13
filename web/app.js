@@ -889,12 +889,12 @@
   function viewKey() {
     const base = `${S.view}:${S.locationId}:${S.date}`;
     if (S.view === "ordering") return `${base}:${S.order.days}`;
-    if (S.view === "history") return `${base}:${S.historyTab}:${S.history.range}:${S.orders.range}`;
+    if (S.view === "history") return `${base}:${S.historyTab}:${S.history.range}`;
     return base;
   }
   function snapshot() {
     if (S.view === "today") return { data: S.data, attention: S.attention, outlook: S.outlook };
-    if (S.view === "history") return { data: S.data, history: S.history, orders: S.orders };
+    if (S.view === "history") return { data: S.data, history: S.history };
     return { data: S.data };
   }
   function remember() {
@@ -975,41 +975,23 @@
   }
 
   async function loadHistory(silent) {
+    const location = S.locationId;
     const q = `location_id=${encodeURIComponent(S.locationId)}`;
+    if (S.historyTab !== "accuracy") S.historyTab = "days";
     if (S.historyTab === "accuracy") {
-      S.data = await API.get(`/api/accuracy?${q}&as_of=${todayISO()}&days=45`);
+      const key = `${location}:${todayISO()}:${S.pulse.version}`;
+      S.accuracyCache = S.accuracyCache || {};
+      const accuracy = S.accuracyCache[key] || await API.get(`/api/accuracy?${q}&as_of=${todayISO()}&days=30`);
+      S.accuracyCache[key] = accuracy;
+      if (S.view === "history" && S.historyTab === "accuracy" && S.locationId === location) S.data = accuracy;
       return;
     }
-    if (S.historyTab === "days") {
-      if (!silent) S.history = { days: [], nextBefore: null, hasMore: true, loading: false, range: S.history.range, costs: S.history.costs };
-      const start = rangeStart(S.history.range);
-      const page = await API.get(`/api/history/days?${q}&limit=18${start ? `&start=${start}` : ""}`);
-      if (silent) {
-        // A background refresh must not throw away pages the reader scrolled to.
-        const fresh = new Set(page.days.map((row) => row.date));
-        S.history.days = page.days.concat(S.history.days.filter((row) => !fresh.has(row.date)));
-      } else {
-        S.history.days = page.days;
-        S.history.nextBefore = page.next_before;
-        S.history.hasMore = page.has_more;
-      }
-      S.history.costs = page.costs || S.history.costs || null;
-      S.data = { source: page.source };
-      return;
-    }
-    if (!silent) S.orders = { rows: [], nextDate: null, nextSkip: 0, hasMore: true, loading: false, range: S.orders.range };
-    const start = rangeStart(S.orders.range);
-    const page = await API.get(`/api/history/orders?${q}&limit=40${start ? `&start=${start}` : ""}`);
-    if (silent) {
-      const fresh = new Set(page.orders.map((row) => row.id));
-      S.orders.rows = page.orders.concat(S.orders.rows.filter((row) => !fresh.has(row.id)));
-    } else {
-      S.orders.rows = page.orders;
-      S.orders.nextDate = page.next_before_date;
-      S.orders.nextSkip = page.next_skip;
-      S.orders.hasMore = page.has_more;
-    }
-    S.data = { source: page.source };
+    // A fresh open starts at the newest page; a background refresh re-reads
+    // the page on screen and leaves the rest of the stack alone.
+    const h = historyState();
+    const page = h.pages[h.at];
+    if (page && page.version === S.pulse.version) { h.days = page.days; S.data = { source: page.source }; return; }
+    await historyFetch(h, h.at, page ? page.before : null);
   }
 
   function rangeStart(range) {
@@ -1045,9 +1027,9 @@
   // Only ever shown when there is nothing on screen yet.
   function skeleton() {
     return `<div class="stack">
-      <div class="skel" style="height:150px;border-radius:13px"></div>
-      <div class="tiles three">${[1, 2, 3].map(() => `<div class="skel" style="height:96px;border-radius:13px"></div>`).join("")}</div>
-      <div class="skel" style="height:280px;border-radius:13px"></div>
+      <div class="skel" style="height:190px;border-radius:13px"></div>
+      <div class="skel" style="height:72px;border-radius:13px"></div>
+      <div class="skel" style="height:320px;border-radius:13px"></div>
     </div>`;
   }
 
@@ -1069,141 +1051,392 @@
   }
 
   /* ---------- today ---------- */
-  // One screen. The call, three figures, what to do, what is running low, then
+  // One screen. The headline with its three figures, what is running low, then
   // one panel that switches between the make list, the reasons, the hours and
   // the two weeks ahead. Nothing stacks under that, so the page ends where the
   // list ends and a person at the counter never scrolls past what they need.
   const PANES = [["make", "What to make"], ["why", "Why"], ["hours", "Through the day"], ["ahead", "Next two weeks"]];
 
+  const isPast = () => S.date < todayISO();
+  // A value that is really a number, so a missing field never reads as zero.
+  const has = (v) => v !== undefined && v !== null && v !== "" && Number.isFinite(Number(v));
+  // Register data is live only when the last sale is from today.
+  const registerCurrent = (b) => !!(b && b.data_health && b.data_health.pos_freshness === "current");
+  // A location with no sales rows has nothing to plan from yet.
+  const noHistory = (b) => !!(b.no_history || (!(b.items || []).length && !((b.data_health || {}).history_days)));
+
   function renderToday() {
     const b = S.data;
-    const s = b.summary;
-    const cmp = b.comparison;
-    const n = b.narrative;
-    const dir = s.revenue_change_percent >= 0 ? "up" : "down";
-    const live = b.intraday && b.intraday.in_service ? b.intraday : null;
-
-    const headline = n?.headline || b.headline;
-    const summaryText = n?.summary || defaultSummary(b);
-    const actions = (n?.actions?.length ? n.actions : b.actions).slice(0, 3);
-
+    const subtitle = e(currentLocation().name || "");
+    if (noHistory(b)) {
+      root.innerHTML = shell(dLong(S.date), subtitle, dateTools(), `<section class="card">${emptyState(
+        "Nothing to plan yet",
+        "Connect the register or add your menu and the first plan appears the next morning.",
+        `<button class="btn accent" data-stab="location">Connect the register</button><button class="btn" data-stab="menu">Add your menu</button>`,
+      )}</section>`);
+      return;
+    }
+    // The stock strip is optional: if it cannot be drawn, the day still can.
+    let low = "";
+    try { low = runningLow(); } catch (_) { low = ""; }
     const body = `<div class="stack">
-      <section class="headline solo">
-        <div class="headline-main">
-          <div class="headline-meta">
-            <span class="tag ${dir} dot">${e(s.demand_level)}</span>
-            ${live && live.revision ? runningTag(live.revision) : `<span class="tag plain">${s.confidence}% sure</span>`}
-            ${b.data_health.pos_freshness === "current" ? "" : `<span class="tag warn dot">Register data is ${e(b.data_health.pos_freshness)}</span>`}
-          </div>
-          <h2>${e(headline)}</h2>
-          <p class="sum">${e(summaryText)}</p>
-        </div>
-      </section>
-
-      <section class="tiles three" id="daytiles">
-        ${tile("Expected sales", money(s.expected_revenue),
-          `<b>${money(cmp.sales)}</b> on ${e(cmp.label)}. ${diffPhrase(s.difference_sales, "money")}`,
-          b.costs ? `About ${money(b.costs.left_after_costs)} kept after food and wages` : `Averaged over ${noun(cmp.based_on_days, weekday(b.date))} here`)}
-        ${tile("Units to make", num(makeTotal(b)),
-          `<b>${num(s.expected_units)}</b> will sell. The rest is the cushion for running out.`,
-          `The Make column, added up`)}
-        ${tile("Busiest hour", s.peak_hour || "Not set",
-          `<b>${money(s.peak_revenue)}</b> and ${noun(s.peak_units, "item")} in that hour alone.`,
-          `${s.peak_share_percent}% of the day lands in one hour`)}
-      </section>
-
-      ${actions.length ? `<section class="card" id="whattodo">
-        <div class="card-head"><div><h2>What to do</h2></div></div>
-        <div class="actions">${actions.map((row, i) => `
-          <div class="action ${row.type || ""}">
-            <span class="mark">${row.type === "watch" ? "!" : (i + 1)}</span>
-            <div><b>${e(row.title)}</b><p>${e(row.detail)}</p></div>
-            <span class="metric">${e(row.metric)}</span>
-          </div>`).join("")}</div>
-      </section>` : ""}
-
-      ${runningLow()}
-
+      ${isPast() ? pastBanner() : ""}
+      ${headlineCard(b)}
+      ${low}
       <section class="card" id="daypanes">
         <div class="card-head panehead">
           <div class="seg panes">${PANES.map(([k, l]) =>
-            `<button class="${S.todayPane === k ? "on" : ""}" data-pane="${k}">${l}</button>`).join("")}</div>
+            `<button class="${S.todayPane === k ? "on" : ""}" aria-pressed="${S.todayPane === k}" data-pane="${k}">${l}</button>`).join("")}</div>
         </div>
         ${todayPane(b)}
       </section>
     </div>`;
-
-    root.innerHTML = shell(dLong(S.date), `${e((S.boot.locations.find((l) => l.id === S.locationId) || {}).name || "")}`,
-      `${dateTools()}<button class="btn sm" data-do="preview-email">Preview email</button>`, body);
+    root.innerHTML = shell(dLong(S.date), subtitle, dateTools(), body);
+    if (isPast() && !b.past_day) fillPastHeadline(b);
   }
 
-  // During service the confidence tag gives way to where the day is actually
-  // running against the morning call, which is the number the record is
-  // scored on. The full split is on the Through the day panel.
-  function runningTag(r) {
-    const pace = r.sold_units - r.called_by_now_units;
-    return `<span class="tag ${pace >= 0 ? "up" : "down"} dot">${pace >= 0 ? "+" : ""}${num(pace)} items against the morning call, read at ${e(r.label)}</span>`;
+  // The demand tag is coloured by its level, never by the sign of a small
+  // difference: a normal day is plain.
+  function demandClass(level) {
+    const text = String(level || "").toLowerCase();
+    if (/above|strong|busy/.test(text)) return "up";
+    if (/below|soft|quiet/.test(text)) return "down";
+    return "plain";
   }
 
-  function sureNote(b) {
-    const cmp = b.comparison;
-    return b.narrative?.confidence_note
-      || `Built from ${noun(cmp.based_on_days, "comparable " + weekday(b.date))} inside ${noun(b.trust.history_days, "day")} of this location's own sales.`;
-  }
-
-  // Counted stock against what the next days will use. Empty until somebody
-  // has counted something on the Order screen, and silent when nothing is
-  // short, so it only appears when there is something to act on.
-  function runningLow() {
-    const rows = ((S.attention && S.attention.lines) || []).slice(0, 5);
-    if (!rows.length) return "";
-    return `<section class="card" id="runninglow">
-      <div class="card-head"><div><h2>Running low</h2></div>
-        <div class="spacer"></div><button class="btn sm" data-view="ordering">Open the order</button></div>
-      <div class="lowlist">${rows.map((r) => {
-        const days = Number(r.days_of_cover);
-        const left = days < 1 ? "runs out today" : days < 2 ? "about a day left" : `about ${Math.round(days)} days left`;
-        return `<div class="lowrow">
-          <b>${e(r.name)}</b>
-          <span>${left}, ${num(r.on_hand)} ${e(r.unit || "")} on hand</span>
-          <span class="when">${r.order_by ? `Order by ${e(dMed(r.order_by))}` : ""}${r.supplier ? `${r.order_by ? " from " : ""}${e(r.supplier)}` : ""}</span>
-        </div>`;
-      }).join("")}</div>
+  function headlineCard(b) {
+    const s = b.summary, cmp = b.comparison;
+    const past = isPast();
+    const cls = demandClass(s.demand_level);
+    const synced = b.data_health && b.data_health.latest_sale_date;
+    const sold = b.past_day;
+    const figure = (value, label, under) =>
+      `<div class="figure"><b>${e(value)}</b> <span class="flabel">${e(label)}</span><span class="under">${e(under)}</span></div>`;
+    let title;
+    if (!past) title = b.headline || (b.narrative && b.narrative.headline) || `A ${weekday(b.date)}`;
+    else if (sold && Number(sold.units) > 0) title = `Expected ${money(s.expected_revenue)}, sold ${money(sold.sales)}`;
+    else if (sold) title = `Expected ${money(s.expected_revenue)}. Nothing was recorded.`;
+    else title = `Expected ${money(s.expected_revenue)}`;
+    const figures = past
+      ? [
+        figure(money(s.expected_revenue), "expected", `${money(cmp.sales)} on ${cmp.label}`),
+        figure(num(s.expected_units), "items expected", sold && Number(sold.units) > 0 ? `${num(sold.units)} sold` : `${num(cmp.units)} on ${cmp.label}`),
+      ]
+      : [
+        figure(money(s.expected_revenue), "expected", `${money(cmp.sales)} on ${cmp.label}`),
+        figure(num(makeTotal(b)), "to make", `${num(s.expected_units)} expected to sell`),
+      ];
+    if (s.peak_hour) figures.push(figure(s.peak_hour, "busiest", `${num(s.peak_share_percent)}% of the day`));
+    const costs = b.costs;
+    const profit = !past && costs && costs.configured
+      ? `<p class="profit">About ${money(costs.left_after_costs)} kept after ${money(costs.cogs)} in food and ${money(costs.labour)} in wages.</p>`
+      : "";
+    return `<section class="headline solo">
+      <div class="headline-main">
+        <div class="headline-meta">
+          <span class="tag ${cls} ${cls === "plain" ? "" : "dot"}">${e(s.demand_level)}</span>
+          ${registerCurrent(b) || !synced ? "" : `<button class="tag warn dot" data-stab="location">Register last synced ${e(dShort(synced))}</button>`}
+        </div>
+        <h2 id="day-headline">${e(title)}</h2>
+        <div class="figures">${figures.join("")}</div>
+        ${profit}
+      </div>
     </section>`;
   }
 
-  function todayPane(b) {
-    if (S.todayPane === "why") {
-      return `<div class="reasons">
-        <div class="reason"><div class="reason-top"><b>How sure</b>
-          <span class="tag plain">${b.summary.confidence}% ${e(confidenceWord(b.summary.confidence))}</span></div>
-          <p>${e(sureNote(b))}</p></div>
-        ${reasonRows(b, b.narrative)}</div>${weatherFoot(b)}`;
-    }
-    if (S.todayPane === "hours") return `<div class="card-body">${hourChart(b)}</div>${liveTable(b)}`;
-    if (S.todayPane === "ahead") return aheadPane();
-    return `<div class="tablewrap">${itemTable(b)}</div>${prepGroups(b)}
-      <div class="card-foot">Lean toward the top of the range on anything cheap to make and quick to sell. Open any item for its whole record.</div>`;
+  // A day that has closed is a record, not a plan.
+  function pastBanner() {
+    return `<section class="card"><div class="card-body pastbanner">
+      <p><b>${e(dLong(S.date))} is over.</b> What happened is in History.</p>
+      <button class="btn" data-view="history">Open History</button>
+    </div></section>`;
   }
 
-  // What the register has rung so far against the morning call, item by item.
-  function liveTable(b) {
-    const live = b.intraday;
-    if (!live || !live.in_service) return "";
+  // What the day actually did, read once and kept on the brief so a repaint
+  // does not lose it.
+  async function fillPastHeadline(b) {
+    const key = `${S.locationId}:${S.date}`;
+    try {
+      const d = await API.get(`/api/history/day?location_id=${encodeURIComponent(S.locationId)}&date=${S.date}`);
+      if (S.view !== "today" || `${S.locationId}:${S.date}` !== key || S.data !== b) return;
+      b.past_day = { sales: Number(d.sales || 0), units: Number(d.units || 0) };
+      remember();
+      const holder = document.querySelector(".headline.solo");
+      if (holder) holder.outerHTML = headlineCard(b);
+    } catch (_) { /* the plan alone is fine */ }
+  }
+
+  // Counted stock against what the next days will use. Always on the page:
+  // nothing counted, nothing short, or the lines that run out first.
+  function runningLow() {
+    const a = S.attention;
+    const head = (button, note = "") => `<div class="card-head"><div><h2>Running low</h2>${note ? `<p>${e(note)}</p>` : ""}</div><div class="spacer"></div>${button}</div>`;
+    const open = `<button class="btn sm" data-view="ordering">Open the order</button>`;
+    if (!a) return `<section class="card" id="runninglow">${head(open)}<div class="card-body"><p class="lowline">Stock counts are unavailable right now. Open the order to check them.</p></div></section>`;
+    const lines = Array.isArray(a.lines) ? a.lines : [];
+    const counted = Number(a.counted || 0) > 0 || lines.length > 0;
+    if (!counted) {
+      return `<section class="card" id="runninglow">${head(open)}
+        <div class="card-body"><p class="lowline">Nothing has been counted yet. Count what is in the walk-in on the Order page and this fills in.</p></div>
+      </section>`;
+    }
+    const when = countedWhen(a, lines);
+    if (!lines.length) {
+      const until = a.horizon || addDays(todayISO(), 7);
+      return `<section class="card" id="runninglow">${head(open)}
+        <div class="card-body"><p class="lowline">Nothing runs out before ${e(dMed(until))}. ${e(when)}</p></div>
+      </section>`;
+    }
+    const rows = lines.slice(0, 3).map((r) => {
+      const runs = r.runs_out_label ? `runs out ${r.runs_out_label}` : coverWords(r.days_of_cover);
+      const lands = r.arrives_label ? `, lands ${r.arrives_label}` : "";
+      let action;
+      if (r.no_supplier || (!r.supplier && !r.order_by_label)) action = "choose a supplier";
+      else if (r.late || /^now$/i.test(r.order_by_label || "")) action = `order now${lands}`;
+      else if (r.order_by_label) action = `order ${/ by /.test(r.order_by_label) ? "" : "by "}${r.order_by_label}${lands}`;
+      else action = `from ${r.supplier}`;
+      return `<div class="lowrow ${r.late || r.no_supplier ? "late" : ""}">
+        <b>${e(r.name)}</b><span>${e(runs)}</span><span class="when">${e(action)}</span>
+      </div>`;
+    });
+    const more = lines.length > 3 ? ` ${num(lines.length - 3)} more on the Order page.` : "";
+    return `<section class="card" id="runninglow">${head(open, when + more)}
+      <div class="lowlist">${rows.join("")}</div>
+    </section>`;
+  }
+
+  function coverWords(days) {
+    const n = Number(days);
+    if (!Number.isFinite(n)) return "";
+    if (n < 1) return "runs out today";
+    if (n < 2) return "runs out tomorrow";
+    return `about ${num(n)} days left`;
+  }
+
+  // "Counted today", "Counted yesterday", "Counted Tuesday".
+  function countedWhen(a, lines) {
+    let age = has(a.count_age_days) ? Number(a.count_age_days) : null;
+    if (age === null) {
+      const ages = lines.map((r) => r.count_age_days).filter(has).map(Number);
+      if (ages.length) age = Math.min(...ages);
+    }
+    const stamp = String(a.as_of || (lines[0] && lines[0].counted_at) || "").slice(0, 10);
+    if (age === null && stamp) age = Math.round((dObj(todayISO()) - dObj(stamp)) / 86400000);
+    if (age === null || !Number.isFinite(age)) return "";
+    if (age <= 0) return "Counted today.";
+    if (age === 1) return "Counted yesterday.";
+    if (age < 7) return `Counted ${weekday(addDays(todayISO(), -age))}.`;
+    return `Counted ${dShort(addDays(todayISO(), -age))}.`;
+  }
+
+  function todayPane(b) {
+    if (S.todayPane === "why") return whyPane(b);
+    if (S.todayPane === "hours") return hoursPane(b);
+    if (S.todayPane === "ahead") return aheadPane(b);
+    return makePane(b);
+  }
+
+  // Swaps only the panel body, so the page around it keeps its place.
+  function repaintPane() {
+    const panel = document.getElementById("daypanes");
+    const head = panel && panel.querySelector(".card-head");
+    if (!panel || !head || !S.data) return;
+    while (head.nextSibling) head.nextSibling.remove();
+    head.insertAdjacentHTML("afterend", todayPane(S.data));
+  }
+
+  function makePane(b) {
+    if (!(b.items || []).length) {
+      return emptyState("Nothing to make yet", "Once the register has sold something, the list appears here.");
+    }
+    return `${doRows(b)}<div class="tablewrap">${itemTable(b)}</div>`;
+  }
+
+  // At most two rows, only when the number to make is not the normal number.
+  // Built from the make figures the server sends; without them, no rows.
+  function doRows(b) {
+    if (isPast()) return "";
+    const items = b.items || [];
+    const rows = (b.actions || [])
+      .filter((row) => row.item_id && has(row.make) && has(row.normal_make) && Number(row.make) !== Number(row.normal_make))
+      .slice(0, 2);
+    if (!rows.length) return "";
+    return `<div class="actions">${rows.map((row) => {
+      const item = items.find((it) => it.item_id === row.item_id) || {};
+      const diff = Number(row.make) - Number(row.normal_make);
+      const name = row.item_name || item.name || "";
+      const title = row.title || `Make ${num(Math.abs(diff))} ${diff > 0 ? "more" : "fewer"} ${name} than a normal ${weekday(b.date)}`;
+      return `<div class="action">
+        <button class="action-open" data-item-sheet="${e(row.item_id)}"><b>${e(title)}</b></button>
+        ${adjustButton(item, row.item_id, name, row.make, "btn sm")}
+      </div>`;
+    }).join("")}</div>`;
+  }
+
+  // The Adjust button carries everything the modal needs, so it works on any
+  // page and for any list.
+  function adjustButton(item, itemId, name, make, cls) {
+    const o = item && item.override;
+    const expected = item ? (item.model_expected ?? item.expected) : "";
+    return `<button class="${cls}" data-do="adjust" data-item="${e(itemId)}" data-name="${e(name)}"
+      data-qty="${e(make)}" data-expected="${e(expected)}" data-override="${o ? e(o.quantity) : ""}" data-reason="${o ? e(o.reason || "") : ""}">Adjust</button>`;
+  }
+
+  function itemTable(b) {
+    const past = b.date ? b.date < todayISO() : false;
+    const groups = [];
+    (b.items || []).forEach((item) => {
+      const key = item.category || "Menu";
+      let group = groups.find((g) => g.name === key);
+      if (!group) { group = { name: key, rows: [] }; groups.push(group); }
+      group.rows.push(item);
+    });
+    const cols = past ? 4 : 5;
+    return `<table class="dt make"><thead><tr>
+      <th>Item</th><th class="num right">Make</th><th class="num right">Expected</th><th class="num right">Normal</th>${past ? "" : "<th></th>"}</tr></thead><tbody>
+      ${groups.map((g) => `${groups.length > 1 ? `<tr class="group"><td colspan="${cols}">${e(g.name)}</td></tr>` : ""}${
+        g.rows.map((item) => itemRow(b, item, past, cols)).join("")}`).join("")}
+    </tbody></table>`;
+  }
+
+  function itemRow(b, item, past, cols) {
+    const make = item.make ?? item.expected;
+    const expected = item.model_expected ?? item.expected;
+    if (item.new_item) {
+      return `<tr class="clickable" tabindex="0" data-item-sheet="${e(item.item_id)}" data-date="${e(b.date || todayISO())}">
+        <td class="name" colspan="${cols}"><b>${e(item.name)}</b><small>New item. No number yet; after a week of sales it gets one.</small></td>
+      </tr>`;
+    }
+    const diff = has(item.baseline) ? Number(expected) - Number(item.baseline) : 0;
+    const o = item.override;
+    const note = o ? `${o.updated_by ? `Set by ${o.updated_by}` : "Adjusted"}${o.reason ? `: ${o.reason}` : ""}` : "";
+    const risk = Number(item.sell_out_percent) > 50 ? `<span class="tag warn">Likely to run out</span>` : "";
+    return `<tr class="clickable" tabindex="0" data-item-sheet="${e(item.item_id)}" data-date="${e(b.date || todayISO())}">
+      <td class="name"><b>${e(item.name)}</b>${risk}${note ? `<small>${e(note)}</small>` : ""}</td>
+      <td class="num right plan" data-label="Make">${num(make)}</td>
+      <td class="num right" data-label="Expected">${num(expected)}</td>
+      <td class="num right" data-label="Normal">${num(item.baseline)}${Math.abs(diff) >= 3
+        ? `<div class="small ${diff > 0 ? "up" : "down"}">${diff > 0 ? "+" : ""}${num(diff)}</div>` : ""}</td>
+      ${past ? "" : `<td class="right">${adjustButton(item, item.item_id, item.name, make, "btn sm ghost")}</td>`}
+    </tr>`;
+  }
+
+  function whyPane(b) {
+    return `<div class="reasons">
+      <div class="reason"><div class="reason-top"><b>How sure</b></div><p>${e(sureSentence(b))}</p></div>
+      ${reasonRows(b, b.narrative)}
+    </div>`;
+  }
+
+  // One sentence, in words. A written note is used only when it has no
+  // percentage in it.
+  function sureSentence(b) {
+    const note = b.narrative && b.narrative.confidence_note;
+    if (note && !/%|confiden/i.test(note)) return note;
+    const word = confidenceWord(b.summary.confidence);
+    const rests = noun(b.comparison.based_on_days, `past ${weekday(b.date)}`);
+    if (word === "sure") return `Sure about today. It rests on ${rests} here.`;
+    if (word === "fairly sure") return `Fairly sure about today. It rests on ${rests} here, so the numbers can move a little.`;
+    return `Not sure about today. Only ${rests} here, so the range is wide.`;
+  }
+
+  function confidenceWord(score) {
+    if (score >= 80) return "sure";
+    if (score >= 65) return "fairly sure";
+    return "not sure";
+  }
+
+  // Each reason: what it is, how many items it moves, one sentence. A pill
+  // only when the reason itself is not sure.
+  function reasonRows(b, n) {
+    const signals = (b.context && b.context.signals) || [];
+    const written = (n && n.factors) || [];
+    const chip = (units) => (has(units) && Math.round(Number(units)) !== 0
+      ? `<span class="effect-chip ${Number(units) > 0 ? "up" : "down"}">${Number(units) > 0 ? "+" : ""}${num(units)} items</span>` : "");
+    const sureTag = (level) => {
+      const w = String(level || "").toLowerCase();
+      if (!w || w === "high") return "";
+      return `<span class="tag plain">${w === "medium" ? "fairly sure" : "not sure"}</span>`;
+    };
+    if (written.length) {
+      return written.map((row, i) => {
+        const signal = signals.find((sg) => row.key && sg.key === row.key)
+          || signals.find((sg) => sg.label === row.heading) || signals[i];
+        return `<div class="reason">
+          <div class="reason-top"><b>${e(row.heading)}</b>${signal ? chip(signal.units) : ""}${sureTag(row.confidence)}</div>
+          <p>${e(row.explanation)}</p>
+        </div>`;
+      }).join("");
+    }
+    if (!signals.length) {
+      return `<div class="reason"><div class="reason-top"><b>Nothing unusual</b></div>
+        <p>Nothing outside moved today's number far enough to mention. Today follows this location's own ${e(weekday(b.date))} pattern.</p></div>`;
+    }
+    return signals.map((row) => `<div class="reason">
+      <div class="reason-top"><b>${e(row.label)}</b>${chip(row.units)}</div>
+      <p>${e(row.detail)}</p>
+    </div>`).join("");
+  }
+
+  // The day is live only when the register is current and service is on.
+  const liveState = (b) => (registerCurrent(b) && b.intraday && b.intraday.in_service ? b.intraday : null);
+
+  function hoursPane(b) {
+    const live = liveState(b);
+    return `<div class="card-body">${hourChart(b, live)}</div>${live ? liveTable(b, live) : ""}`;
+  }
+
+  // Expected and sold use different hues and separate bars. Every hour
+  // keeps its label and whole-item values, including on a phone.
+  function hourChart(b, live) {
+    const rows = b.service_curve || [];
+    if (!rows.length) return `<p class="muted small">No hourly pattern yet for this location.</p>`;
+    const byslot = {};
+    ((live && live.hours) || []).forEach((h) => { byslot[h.slot] = h; });
+    const max = Math.max(...rows.map((r) => Number(r.units || 0)), ...Object.values(byslot).map((h) => Number(h.rung_units || 0)), 1);
+    const peak = rows.reduce((best, row) => (Number(row.units) > Number(best.units) ? row : best), rows[0]);
+    return `<div class="chart-key"><span><i class="k-pred"></i>Expected</span>${live ? '<span><i class="k-actual"></i>Sold</span>' : '<span><i class="k-peak"></i>Busiest hour</span>'}</div><div class="hours">${rows.map((row) => {
+      const h = (Number(row.units || 0) / max) * 100;
+      const state = byslot[row.slot ?? row.hour];
+      const done = !!(state && state.state === "done");
+      const rung = done ? (Number(state.rung_units || 0) / max) * 100 : null;
+      return `<div class="hourcol ${!live && row.hour === peak.hour ? "peak" : ""} ${state ? e(state.state) : ""}">
+        <div class="hour-values"><b>${num(row.units)}</b>${live ? `<span>${done ? num(state.rung_units) : "-"}</span>` : ""}</div>
+        <div class="track"><i style="height:${h}%;${h ? "" : "min-height:0"}"></i>${rung === null ? "" : `<i class="rung" style="height:${rung}%;${rung ? "" : "min-height:0"}"></i>`}</div>
+        <span>${e(String(row.label || hourLabel(row.hour)).replaceAll(" ", "").toLowerCase())}</span>
+      </div>`;
+    }).join("")}</div>
+    <p class="hour-note">${e(hourSentence(b, live, peak))}</p>`;
+  }
+
+  function hourSentence(b, live, peak) {
+    const base = `Opens ${hourLabel(Number(b.location.open_hour))}, busiest ${peak.label} with about ${noun(peak.units, "item")}.`;
+    if (live) {
+      const r = live.revision;
+      if (r) return `Read at ${r.label}: ${num(r.sold_units)} items sold so far against ${num(r.called_by_now_units)} expected by now.`;
+      return `${base} Sold so far fills in as each hour closes.`;
+    }
+    if (!isPast() && b.intraday && b.intraday.in_service && b.data_health && b.data_health.latest_sale_date) {
+      return `${base} Register data stops at ${dShort(b.data_health.latest_sale_date)}, so today's pace is not shown.`;
+    }
+    return base;
+  }
+
+  // What the register has sold so far against the morning number, item by item.
+  function liveTable(b, live) {
     const r = live.revision;
-    if (!r) return `<div class="card-foot">Not enough of the day has finished to say where it is running yet.</div>`;
+    if (!r) return "";
     const ahead = r.difference_units >= 0;
     return `<div class="card-body" style="border-top:1px solid var(--line)">
-      <p class="small muted" style="margin-bottom:12px">Read at ${e(r.label)}, with ${r.expected_share_percent}% of a normal ${e(weekday(b.date))} behind us. The register has rung ${num(r.sold_units)} items and ${money(r.sold_sales)}.</p>
       <div class="live-split">
-        <div><span>Called this morning</span><b>${num(r.opening_units)} items</b><small>${money(r.opening_sales)}</small></div>
-        <div><span>Where it looks like finishing</span><b>${num(r.revised_units)} items</b><small>${money(r.revised_sales)}</small></div>
+        <div><span>Expected this morning</span><b>${num(r.opening_units)} items</b><small>${money(r.opening_sales)}</small></div>
+        <div><span>Expected now</span><b>${num(r.revised_units)} items</b><small>${money(r.revised_sales)}</small></div>
         <div><span>Change</span><b class="${ahead ? "up" : "down"}">${ahead ? "+" : ""}${num(r.difference_units)} items</b>
           <small>${ahead ? "+" : ""}${money(r.difference_sales)}</small></div>
       </div>
-      ${r.items.length ? `<table class="dt" style="margin-top:14px"><thead><tr>
-        <th>Item</th><th class="num right">Called</th><th class="num right">Sold so far</th>
-        <th class="num right">Now expecting</th><th class="num right">Change</th></tr></thead><tbody>
+      ${(r.items || []).length ? `<table class="dt" style="margin-top:14px"><thead><tr>
+        <th>Item</th><th class="num right">Expected</th><th class="num right">Sold so far</th>
+        <th class="num right">Expected now</th><th class="num right">Change</th></tr></thead><tbody>
         ${r.items.map((row) => `<tr class="clickable" data-item-sheet="${e(row.item_id)}">
           <td class="name"><b>${e(row.name)}</b></td>
           <td class="num right">${num(row.opening)}</td>
@@ -1215,29 +1448,8 @@
     </div>`;
   }
 
-  // Portions grouped by what the kitchen holds. Folded away, because the make
-  // list above it is the decision and this is the same decision regrouped.
-  function prepGroups(b) {
-    const rows = (b.material_pressure || []).slice(0, 7);
-    if (!rows.length) return "";
-    return `<details class="context-disclosure" style="margin:0 18px">
-      <summary>Grouped by what the kitchen holds</summary>
-      <div class="context-detail"><div class="tablewrap"><table class="dt" style="min-width:520px"><thead><tr>
-        <th>Group</th><th class="num right">Today</th><th class="num right">Normal ${e(weekday(b.date))}</th>
-        <th class="num right">Difference</th><th>Driven by</th></tr></thead><tbody>
-        ${rows.map((row) => `<tr>
-          <td class="name"><b>${e(row.family)}</b></td>
-          <td class="num right plan">${num(row.demand_index)}</td>
-          <td class="num right">${num(row.baseline_index)}</td>
-          <td class="num right ${row.change_units >= 0 ? "up" : "down"}">${row.change_units >= 0 ? "+" : ""}${num(row.change_units)}</td>
-          <td class="muted small">${e(topItemForFamily(b, row.family))}</td>
-        </tr>`).join("")}
-      </tbody></table></div></div>
-    </details>`;
-  }
-
-  // The next fourteen days, fetched the first time the panel is opened and
-  // kept until the date or the location changes.
+  // The fourteen days after the one on screen. The brief's own week paints at
+  // once; the full two weeks replace it when they arrive.
   function outlookKey() { return `${S.locationId}:${S.date}`; }
 
   async function loadOutlook() {
@@ -1246,210 +1458,59 @@
     if (loadOutlook._inflight === key) return;
     loadOutlook._inflight = key;
     try {
-      const d = await API.get(`/api/outlook?location_id=${encodeURIComponent(S.locationId)}&start=${S.date}&days=14`);
+      const d = await API.get(`/api/outlook?location_id=${encodeURIComponent(S.locationId)}&start=${addDays(S.date, 1)}&days=14`);
+      if (outlookKey() !== key) return;
       S.outlook = { key, ...d };
-      if (S.view === "today" && S.todayPane === "ahead") render(true);
-    } catch (error) { toast(error.message, "error"); }
+      remember();
+      if (S.view === "today" && S.todayPane === "ahead") repaintPane();
+    } catch (error) { toast(plainError(error), "error"); }
     loadOutlook._inflight = "";
   }
 
-  function aheadPane() {
+  function aheadPane(b) {
     const d = S.outlook && S.outlook.key === outlookKey() ? S.outlook : null;
-    if (!d) return `<div class="card-body"><div class="skel" style="height:320px;border-radius:9px"></div></div>`;
-    return `<div class="outlook-head"><span>Day</span><span>Expected</span><span>Biggest line</span><span>Against normal</span><span>Busiest</span></div>
-      ${d.days.map((day) => `
-        <button class="outlook-row" data-open-date="${day.date}">
-          <span><b>${e(dMed(day.date))}</b><small>${e(day.weather.condition)}, ${day.weather.high}°</small></span>
-          <span class="money"><b>${money(day.expected_revenue)}</b><small>${num(day.expected_units)} items</small></span>
-          <span><b>${e(day.top_surges[0] ? `${day.top_surges[0].name}, ${day.top_surges[0].vs_baseline_units >= 0 ? "+" : ""}${day.top_surges[0].vs_baseline_units} vs normal` : `${num(day.top_item_units)} ${(day.top_item || "items").toLowerCase()}`)}</b><small>${e(day.occasion_name || "")}</small></span>
-          <span class="money ${day.revenue_change_percent >= 0 ? "up" : "down"}"><b>${pct(day.revenue_change_percent)}</b><small class="muted">${day.confidence}% sure</small></span>
-          <span><b>${e(day.peak_hour || "Not set")}</b><small>${e(day.demand_level)}</small></span>
-        </button>`).join("")}
-      <div class="card-foot">Open a day to work it. Days further out lean more on this location's own repeating pattern, and the confidence on each row already allows for that.</div>`;
-  }
-  // Which item contributes most to a prep group, so the row says why it moved.
-  function topItemForFamily(brief, family) {
-    const key = family.toLowerCase();
-    const hit = brief.items
-      .filter((row) => (row.family || "").replace(/-/g, " ").toLowerCase().includes(key.split(" ")[0]))
-      .sort((a, b) => b.expected - a.expected)[0];
-    return hit ? `${num(hit.expected)} ${hit.name.toLowerCase()}` : "the menu mix";
+    const days = (d ? d.days || [] : b.week_ahead || []).filter((day) => day.date && day.date !== S.date).slice(0, 14);
+    if (!days.length) return `<div class="card-body"><div class="skel" style="height:320px;border-radius:9px"></div></div>`;
+    return `<div class="outlook-head"><span>Day</span><span>Expected</span><span>Biggest line</span><span>Against normal</span></div>
+      ${days.map((day) => {
+        const change = Number(day.revenue_change_percent ?? day.change_percent ?? 0);
+        const cls = change >= 4 ? "up" : change <= -4 ? "down" : "";
+        const surge = (day.top_surges || [])[0];
+        const under = day.occasion_name || (day.weather ? `${day.weather.condition}, ${day.weather.high}°` : "");
+        const line = day.top_item ? (has(day.top_item_units) ? `${num(day.top_item_units)} ${day.top_item}` : day.top_item) : "";
+        return `<button class="outlook-row" data-open-date="${e(day.date)}">
+          <span><b>${e(dMed(day.date))}</b>${under ? `<small>${e(under)}</small>` : ""}</span>
+          <span class="money"><b>${money(day.expected_revenue)}</b>${has(day.expected_units) ? `<small>${noun(day.expected_units, "item")}</small>` : ""}</span>
+          <span><b>${e(line)}</b>${surge ? `<small>${e(surge.name)} ${surge.vs_baseline_units > 0 ? "+" : ""}${num(surge.vs_baseline_units)} against normal</small>` : ""}</span>
+          <span class="money ${cls}"><b>${pct(change)}</b></span>
+        </button>`;
+      }).join("")}
+      <div class="card-foot">${d ? "Tap a day to plan it." : "Tap a day to plan it. The second week is on its way."}</div>`;
   }
 
-  function confidenceWord(score) {
-    if (score >= 80) return "sure";
-    if (score >= 65) return "fairly sure";
-    return "wide range";
-  }
-
-  function defaultSummary(b) {
-    const s = b.summary; const cmp = b.comparison;
-    if (Math.abs(s.revenue_change_percent) < 4) {
-      return `Plan for ${money(s.expected_revenue)} and ${noun(s.expected_units, "item")}. A normal ${weekday(b.date)} here runs ${money(cmp.sales)}, so today sits inside the usual spread.`;
-    }
-    const more = s.difference_sales >= 0;
-    return `Plan for ${money(s.expected_revenue)} against ${money(cmp.sales)} on ${cmp.label}. That is ${money(Math.abs(s.difference_sales))} ${more ? "more" : "less"} and about ${noun(Math.abs(s.difference_units), "item")} ${more ? "more" : "fewer"} across the menu.`;
-  }
-
-  function diffPhrase(value, kind) {
-    const v = Number(value || 0);
-    if (Math.abs(v) < (kind === "money" ? 1 : 1)) return "Level with it.";
-    const word = v > 0 ? "more" : "less";
-    return kind === "money"
-      ? `<span class="${v > 0 ? "up" : "down"}">${money(Math.abs(v))} ${word}</span> today.`
-      : `<span class="${v > 0 ? "up" : "down"}">${num(Math.abs(v))} ${v > 0 ? "more" : "fewer"}</span> today.`;
-  }
-
+  // A tile: label, value, one comparison line, and a basis only when there is
+  // something to say.
   function tile(label, value, versus, basis) {
     return `<div class="tile">
       <span class="eyebrow">${e(label)}</span>
       <span class="value">${e(value)}</span>
       <span class="versus">${versus}</span>
-      <span class="basis">${e(basis)}</span>
+      ${basis ? `<span class="basis">${e(basis)}</span>` : ""}
     </div>`;
-  }
-
-  function reasonRows(b, n) {
-    const written = n?.factors || [];
-    if (written.length) {
-      return written.map((row, i) => {
-        const signal = b.context.signals[i];
-        return `<div class="reason">
-          <div class="reason-top"><b>${e(row.heading)}</b>
-            ${signal ? `<span class="effect-chip ${signal.effect >= 0 ? "up" : "down"}">${pct(signal.effect)} · ${signal.units >= 0 ? "+" : ""}${num(signal.units)} items</span>` : ""}
-            <span class="tag plain">${e(row.confidence)} confidence</span></div>
-          <p>${e(row.explanation)}</p>
-          <div class="basis">${icon("info")}<span>${e(row.based_on)}</span></div>
-        </div>`;
-      }).join("");
-    }
-    if (!b.context.signals.length) {
-      return `<div class="reason"><div class="reason-top"><b>Nothing unusual</b></div>
-        <p>No outside condition moved today's number far enough to mention. The forecast is this location's own ${e(weekday(b.date))} pattern.</p>
-        <div class="basis">${icon("info")}<span>${e(noun(b.comparison.based_on_days, "comparable " + weekday(b.date)))}</span></div></div>`;
-    }
-    return b.context.signals.map((row) => `<div class="reason">
-      <div class="reason-top"><b>${e(row.label)}</b>
-        <span class="effect-chip ${row.effect >= 0 ? "up" : "down"}">${pct(row.effect)} · ${row.units >= 0 ? "+" : ""}${num(row.units)} items · ${row.sales >= 0 ? "+" : "-"}${money(Math.abs(row.sales))}</span></div>
-      <p>${e(row.detail)}</p>
-      ${row.based_on ? `<div class="basis">${icon("info")}<span>${e(row.based_on)}</span></div>` : ""}
-    </div>`).join("");
-  }
-
-  function weatherFoot(b) {
-    const w = b.context.weather;
-    const events = b.context.material_events || [];
-    const parts = [
-      `Weather: ${w.condition}, high ${w.high}°, low ${w.low}°${w.precipitation_mm ? `, ${w.precipitation_mm} mm rain` : ""}${w.snowfall_cm ? `, ${w.snowfall_cm} cm snow` : ""}.`,
-      `Register history: ${num(b.data_health.history_days)} trading days through ${b.data_health.latest_sale_date ? dShort(b.data_health.latest_sale_date) : "not available"}.`,
-      `Nearby listings checked: ${num(b.context.event_candidates_reviewed)}${events.length ? `, ${events.length} close enough and big enough to matter` : ", none big enough to matter"}.`,
-    ];
-    return `<div class="card-foot">${parts.map(e).join(" ")}</div>`;
-  }
-
-  function hourChart(b) {
-    const rows = b.service_curve || [];
-    if (!rows.length) return `<p class="muted small">No hourly pattern yet for this location.</p>`;
-    const live = b.intraday && b.intraday.in_service ? b.intraday : null;
-    const byslot = {};
-    (live ? live.hours : []).forEach((h) => { byslot[h.slot] = h; });
-    const max = Math.max(...rows.map((r) => Number(r.revenue)), ...(live ? live.hours.map((h) => h.rung_sales) : []), 1);
-    const peak = rows.reduce((best, row) => (Number(row.revenue) > Number(best.revenue) ? row : best), rows[0]);
-    const normalScale = b.summary.baseline_revenue / Math.max(1, b.summary.expected_revenue);
-    return `<div class="hours">${rows.map((row) => {
-      const slot = row.slot ?? row.hour;
-      const h = Math.max(3, (Number(row.revenue) / max) * 100);
-      const state = byslot[slot];
-      const rung = state && state.state === "done" ? Math.max(2, (state.rung_sales / max) * 100) : null;
-      const title = state && state.state === "done"
-        ? `${row.label}: rang ${money(state.rung_sales)} against ${money(row.revenue)} called`
-        : `${row.label}: ${money(row.revenue)} called, ${row.units} items`;
-      return `<div class="hourcol ${row.hour === peak.hour ? "peak" : ""} ${state ? state.state : ""}" title="${e(title)}">
-        <div class="track"><i class="ghost" style="height:${Math.max(3, h * normalScale)}%"></i><i style="height:${h}%"></i>${
-          rung === null ? "" : `<i class="rung" style="height:${rung}%"></i>`}</div>
-        <span>${e(row.label.replace(" ", ""))}</span>
-      </div>`;
-    }).join("")}</div>
-    <div class="hour-legend">
-      ${live
-        ? `<span>The filled bar is what has rung. The outline is what was called this morning.</span>`
-        : `<span>Busiest hour <b>${e(peak.label)}</b>, about <b>${money(peak.revenue)}</b> and <b>${peak.units} items</b></span>`}
-      <span>Opens <b>${hourLabel(Number(b.location.open_hour))}</b>, closes <b>${hourLabel(Number(b.location.close_hour))}</b></span>
-    </div>`;
-  }
-
-  // Where the day is actually running, and what that has changed. The morning
-  // call is always shown beside the revision, because the record is scored on
-  // the morning call and the operator should be able to see both.
-  function liveCard(b) {
-    const live = b.intraday;
-    if (!live || !live.in_service) return "";
-    const r = live.revision;
-    if (!r) {
-      return `<section class="card live">
-        <div class="card-head"><div><h2>Where the day is running</h2>
-          <p>${live.locked_local
-            ? `Called at ${e(live.locked_local)} this morning, before service.`
-            : ``}</p></div></div>
-        <div class="card-body"><p class="lede">Not enough of the day has finished to say anything yet.</p></div>
-      </section>`;
-    }
-    const ahead = r.difference_units >= 0;
-    const pace = r.sold_units - r.called_by_now_units;
-    return `<section class="card live">
-      <div class="card-head"><div><h2>Where the day is running</h2>
-        <p>Read at ${e(r.label)}, with ${r.expected_share_percent}% of a normal ${e(weekday(b.date))} behind us.</p></div>
-        ${live.locked_local ? `<span class="tag plain">called at ${e(live.locked_local)}</span>` : ""}</div>
-      <div class="card-body">
-        <p class="lede">The register has rung <b>${num(r.sold_units)}</b> items and <b>${money(r.sold_sales)}</b>.
-          By now a day like the one we called would have rung <b>${num(r.called_by_now_units)}</b>, so we are
-          <b class="${pace >= 0 ? "up" : "down"}">${pace >= 0 ? "+" : ""}${num(pace)}</b> against that.</p>
-        <div class="live-split">
-          <div><span>Called this morning</span><b>${num(r.opening_units)} items</b><small>${money(r.opening_sales)}</small></div>
-          <div><span>Where it looks like finishing</span><b>${num(r.revised_units)} items</b><small>${money(r.revised_sales)}</small></div>
-          <div><span>Change</span><b class="${ahead ? "up" : "down"}">${ahead ? "+" : ""}${num(r.difference_units)} items</b>
-            <small>${ahead ? "+" : ""}${money(r.difference_sales)}</small></div>
-        </div>
-        ${r.items.length ? `<table class="dt" style="margin-top:14px"><thead><tr>
-          <th>Item</th><th class="num right">Called</th><th class="num right">Sold so far</th>
-          <th class="num right">Now expecting</th><th class="num right">Change</th></tr></thead><tbody>
-          ${r.items.map((row) => `<tr class="clickable" data-item-sheet="${e(row.item_id)}">
-            <td class="name"><b>${e(row.name)}</b></td>
-            <td class="num right">${num(row.opening)}</td>
-            <td class="num right">${num(row.sold_so_far)}</td>
-            <td class="num right plan">${num(row.revised)}</td>
-            <td class="num right ${row.difference >= 0 ? "up" : "down"}">${row.difference >= 0 ? "+" : ""}${num(row.difference)}</td>
-          </tr>`).join("")}
-        </tbody></table>` : `<p class="small muted" style="margin-top:12px">Nothing has moved by enough to be worth changing.</p>`}
-      </div>
-    </section>`;
   }
 
   function makeTotal(b) {
     return (b.items || []).reduce((total, row) => total + (row.make ?? row.expected), 0);
   }
 
-  // A share-of-day strip that can actually be read: the busiest hour is the only
-  // one that carries a value, and the half-sold point is drawn where it falls.
-  function hourShape(hourly) {
-    const rows = hourly.hours || [];
-    if (!rows.length) return "";
-    const peak = rows.reduce((best, row) => (row.share_percent > best.share_percent ? row : best), rows[0]);
-    return `<div class="shape" style="margin-top:14px">
-      ${rows.map((row) => {
-        const isPeak = row.label === peak.label;
-        const half = row.label === hourly.half_sold_by;
-        return `<div class="shape-col ${isPeak ? "peak" : ""} ${half ? "half" : ""}"
-             title="${e(row.label)}: ${row.per_day} a day, ${row.share_percent}% of this item">
-          <div class="shape-track"><i style="height:${Math.max(3, (row.share_percent / Math.max(1, peak.share_percent)) * 100)}%"></i></div>
-          <span class="shape-val">${isPeak ? `${row.share_percent}%` : ""}</span>
-          <span class="shape-lab">${e(row.label.replace(" ", ""))}</span>
-        </div>`;
-      }).join("")}
-    </div>
-    <p class="small muted" style="margin-top:8px">Tallest bar is ${e(peak.label)} at ${peak.share_percent}% of this item's day.${
-      hourly.half_sold_by ? ` The marked hour is where half have gone.` : ""}</p>`;
-  }
+  // The -5 -1 +1 +5 steppers on the adjust modal.
+  document.addEventListener("click", (event) => {
+    const step = event.target.closest("[data-adjstep]");
+    if (!step) return;
+    const box = document.getElementById("adjust-qty");
+    if (!box) return;
+    box.value = Math.max(0, Math.round(Number(box.value || 0)) + Number(step.dataset.adjstep));
+  });
 
   const ROLES = new Set(["base", "protein", "dairy", "produce", "bread", "sauce",
     "sweetener", "beverage", "packaging", "other"]);
@@ -1467,196 +1528,283 @@
       <i style="width:${width}%"></i></div>`;
   }
 
-  function itemTable(b) {
-    const max = Math.max(...b.items.map((row) => row.upper), 1);
-    return `<table class="dt"><thead><tr>
-      <th>Item</th><th class="num right">Make</th><th class="num right">Will sell</th><th class="num right">Normal</th>
-      <th>Range</th><th></th></tr></thead><tbody>
-      ${b.items.map((item) => `
-        <tr class="clickable" data-item-sheet="${e(item.item_id)}">
-          <td class="name"><b>${e(item.name)}</b><small>${e(item.category)}${item.override ? " · you adjusted this" : ""}</small></td>
-          <td class="num right plan">${num(item.make ?? item.expected)}<div class="small muted">${item.sell_out_percent !== null && item.sell_out_percent !== undefined ? `${item.sell_out_percent}% chance of running out` : ""}</div></td>
-          <td class="num right">${num(item.expected)}</td>
-          <td class="num right">${num(item.baseline)}<div class="small ${item.vs_baseline_units >= 0 ? "up" : "down"}">${item.vs_baseline_units >= 0 ? "+" : ""}${num(item.vs_baseline_units)}</div></td>
-          <td><div class="rangebar">
-            <div class="line"><i style="left:${(item.lower / max) * 100}%;width:${Math.max(3, ((item.upper - item.lower) / max) * 100)}%"></i><b style="left:${(item.expected / max) * 100}%"></b></div>
-            <span>${num(item.lower)} to ${num(item.upper)}</span></div></td>
-          <td class="right"><button class="btn sm ghost" data-do="adjust" data-item="${e(item.item_id)}" data-name="${e(item.name)}" data-qty="${item.make ?? item.expected}">Adjust</button></td>
-        </tr>`).join("")}
-    </tbody></table>`;
-  }
-
   /* ---------- history ---------- */
   const RANGES = [["all", "All time"], ["year", "Past year"], ["quarter", "90 days"], ["month", "30 days"]];
+  const DAYS_PER_PAGE = 14;
+
+  // The day list is read a page at a time and kept as a stack of pages, so
+  // Later never refetches and Earlier only fetches a page not seen yet. Nothing
+  // loads on its own; the two buttons in the card head are the only way through.
+  function historyState() {
+    const range = (S.history && S.history.range) || "all";
+    const key = `${S.locationId}:${range}`;
+    S.historyCache = S.historyCache || {};
+    if (!S.history || S.history.key !== key) S.history = S.historyCache[key] || { key, range };
+    S.historyCache[key] = S.history;
+    const h = S.history;
+    h.range = range;
+    h.days = h.days || [];
+    h.pages = h.pages || [];
+    h.at = h.at || 0;
+    h.range = h.range || "all";
+    h.costs = h.costs || null;
+    h.newest = h.newest || null;
+    return h;
+  }
 
   function renderHistory() {
+    if (S.historyTab !== "accuracy") S.historyTab = "days";
     const tabs = `<div class="seg">
-      ${[["days", "By day"], ["orders", "Orders"], ["accuracy", "Track record"]].map(([k, l]) =>
-        `<button class="${S.historyTab === k ? "on" : ""}" data-htab="${k}">${l}</button>`).join("")}
+      ${[["days", "Days"], ["accuracy", "Track record"]].map(([k, l]) =>
+        `<button class="${S.historyTab === k ? "on" : ""}" aria-pressed="${S.historyTab === k}" data-htab="${k}">${l}</button>`).join("")}
     </div>`;
-    let body = "";
-    if (S.historyTab === "days") body = historyDays();
-    else if (S.historyTab === "orders") body = historyOrders();
-    else body = historyAccuracy();
-    root.innerHTML = shell("History", "Closed days, orders, and how close each call was", tabs, body);
+    const body = S.historyTab === "accuracy" ? historyAccuracy() : historyDays();
+    root.innerHTML = shell("History", "", tabs, body);
   }
 
   function rangeBar(current, attr) {
     return `<div class="seg">${RANGES.map(([k, l]) =>
-      `<button class="${current === k ? "on" : ""}" data-${attr}="${k}">${l}</button>`).join("")}</div>`;
+      `<button class="${current === k ? "on" : ""}" aria-pressed="${current === k}" data-${attr}="${k}">${l}</button>`).join("")}</div>`;
+  }
+
+  // Reads one page of days into the stack and makes it the page on screen.
+  async function historyFetch(h, at, before) {
+    const location = S.locationId, version = S.pulse.version;
+    const token = h.request = (h.request || 0) + 1;
+    const q = `location_id=${encodeURIComponent(S.locationId)}&limit=${DAYS_PER_PAGE}`;
+    const start = rangeStart(h.range);
+    const page = await API.get(`/api/history/days?${q}${before ? `&before=${before}` : ""}${start ? `&start=${start}` : ""}`);
+    if (token !== h.request) return;
+    h.pages[at] = { before, days: page.days || [], nextBefore: page.next_before || null, hasMore: !!page.has_more, version, source: page.source };
+    h.at = at;
+    h.days = h.pages[at].days;
+    h.costs = page.costs || h.costs || null;
+    h.newest = page.newest_sale_date || null;
+    if (S.view === "history" && S.historyTab === "days" && S.history === h && S.locationId === location) S.data = { source: page.source };
+  }
+
+  // Earlier and Later. Later always comes from memory; Earlier fetches only
+  // when the next page has not been read yet.
+  async function historyPage(dir) {
+    const h = historyState();
+    if (h.loading) return;
+    const next = h.at + dir;
+    if (next < 0) return;
+    if (h.pages[next]) {
+      h.at = next;
+      h.days = h.pages[next].days;
+    } else {
+      const current = h.pages[h.at];
+      if (!current || !current.hasMore || !current.nextBefore) return;
+      h.loading = true; progress(true);
+      try { await historyFetch(h, next, current.nextBefore); }
+      catch (error) { toast(plainError(error), "error"); }
+      h.loading = false; progress(false);
+    }
+    if (S.view === "history" && S.historyTab === "days" && S.history === h) {
+      remember();
+      render();
+      window.scrollTo(0, 0);
+    }
+  }
+
+  // The newest day with sales on the first page, for when the API does not
+  // say. Pages are newest first, so it is the first row that was open.
+  function newestSaleDate(days) {
+    const open = (days || []).find((row) => !row.closed);
+    return open ? open.date : null;
+  }
+
+  // A run of days with nothing recorded becomes one row, so a fortnight with
+  // the register unplugged does not push the real days off the page.
+  function collapseClosed(days) {
+    const out = [];
+    (days || []).forEach((day) => {
+      const last = out[out.length - 1];
+      if (day.closed && last && last.closed && addDays(day.date, 1) === last.from) {
+        last.from = day.date;
+        last.count += 1;
+        return;
+      }
+      out.push(Object.assign({}, day, { from: day.date, to: day.date, count: 1 }));
+    });
+    return out;
   }
 
   function historyDays() {
-    const days = S.history.days;
+    const h = historyState();
+    const rows = collapseClosed(h.days);
+    const page = h.pages[h.at] || { hasMore: false };
+    const withCosts = !!h.costs && h.costs.configured !== false;
+    const newest = h.newest || newestSaleDate((h.pages[0] || {}).days);
+    const quiet = newest && newest < addDays(todayISO(), -1);
+    const canEarlier = page.hasMore || h.at + 1 < h.pages.length;
+    let list;
+    if (rows.length) {
+      list = `<div class="dayrow head">
+          <span class="when">Day</span><span class="cell">Sold</span>
+          <span class="cell">${withCosts ? "Left after costs" : "Items"}</span>
+          <span class="accmeter">Accuracy</span><span class="chev"></span>
+        </div>${rows.map((row) => dayRow(row, withCosts)).join("")}`;
+    } else if (h.at > 0) {
+      list = emptyState("No more days", "The earliest day on record is on the page before this one.", `<button class="btn sm" data-do="days-later">Later</button>`);
+    } else if (h.range === "all") {
+      list = emptyState("No closed days yet", "The first day appears the morning after the first full day of sales.", `<a class="btn sm" href="/app" data-stab="location">Connect the register</a>`);
+    } else {
+      list = emptyState("No closed days in this range", "Pick a wider range to see earlier days.", `<button class="btn sm" data-drange="all">Show all time</button>`);
+    }
     return `<div class="stack">
       <section class="card">
-        <div class="card-head">
-          <div><h2>Closed days</h2></div>
-          <div class="spacer"></div>${rangeBar(S.history.range, "drange")}
+        <div class="card-head days">
+          <div><h2>Days</h2></div>
+          <div class="spacer"></div>
+          ${rangeBar(h.range, "drange")}
+          <div class="pager">
+            <button class="btn sm" data-do="days-earlier" ${canEarlier ? "" : "disabled"}>Earlier</button>
+            <button class="btn sm" data-do="days-later" ${h.at > 0 ? "" : "disabled"}>Later</button>
+          </div>
         </div>
-        <div id="dayrows">${days.length ? `<div class="dayrow head">
-            <span class="when">Day</span><span class="cell">Rang up</span>
-            <span class="cell">${S.history.costs ? "Left after costs" : "Units"}</span>
-            <span class="cell">${S.history.costs ? "Cost to run" : "Average order"}</span>
-            <span class="accmeter">How close the call was</span><span class="chev"></span>
-          </div>` : ""}
-        ${days.length ? days.map(dayRow).join("") : emptyState("No trading days in this range", "Pick a wider range, or connect the register to bring history in.")}</div>
-        ${S.history.hasMore ? `<div class="loadmore"><button class="btn sm" data-do="more-days">${S.history.loading ? "Loading" : "Load more"}</button></div>` : ""}
-        <div class="scroll-sentinel" id="sentinel"></div>
+        ${quiet ? `<p class="quiet-note">Nothing has come in from the register since ${e(dShort(newest))}. <a href="/app" data-stab="location">Check the connection</a>.</p>` : ""}
+        <div id="dayrows">${list}</div>
+        ${withCosts && rows.length ? `<div class="card-foot">${costsFoot(h.costs)}</div>` : ""}
       </section>
-      ${costsFoot(S.history.costs)}
-      <p class="small muted" style="padding:0 2px">${S.data?.source === "register" ? "Orders come straight from the connected register." : "This location has daily and hourly totals but not line-level receipts, so individual orders are reconstructed from those totals. They add up exactly, and they are replaced by real receipts the moment a register is connected."}</p>
     </div>`;
   }
 
-  function dayRow(day) {
+  function dayRow(day, withCosts) {
     if (day.closed) {
+      const run = day.count > 1;
       return `<div class="dayrow closed">
-        <span class="when"><b>${e(dMed(day.date))}</b><small>${e(day.weekday)}</small></span>
-        <span class="closed-note" style="grid-column:2 / -1">
-          <b>Closed</b><span>${e(day.note)}</span></span>
+        <span class="when"><b>${e(run ? `${dShort(day.from)} to ${dShort(day.to)}` : dShort(day.date))}</b><small>${e(run ? noun(day.count, "day") : weekday(day.date))}</small></span>
+        <span class="closed-note"><b>Not open</b><span>${run ? "Nothing recorded on these days" : "Nothing recorded"}</span></span>
       </div>`;
     }
-    const acc = day.accuracy;
-    const cls = acc === null ? "" : acc >= 90 ? "" : acc >= 80 ? "mid" : "low";
+    const acc = day.accuracy === null || day.accuracy === undefined ? null : Number(day.accuracy);
+    const cls = acc === null ? "" : acc < 70 ? "low" : acc < 80 ? "mid" : "";
     const c = day.costs;
-    return `<button class="dayrow" data-day-detail="${day.date}">
-      <span class="when"><b>${e(dMed(day.date))}</b><small>${e(day.weekday)}</small></span>
-      <span class="cell"><b>${money(day.sales)}</b><small>net of tax, ${num(day.orders)} orders</small></span>
-      <span class="cell">${c
-        ? `<b>${money(c.left_after_costs)}</b><small>left, about ${c.margin_percent}% of net</small>`
-        : `<b>${num(day.units)}</b><small>units sold</small>`}</span>
-      <span class="cell">${c
-        ? `<b>${money(c.cogs + c.labour + c.other)}</b><small>food, wages and fixed</small>`
-        : `<b>${money(day.average_order, true)}</b><small>average ticket, inc. tax</small>`}</span>
-      <span class="accmeter">
+    return `<button class="dayrow" data-day-detail="${e(day.date)}">
+      <span class="when"><b>${e(dShort(day.date))}</b><small>${e(weekday(day.date))}</small></span>
+      <span class="cell" data-label="Sold"><b>${money(day.sales)}</b><small>${noun(day.orders, "ticket")}</small></span>
+      ${withCosts
+        ? `<span class="cell" data-label="Left after costs">${c
+          ? `<b>${money(c.left_after_costs)}</b><small>${Math.round(Number(c.margin_percent || 0))}% of sales</small>`
+          : `<b class="muted">Not worked out</b><small>costs missing for this day</small>`}</span>`
+        : `<span class="cell" data-label="Items"><b>${num(day.units)}</b><small>${noun(day.distinct_items, "different item")}</small></span>`}
+      <span class="accmeter" data-label="Accuracy">
         ${acc === null
-          ? `<span class="small muted">Not scored yet</span>`
-          : `<span class="top"><b>${Math.round(acc)}% per item</b><small>${num(day.predicted_units)} called, ${num(day.units)} sold</small></span>
-             <span class="line"><i class="${cls}" style="width:${Math.max(4, acc)}%"></i></span>`}
+          ? `<span class="top"><b class="muted">Not scored yet</b><small>scored overnight</small></span>`
+          : `<span class="top"><b>${Math.round(acc)}%</b><small>${num(day.predicted_units)} expected, ${num(day.units)} sold</small></span>
+             <span class="line"><i class="${cls}" style="width:${Math.max(4, Math.min(100, acc))}%"></i></span>`}
       </span>
       <span class="chev">${icon("chevR")}</span>
     </button>`;
   }
 
+  // One sentence under the day list saying what Left after costs rests on.
   function costsFoot(summary) {
     if (!summary) return "";
-    const w = summary.wage;
-    return `<p class="small muted" style="padding:0 2px">${summary.configured
-        ? `It uses the wage and the costs you entered.`
-        : `Nobody has entered your real costs yet, so it is using ${e(w.detail)} and no fixed costs at all.`}
-      <a href="/app" data-stab="costs">Put your own numbers in</a> and every figure here follows them.</p>`;
+    const w = summary.wage || {};
+    return summary.configured
+      ? `Left after costs uses the <a href="/app" data-stab="costs">wages and costs you entered</a>.`
+      : `Left after costs assumes ${money(w.hourly, true)} an hour, the local minimum wage, and no rent until you <a href="/app" data-stab="costs">put your own costs in</a>.`;
   }
 
-  function historyOrders() {
-    const rows = S.orders.rows;
-    return `<div class="stack">
-      <section class="card">
-        <div class="card-head">
-          <div><h2>Orders</h2><p>Every ticket, newest first. ${num(rows.length)} loaded so far.</p></div>
-          <div class="spacer"></div>${rangeBar(S.orders.range, "orange")}
-        </div>
-        ${rows.length ? `<div class="orderrow head">
-            <span>Time</span><span>What they ordered</span><span class="ch">Channel</span><span class="pay">Payment</span><span class="amt">Total</span>
-          </div>` : ""}
-        ${rows.length ? rows.map(orderRow).join("") : emptyState("No orders in this range", "Widen the range or connect the register.")}
-        ${S.orders.hasMore ? `<div class="loadmore"><button class="btn sm" data-do="more-orders">${S.orders.loading ? "Loading" : "Load more"}</button></div>` : ""}
-        <div class="scroll-sentinel" id="sentinel"></div>
-      </section>
-    </div>`;
-  }
-
-  function orderRow(order) {
-    const names = order.lines.map((l) => `${l.quantity > 1 ? l.quantity + "x " : ""}${l.name}`).join(", ");
-    return `<div class="orderrow">
-      <span class="t">${e(clock(order.time))}<div class="small muted">${e(dShort(order.date))}</div></span>
-      <span class="what"><b>${e(names)}</b><small>${order.number} · ${noun(order.item_count, "item")}</small></span>
-      <span class="ch"><span class="tag plain">${e(order.channel)}</span></span>
-      <span class="pay small muted">${e(order.payment)}</span>
-      <span class="amt">${money(order.total, true)}<div class="small muted" style="font-weight:400">${money(order.subtotal, true)} before tax${order.tip ? " and tip" : ""}</div></span>
-    </div>`;
+  // "Low by about 7 items a day": the lean the API names when it names one,
+  // otherwise worked out from the counts it sends; the size from the item's
+  // own miss across the window.
+  function usually(row, days) {
+    const perDay = Math.round((Number(row.wape || 0) / 100) * Number(row.actual_units || 0) / Math.max(1, days));
+    let lean = row.usually || row.lean || row.bias_direction || "";
+    if (!lean && typeof row.bias === "number") lean = row.bias > 0 ? "high" : row.bias < 0 ? "low" : "";
+    if (!lean && row.predicted_units != null && row.actual_units != null) {
+      const diff = Number(row.predicted_units) - Number(row.actual_units);
+      const steady = Math.abs(diff) >= Math.max(1, Number(row.actual_units) * 0.02);
+      lean = steady ? (diff > 0 ? "high" : "low") : "no steady lean";
+    }
+    lean = String(lean).replace(/^usually\s+/i, "").trim().toLowerCase();
+    const size = perDay > 0 ? `about ${noun(perDay, "item")} a day` : "less than one a day";
+    if (!lean || lean === "no steady lean") return `Off by ${size}`;
+    return `${lean[0].toUpperCase()}${lean.slice(1)} by ${size}`;
   }
 
   function historyAccuracy() {
-    const d = S.data;
-    const trend = d.trend || { series: [], average: null, days: 0 };
+    const d = S.data || {};
+    const summary = d.summary || {};
+    const n = Number(summary.days_evaluated || 0);
+    if (!n) {
+      return `<div class="stack"><section class="card">${emptyState("No closed days yet", "The first day appears the morning after the first full day of sales.")}</section></div>`;
+    }
+    const trend = d.trend || {};
+    const series = (trend.series || []).slice(-n);
+    const scored = series.map((r) => Number(r.accuracy)).filter((v) => !Number.isNaN(v));
+    const within = scored.filter((v) => v >= 90).length;
+    const best = scored.length ? Math.round(Math.max(...scored)) : null;
+    const worst = scored.length ? Math.round(Math.min(...scored)) : null;
+    const basis = `Over the last ${noun(n, "closed day")}`;
+    const acc = Math.round(Number(summary.forecast_accuracy || 0));
+    const previous = summary.previous_accuracy;
+    const daily = d.daily || [];
+    const gaps = daily.map((r) => Math.abs(Number(r.actual) - Number(r.predicted)));
+    const typicalGap = gaps.length ? Math.round(gaps.reduce((a, b) => a + b, 0) / gaps.length) : 0;
+    const items = d.item_accuracy || [];
+    const shown = items.slice(0, 8);
+    const rest = items.length - shown.length;
+    const restFloor = rest > 0 ? Math.round(Math.min(...items.slice(8).map((r) => Number(r.accuracy)))) : null;
     return `<div class="stack">
-      <section class="tiles">
-        ${tile("Forecast accuracy", `${d.summary.forecast_accuracy}%`,
-          `Scored item by item against what the registers rang, so a day whose total lands can still score low.`,
-          `Over the last ${noun(d.summary.days_evaluated, "closed day")}`)}
-        ${tile("Days within 10%", trend.within_ten !== null ? `${trend.within_ten}%` : "Scoring",
-          `Best ${trend.best ?? 0}%, worst ${trend.worst ?? 0}%.`,
-          `Over the last ${noun(trend.days, "scored day")}`)}
-        ${tile("Items tracked", num(d.summary.items_evaluated),
-          `Every item that sold in the window has its own score.`,
-          `Over the last ${noun(d.summary.days_evaluated, "closed day")}`)}
+      <section class="tiles two">
+        ${tile("Right, item by item", `${acc}%`,
+          previous !== undefined && previous !== null
+            ? `${Math.round(Number(previous))}% the ${noun(n, "day")} before.`
+            : scored.length ? `Best day ${best}%, worst ${worst}%.` : `A day within 10% counts as right.`,
+          basis)}
+        ${tile("Days within 10%", scored.length ? `${Math.round((within / scored.length) * 100)}%` : "Not scored yet",
+          scored.length ? `${within} of ${noun(scored.length, "day")}.` : `Scores fill in as days close.`,
+          scored.length && scored.length !== n ? `Over the last ${noun(scored.length, "scored day")}` : basis)}
       </section>
 
       <section class="card">
-        <div class="card-head"><div><h2>Called against sold</h2>
-          <p>Solid is what sold. Dashed is what Quantify said the day before.</p></div></div>
-        <div class="card-body">${lineChart(d.daily)}</div>
+        <div class="card-head"><div><h2>Expected against sold</h2>
+          <p>${!daily.length ? "Nothing to draw yet."
+            : typicalGap > 0 ? `Sold usually lands within about ${noun(typicalGap, "item")} of expected.` : "Sold usually lands within an item of expected."}</p></div></div>
+        <div class="card-body">${lineChart(daily)}</div>
       </section>
 
       <section class="card">
         <div class="card-head"><div><h2>Where it misses</h2>
-          <p>Worst first. An item that keeps missing the same way usually means a recipe, a portion, or a price changed.</p></div></div>
-        <div class="tablewrap"><table class="dt"><thead><tr>
-          <th>Item</th><th class="num right">Accuracy</th><th class="num right">Average miss</th><th class="num right">Units tested</th><th></th></tr></thead><tbody>
-          ${d.item_accuracy.slice(0, 14).map((row) => `<tr>
+          <p>Worst first. An item that keeps missing the same way usually means a recipe, a portion or a price changed.</p></div></div>
+        ${shown.length ? `<div class="tablewrap"><table class="dt stack misses"><thead><tr>
+          <th>Item</th><th class="num right">Right</th><th>Usually</th></tr></thead><tbody>
+          ${shown.map((row) => `<tr class="clickable" data-item-sheet="${e(row.item_id)}" data-name="${e(row.name)}">
             <td class="name"><b>${e(row.name)}</b></td>
-            <td class="num right">${row.accuracy}%</td>
-            <td class="num right ${row.wape > 25 ? "down" : ""}">${row.wape}%</td>
-            <td class="num right">${num(row.actual_units)}</td>
-            <td><div class="accmeter"><span class="line"><i class="${row.accuracy >= 90 ? "" : row.accuracy >= 80 ? "mid" : "low"}" style="width:${Math.max(4, row.accuracy)}%"></i></span></div></td>
+            <td class="num right" data-label="Right">${Math.round(Number(row.accuracy))}%</td>
+            <td data-label="Usually">${e(usually(row, n))}</td>
           </tr>`).join("")}
         </tbody></table></div>
-        
+        ${rest > 0 ? `<div class="card-foot">The other ${noun(rest, "item")} ${rest === 1 ? "is" : "are"} right at least ${restFloor}% of the time.</div>` : ""}`
+        : `<div class="card-body muted small">No item has enough sales to score yet.</div>`}
       </section>
     </div>`;
   }
 
+  // SVG only draws the lines. HTML labels keep their fixed type size when
+  // the plot narrows, and non-scaling strokes stay two screen pixels wide.
   function lineChart(rows) {
     if (!rows || !rows.length) return `<p class="muted small">No closed days in this window yet.</p>`;
-    const W = 900, H = 240, P = 34;
+    const W = 900, H = 200;
     const max = Math.max(...rows.flatMap((r) => [Number(r.actual), Number(r.predicted)]), 1) * 1.08;
-    const x = (i) => P + (i * (W - P * 2)) / Math.max(1, rows.length - 1);
-    const y = (v) => H - P - (Number(v) / max) * (H - P * 2);
+    const x = (i) => 4 + (i * (W - 8)) / Math.max(1, rows.length - 1);
+    const y = (v) => H - 4 - (Number(v) / max) * (H - 8);
     const line = (key) => rows.map((r, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(r[key]).toFixed(1)}`).join(" ");
-    const grids = [0, 0.5, 1].map((f) => {
-      const yy = H - P - f * (H - P * 2);
-      return `<line class="grid" x1="${P}" y1="${yy}" x2="${W - P}" y2="${yy}"/>
-        <text class="axis-label" x="${P - 6}" y="${yy + 3}" text-anchor="end">${num(max * f)}</text>`;
-    }).join("");
-    const ticks = rows.filter((_, i) => i % Math.ceil(rows.length / 7) === 0)
-      .map((r) => `<text class="axis-label" x="${x(rows.indexOf(r))}" y="${H - P + 16}" text-anchor="middle">${dShort(r.date)}</text>`).join("");
-    return `<div class="linechart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Predicted against actual item units">
-      ${grids}${ticks}
-      <path class="predicted" d="${line("predicted")}"/>
-      <path class="actual" d="${line("actual")}"/>
-    </svg>
-    <div class="chart-key"><span><i class="k-actual"></i>Sold</span><span><i class="k-pred"></i>Called</span></div></div>`;
+    const grids = [0, 0.5, 1].map((f) => `<line class="grid" x1="0" y1="${y(max * f)}" x2="${W}" y2="${y(max * f)}"/>`).join("");
+    const last = rows[rows.length - 1];
+    return `<div class="linechart"><p class="plot-unit">Items a day</p>
+      <div class="plot-grid"><div class="plot-axis"><span>${num(max)}</span><span>${num(max / 2)}</span><span>0</span></div>
+        <div class="plot-area"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Expected in blue dashes against sold in black, items a day">
+          ${grids}<path class="predicted" d="${line("predicted")}"/><path class="actual" d="${line("actual")}"/>
+        </svg><i class="plot-point" style="left:${x(rows.length - 1) / W * 100}%;top:${y(last.actual) / H * 100}%"></i></div>
+        <div class="plot-dates"><span>${e(dShort(rows[0].date))}</span><span>${e(dShort(rows[Math.floor((rows.length - 1) / 2)].date))}</span><span>${e(dShort(last.date))}</span></div>
+      </div><div class="chart-key"><span><i class="k-actual"></i>Sold</span><span><i class="k-pred"></i>Expected</span></div>
+      <p class="plot-last">${e(dShort(last.date))}: ${num(last.actual)} sold against ${num(last.predicted)} expected.</p></div>`;
   }
 
   /* ---------- menu and recipes, under Settings ---------- */
@@ -3397,241 +3545,346 @@
   });
 
   /* ---------- one item, in full ---------- */
-  // Any item, however quiet. The point of the product is that the crème brûlée
-  // nobody orders gets the same treatment as the best seller.
-  async function openItemSheet(itemId) {
-    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-      <aside class="sheet wide"><div class="sheet-head"><div><h2>Reading the record</h2>
-</div>
-        <div style="margin-left:auto"><button class="icon-btn" data-do="close-layer">${icon("close")}</button></div></div>
-      <div class="sheet-body">${skeleton()}</div></aside>`;
+  // One sheet for any item, however quiet: how many to make and why, in the
+  // words a cook would use. The record behind the number sits behind one fold.
+  // The same item, date and data version paint from memory the second time.
+  function itemCacheKey(itemId, date) {
+    return `${S.locationId}:${itemId}:${date}:${S.pulse.version}`;
+  }
+
+  function forgetItem(itemId) {
+    S.itemCache = S.itemCache || {};
+    Object.keys(S.itemCache).forEach((key) => { if (key.includes(`:${itemId}:`)) delete S.itemCache[key]; });
+  }
+
+  // The name is known before the request: the row that was tapped carries
+  // it, or the make list does. "Loading" is the last resort.
+  function itemNameHint(itemId) {
+    const hint = S.sheetHint;
+    if (hint && hint.id === itemId && hint.name) return hint.name;
+    const row = ((S.data && S.data.items) || []).find((item) => item.item_id === itemId);
+    return row ? row.name : "";
+  }
+
+  function itemSheetShell(itemId, head, body, date) {
+    return `<div class="scrim" data-do="close-layer"></div>
+      <aside class="sheet item" role="dialog" aria-modal="true" aria-label="Item" data-item="${e(itemId)}" data-date="${e(date)}">
+        <div class="sheet-head"><div>${head}</div>
+          <button class="icon-btn" data-do="close-layer" aria-label="Close">${icon("close")}</button></div>
+        <div class="sheet-body">${body}</div>
+      </aside>`;
+  }
+
+  function itemSheetHead(p) {
+    return `<h2>${e(p.item.name)}</h2>
+      <p>${e(p.item.category)} · ${money(p.item.price, true)} · ${e(p.weekday)} ${e(dShort(p.date))}</p>`;
+  }
+
+  async function openItemSheet(itemId, name, date) {
+    S.itemCache = S.itemCache || {};
+    date = date || (S.sheetHint && S.sheetHint.id === itemId && S.sheetHint.date) || (S.view === "today" ? S.date : todayISO());
+    const location = S.locationId;
+    const key = itemCacheKey(itemId, date);
+    const cached = S.itemCache[key];
+    if (cached) { openLayer(itemSheetShell(itemId, itemSheetHead(cached), itemSheetBody(cached), date)); return; }
+    const label = name || itemNameHint(itemId);
+    openLayer(itemSheetShell(itemId, `<h2>${e(label || "Loading")}</h2><p>${label ? "Loading" : ""}</p>`, "", date));
+    const token = openLayer._seq;
     try {
-      const p = await API.get(`/api/item?location_id=${encodeURIComponent(S.locationId)}&item_id=${encodeURIComponent(itemId)}&date=${S.date}`);
-      layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-        <aside class="sheet wide">
-          <div class="sheet-head">
-            <div><h2>${e(p.item.name)}</h2>
-              <p>${e(p.item.category)} · ${money(p.item.price, true)} · ${e(p.weekday)} ${e(dShort(p.date))}</p></div>
-            <div style="margin-left:auto;display:flex;gap:6px">
-              <button class="btn sm" data-do="adjust" data-item="${e(p.item.id)}" data-name="${e(p.item.name)}" data-qty="${p.today.expected}">Set my own number</button>
-              <button class="icon-btn" data-do="close-layer">${icon("close")}</button></div>
-          </div>
-          <div class="sheet-body">${itemSheetBody(p)}</div>
-        </aside>`;
+      const p = await API.get(`/api/item?location_id=${encodeURIComponent(location)}&item_id=${encodeURIComponent(itemId)}&date=${date}`);
+      S.itemCache[key] = p;
+      if (token !== openLayer._seq || location !== S.locationId) return;
+      openLayer(itemSheetShell(itemId, itemSheetHead(p), itemSheetBody(p), date));
     } catch (error) {
-      toast(error.message, "error");
+      if (token !== openLayer._seq || location !== S.locationId) return;
+      toast(plainError(error), "error");
       closeLayer();
     }
   }
 
   function itemSheetBody(p) {
-    const t = p.today, prep = p.prep, dist = p.distribution, wp = p.weekday_profile;
-    const established = (p.drivers || []).filter((d) => d.verdict === "established");
-    const watching = (p.drivers || []).filter((d) => d.verdict === "watching");
-    const rejected = (p.drivers || []).filter((d) => d.verdict === "rejected");
+    const t = p.today || {}, prep = p.prep || {}, dist = p.distribution || {}, standing = p.standing || {};
+    const fresh = p.new_item === true || (Number(standing.history_days) || 0) < 7 || !Number(dist.days)
+      || prep.quantity === undefined || prep.quantity === null;
+    if (fresh) return `<section class="isec"><p class="lede">New item. No number yet; after a week of sales it gets one.</p></section>`;
 
-    return `<div class="stack">
-      <section class="tiles" style="grid-template-columns:repeat(4,minmax(0,1fr))">
-        ${tile("Make today", num(prep.quantity ?? t.expected),
-          (prep.quantity ?? t.expected) > t.expected
-            ? `The model expects <b>${num(t.expected)}</b> to sell. Make more than that, because running out costs more than throwing away.`
-            : `The model expects <b>${num(t.expected)}</b> to sell.`,
-          prep.fractile_percent ? `Covers ${prep.fractile_percent}% of the days that could happen` : "From the model")}
-        ${tile("A normal " + p.weekday, num(t.normal),
-          `<b>${t.difference >= 0 ? "+" : ""}${num(t.difference)}</b> against that today.`,
-          `Read off ${num(dist.days || 0)} comparable days`)}
-        ${tile("Honest range", `${num(dist.today_low ?? t.low)} to ${num(dist.today_high ?? t.high)}`,
-          `On a day like this one, the middle half lands between <b>${num(dist.today_p25 ?? t.low)}</b> and <b>${num(dist.today_p75 ?? t.high)}</b>.`,
-          `${e(dist.basis || "past days")} ran ${num(dist.lowest ?? 0)} to ${num(dist.highest ?? 0)}`)}
-        ${tile("Worth today", money(t.revenue),
-          `<b>${p.standing.revenue_share_percent}%</b> of takings over 90 days, ranked ${num(p.standing.revenue_rank)} of ${num(p.standing.of_items)}.`,
-          `${num(p.standing.units_90_days)} sold in the last 90 days`)}
-      </section>
+    const day = p.weekday || weekday(p.date);
+    const brief = ((S.data && S.data.items) || []).find((row) => row.item_id === p.item.id);
+    const override = t.override && t.override.quantity !== undefined && t.override.quantity !== null ? t.override : null;
+    const expected = Math.round(Number(t.model_expected ?? (brief && brief.model_expected) ?? t.expected ?? 0));
+    const suggested = Math.round(Number(prep.quantity ?? expected));
+    const make = override ? Math.round(Number(override.quantity)) : suggested;
+    const normal = Math.round(Number(t.normal ?? 0));
+    const low = Math.round(Number(dist.today_low ?? t.low ?? 0));
+    const high = Math.round(Number(dist.today_high ?? t.high ?? 0));
+    const canAdjust = p.date >= todayISO();
+    const when = p.date === todayISO() ? "today" : `on ${dShort(p.date)}`;
+    const share = Number(prep.cost_share_percent);
+    const price = Number(p.item.price || 0);
+    const costs = Number.isFinite(share) && price > 0
+      ? { waste: price * share / 100, miss: price * (100 - share) / 100 } : null;
+    const lastSale = p.last_sale_date ? String(p.last_sale_date).slice(0, 10) : "";
+    const stale = lastSale && addDays(lastSale, 2) < p.date;
 
-      ${prep.levels ? `<section class="card">
-        <div class="card-head"><div><h2>How many to make</h2>
-          <p>${e(prep.reason)}</p></div></div>
-        <div class="tablewrap"><table class="dt" style="min-width:600px"><thead><tr>
-          <th>If you make</th><th class="num right">Chance you run out</th>
-          <th class="num right">Typical left over</th><th class="num right">Typical missed sales</th>
-          <th class="num right">Cost of being wrong</th></tr></thead><tbody>
-          ${prep.levels.map((l) => `<tr class="${l.label === "This number" ? "highlight" : ""}">
-            <td class="name"><b>${num(l.quantity)}</b>${l.label === "This number" ? `<small>what we suggest</small>` : `<small>${e(l.label.toLowerCase())}</small>`}</td>
-            <td class="num right ${l.sell_out_percent > 40 ? "down" : ""}">${l.sell_out_percent}%</td>
-            <td class="num right">${l.typical_leftover}</td>
-            <td class="num right">${l.typical_missed}</td>
-            <td class="num right">${money(l.cost_of_being_wrong, true)}</td></tr>`).join("")}
-        </tbody></table></div>
-        <div class="card-foot">Worked from ${num(dist.days || 0)} comparable days. Leftovers are costed at food cost, missed sales at lost margin.</div>
-      </section>` : ""}
+    const setBy = override
+      ? `${override.updated_by ? `${e(override.updated_by)} set` : "You set"} ${num(make)}${setWhen(override.updated_at)}${override.reason ? `: ${e(override.reason)}` : ""}. Quantify would have said ${num(suggested)}.`
+      : "";
 
-      <section class="card">
-        <div class="card-head"><div><h2>Which days it belongs to</h2>
-          <p>${wp.matters
-            ? `The day of the week explains about ${wp.explains_percent}% of the swing in this item. ${wp.busiest_day}s run ${wp.spread_percent}% ahead of ${wp.quietest_day}s.`
-            : "The day of the week does not explain this item's swing, which is unusual."}</p></div>
-          <div class="spacer"></div>
-          <span class="tag ${wp.matters ? "up" : "plain"}">${e(wp.strength)} evidence</span></div>
-        <div class="tablewrap"><table class="dt" style="min-width:600px"><thead><tr>
-          <th>Day</th><th class="num right">Typical</th><th class="num right">Middle half</th>
-          <th class="num right">Quietest</th><th class="num right">Busiest</th>
-          <th class="num right">Against all days</th><th class="num right">Days seen</th></tr></thead><tbody>
-          ${wp.days.filter((d) => d.days).map((d) => `<tr class="${d.weekday === p.weekday ? "highlight" : ""}">
-            <td class="name"><b>${e(d.weekday)}</b>${d.weekday === p.weekday ? `<small>today</small>` : ""}</td>
-            <td class="num right plan">${d.typical}</td>
-            <td class="num right muted">${d.low} to ${d.high}</td>
-            <td class="num right muted">${d.quietest}</td>
-            <td class="num right muted">${d.busiest}</td>
-            <td class="num right ${d.vs_all_days_percent >= 0 ? "up" : "down"}">${pct(d.vs_all_days_percent)}</td>
-            <td class="num right muted">${d.days}</td></tr>`).join("")}
-        </tbody></table></div>
-      </section>
-
-      <section class="card">
-        <div class="card-head"><div><h2>What actually moves it</h2>
-</div></div>
-        ${(p.drivers || []).length ? `<div class="card-body" style="padding-bottom:0"><p class="lede">${
-          established.filter((d) => d.matters).length
-            ? `Of ${p.drivers.length} conditions tested, ${established.length} hold up, and ${established.filter((d) => d.matters).length === 1 ? "one is" : `${established.filter((d) => d.matters).length} are`} big enough to change what you make.`
-            : established.length
-              ? `Of ${p.drivers.length} conditions tested, ${established.length === 1 ? "one holds" : `${established.length} hold`} up, but ${established.length === 1 ? "it moves" : "they move"} this item by less than one on a typical day. Nothing here should change your number today.`
-              : `${p.drivers.length} conditions tested. None of them hold up. What this item does is mostly about the day of the week, not the weather or the calendar.`
-        }</p></div>` : ""}
-        ${established.length ? `<div class="tablewrap"><table class="dt" style="min-width:660px"><thead><tr>
-          <th>Condition</th><th class="num right">Effect</th><th class="num right">Today</th>
-          <th class="num right">Chance it is noise</th><th>Evidence</th></tr></thead><tbody>
-          ${established.map((d) => `<tr>
-            <td class="name"><b>${e(d.label)}</b><small>${e(d.phrase)}</small></td>
-            <td class="num right ${d.effect_percent >= 0 ? "up" : "down"}">${d.effect_percent >= 0 ? "+" : ""}${d.effect_percent}%</td>
-            <td class="num right ${d.today_effect_units >= 0 ? "up" : "down"}">${d.today_effect_units >= 0 ? "+" : ""}${d.today_effect_units}</td>
-            <td class="num right">${formatP(d.q)}</td>
-            <td class="small muted">${e(d.evidence)}${d.provisional ? " · thin sample" : ""}${d.note ? `<br><b>${e(d.note)}</b>` : ""}</td></tr>`).join("")}
-        </tbody></table></div>`
-        : `<div class="empty">${icon("empty")}<b>Nothing outside the restaurant moves this item</b>
-             <span>Once the day of the week is accounted for, no condition tested here changes it enough to be sure of.</span></div>`}
-        ${watching.length ? `<div class="card-body" style="padding-top:0">
-          <p class="small muted" style="margin-bottom:8px">Leaning one way, not proven. Not enough to act on.</p>
-          ${watching.map((d) => `<p class="small muted" style="margin-bottom:6px"><b>${e(d.label)}</b> looks like ${d.effect_percent >= 0 ? "+" : ""}${d.effect_percent}% ${e(d.phrase)}, but the chance of seeing that from noise alone is ${formatP(d.q)}. ${e(d.note)}</p>`).join("")}
-        </div>` : ""}
-        ${rejected.length ? `<details class="context-disclosure" style="margin:0 18px 16px">
-          <summary>${rejected.length} conditions tested that did not hold up</summary>
-          <div class="context-detail">
-            ${rejected.map((d) => `<p><b>${e(d.label)}</b>: ${d.effect_percent >= 0 ? "+" : ""}${d.effect_percent}% per unit, but the chance of seeing that from noise alone is ${formatP(d.q)}. ${e(d.evidence)}.</p>`).join("")}
-          </div></details>` : ""}
-      </section>
-
-      <div class="brief-grid lower-grid" style="border:0">
-        <section class="card">
-          <div class="card-head"><div><h2>Has it changed?</h2></div></div>
-          <div class="card-body">
-            ${p.trend.recent_average !== null && p.trend.recent_average !== undefined ? `
-              <p class="lede">The last four weeks averaged <b>${p.trend.recent_average}</b> a day against <b>${p.trend.prior_average}</b> in the four weeks before.
-              ${p.trend.moved
-                ? `That is a real move: a difference this size would come up by chance about ${formatP(p.trend.p)} of the time.`
-                : `That is not a real move. A gap this size is ordinary week-to-week variation.`}</p>
-              ${p.trend.same_weeks_last_year ? `<p class="lede" style="margin-top:10px">The same weeks last year averaged <b>${p.trend.same_weeks_last_year}</b>.</p>` : ""}
-              ${p.trend.long_run ? `<p class="small muted" style="margin-top:10px">Over the whole record it is moving ${p.trend.long_run.per_year >= 0 ? "up" : "down"} about ${Math.abs(p.trend.long_run.per_year)} a day per year, ${e(p.trend.long_run.strength)} evidence.</p>` : ""}
-            ` : `<p class="muted small">Not enough history yet.</p>`}
-          </div>
-        </section>
-
-        <section class="card">
-          <div class="card-head"><div><h2>When it sells</h2></div></div>
-          <div class="card-body">
-            <p class="lede">Busiest at <b>${e(p.hourly.busiest || "no clear hour")}</b>, which takes ${p.hourly.busiest_share}% of the day.
-            Half of them are gone by <b>${e(p.hourly.half_sold_by || "the end of service")}</b>.</p>
-            ${hourShape(p.hourly)}
-            <p class="small muted" style="margin-top:10px">Averaged over the last ${p.hourly.window_days} days.</p>
-          </div>
-        </section>
+    const top = `<section class="isec">
+      <div class="isec-head"><h2>${canAdjust ? "Make" : "Planned"} ${num(make)} ${e(when)}</h2>
+        ${canAdjust ? `<button class="btn sm" data-do="adjust" data-date="${e(p.date)}" data-item="${e(p.item.id)}" data-name="${e(p.item.name)}" data-qty="${make}" data-expected="${expected}" data-suggested="${suggested}" data-override="${override ? e(override.quantity) : ""}" data-reason="${override ? e(override.reason || "") : ""}">Adjust</button>` : ""}
       </div>
+      ${override
+        ? `<p class="lede">${setBy}</p>
+           ${canAdjust ? `<div class="btn-row isec-row"><button class="btn sm ghost" data-do="clear-adjust" data-item="${e(p.item.id)}">Use ${num(suggested)}</button></div>` : ""}`
+        : `<p class="lede">A normal ${e(day)} sells ${num(normal)}. ${canAdjust ? "Expected" : "The call was"} ${num(expected)} ${e(when)}. With ${num(make)}, you run out ${runOutWords(prep.sell_out_percent)}; anywhere from ${num(low)} to ${num(high)} would still be a normal ${e(day)}.</p>`}
+      ${costs ? `<p class="small muted isec-note">Wasting one costs about ${money(costs.waste, true)}. Missing a sale costs about ${money(costs.miss, true)}.</p>` : ""}
+      ${stale ? `<p class="small muted isec-note">Register data stops at ${e(dShort(lastSale))}.</p>` : ""}
+    </section>`;
 
-      ${p.related.length ? `<section class="card">
-        <div class="card-head"><div><h2>What it moves with</h2>
-          <p>A negative pairing means people are choosing between them.</p></div></div>
-        <div class="tablewrap"><table class="dt" style="min-width:560px"><thead><tr>
-          <th>Item</th><th>Relationship</th><th class="num right">Strength</th><th class="num right">Days compared</th></tr></thead><tbody>
-          ${p.related.map((r) => `<tr class="clickable" data-item-sheet="${e(r.item_id)}">
-            <td class="name"><b>${e(r.name)}</b></td>
-            <td class="${r.r > 0 ? "up" : "down"}">${e(r.kind)}</td>
-            <td class="num right">${Math.abs(r.r)}</td>
-            <td class="num right muted">${num(r.days)}</td></tr>`).join("")}
-        </tbody></table></div>
-        <div class="card-foot">Strength runs from 0 to 1. Anything above about 0.4 is a strong pairing for daily food sales.</div>
-      </section>` : ""}
+    const levels = Array.isArray(prep.levels) ? prep.levels : [];
+    const picked = ["Ten fewer", "This number", "Ten more"].map((label) => levels.find((l) => l.label === label)).filter(Boolean);
+    const fewerOrMore = picked.length === 3 ? `<section class="isec"><h2>If you make fewer or more</h2>
+      <table class="dt tight"><thead><tr><th>If you make</th><th>You run out</th><th class="num right">Costs you about</th></tr></thead><tbody>
+        ${picked.map((l) => `<tr class="${l.label === "This number" ? "highlight" : ""}">
+          <td class="num">${num(l.quantity)}</td><td>${e(runOutWords(l.sell_out_percent))}</td>
+          <td class="num right">${money(l.cost_of_being_wrong)}</td></tr>`).join("")}
+      </tbody></table></section>` : "";
 
-      <div class="brief-grid lower-grid" style="border:0">
-        ${p.accuracy.days ? `<section class="card">
-          <div class="card-head"><div><h2>How well we call this one</h2></div></div>
-          <div class="card-body">
-            <p class="lede">Over the last ${noun(p.accuracy.days, "scored day")} this item has been called <b>${p.accuracy.accuracy}%</b> right,
-            missing by <b>${p.accuracy.average_miss}</b> a day on average. Lean: ${e(p.accuracy.bias_direction)}.</p>
-            ${p.accuracy.sold_out_days ? `<p class="lede down" style="margin-top:8px">It ran out during service on ${noun(p.accuracy.sold_out_days, "of those days")}.</p>` : ""}
-          </div>
-        </section>` : ""}
+    const wp = p.weekday_profile || {};
+    const days = (wp.days || []).filter((d) => d.days);
+    const week = days.length ? `<section class="isec"><h2>Through the week</h2>
+      <div class="wk">${days.map((d) => `<div class="wk-day ${d.weekday === day ? "on" : ""}"><span>${e(String(d.weekday).slice(0, 3))}</span><b>${num(d.typical)}</b></div>`).join("")}</div>
+      <p class="small muted">${e(weekSentence(wp, days))}</p></section>` : "";
 
-        ${p.unusual.length ? `<section class="card">
-          <div class="card-head"><div><h2>Days it behaved oddly</h2>
-            <p>Days this item did something its own record cannot account for.</p></div></div>
-          <div class="card-body" style="display:grid;gap:9px">
-            ${p.unusual.map((u) => `<div style="display:grid;grid-template-columns:96px 1fr auto;gap:12px;align-items:baseline;font-size:12.5px">
-              <b>${e(dShort(u.date))}</b>
-              <span class="muted">${e(u.weekday)}, sold ${num(u.sold)}. ${e(u.note)}</span>
-              <span class="${u.sigma >= 0 ? "up" : "down"} tnum">${u.above_normal >= 0 ? "+" : ""}${u.above_normal}</span>
-            </div>`).join("")}
-          </div>
-        </section>` : ""}
-      </div>
+    const hourly = p.hourly || {};
+    const hourPart = (hourly.hours || []).length ? `<section class="isec"><h2>When it sells</h2>
+      <p class="lede">${e(itemHourSentence(hourly))}</p>${hourShape(hourly)}</section>` : "";
 
-      ${p.composition ? `<section class="card">
-        <div class="card-head"><div><h2>What goes into it</h2><p>${e(p.composition.summary)}</p></div>
-          <div class="spacer"></div><span class="tag ${p.composition.confidence === "high" ? "up" : "plain"}">${e(p.composition.confidence)} confidence</span></div>
-        <div class="tablewrap"><table class="dt" style="min-width:520px"><thead><tr>
-          <th>Part</th><th>Role</th><th class="num right">Per ${e(p.item.unit)}</th>
-          <th class="num right">For ${num(prep.quantity ?? p.today.expected)} today</th></tr></thead><tbody>
-          ${p.composition.components.map((c) => `<tr>
-            <td class="name"><b>${e(c.name)}</b></td>
-            <td><span class="rolechip"><i class="${roleClass(c.role)}"></i>${e(c.role)}</span></td>
-            <td class="num right">${e(c.quantity || "not stated")}</td>
-            <td class="num right">${e(scaleQuantity(c.quantity, prep.quantity ?? p.today.expected))}</td></tr>`).join("")}
-        </tbody></table></div>
-      </section>` : ""}
+    const comp = p.composition;
+    const parts = comp && Array.isArray(comp.components) ? comp.components : [];
+    const confirmed = !!(comp && (comp.confirmed === true || comp.status === "confirmed" || comp.source === "confirmed"));
+    const menuLink = `<a href="#" data-stab="menu">Settings > Menu</a>`;
+    const prepFor = `<section class="isec"><h2>Prep for ${num(make)}</h2>
+      ${parts.length ? `<table class="dt tight"><thead><tr><th>Part</th><th>Each</th><th class="num right">For ${num(make)}</th></tr></thead><tbody>
+        ${parts.map((c) => { const total = scaleQuantity(c.quantity, make); return `<tr>
+          <td class="name">${e(c.name)}</td><td class="muted">${e(c.quantity || "not stated")}</td>
+          <td class="num right">${total ? e(total) : `<span class="muted">not counted</span>`}</td></tr>`; }).join("")}
+        </tbody></table>
+        <p class="small muted">${confirmed ? `Confirmed in ${menuLink}.` : `Read from the till label. Confirm it in ${menuLink}.`}</p>`
+      : `<p class="lede">No recipe yet. Add one in ${menuLink}.</p>`}
+    </section>`;
 
-      
-    </div>`;
+    const tr = p.trend || {};
+    const moved = tr.moved === true && tr.recent_average !== null && tr.recent_average !== undefined && Number(tr.prior_average) > 0;
+    const trendPart = moved ? `<section class="isec"><h2>${Number(tr.difference) < 0 ? "It has slowed down" : "It has picked up"}</h2>
+      <p class="lede">The last ${noun(tr.recent_days, "day")} averaged ${num(tr.recent_average)} a day against ${num(tr.prior_average)} in ${Number(tr.prior_days) >= 26 ? "the four weeks before" : `the ${noun(tr.prior_days, "day")} before that`}.${tr.same_weeks_last_year ? ` The same weeks last year averaged ${num(tr.same_weeks_last_year)}.` : ""}</p></section>` : "";
+
+    const paragraphs = [
+      driversPara(p.drivers || []), callsPara(p.accuracy || {}), alongsidePara(p.related || []),
+      oddDaysPara(p.unusual || [], p.date), standingPara(standing),
+    ].filter(Boolean);
+    const more = paragraphs.length ? `<details class="fold"><summary>More about this item</summary>
+      <div class="fold-body">${paragraphs.map((text) => `<p>${text}</p>`).join("")}</div></details>` : "";
+
+    return top + fewerOrMore + week + hourPart + prepFor + trendPart + more;
   }
 
-  // Multiply a per-unit amount up to today's batch when the amount is numeric.
-  function scaleQuantity(quantity, batch) {
-    if (!quantity) return "";
-    const match = String(quantity).match(/([\d.]+)\s*(g|kg|oz|lb|ml|l|cup|cups|slice|slices|piece|pieces|patty|patties|bun|buns|egg|eggs|set|sets|portion|portions|box|boxes|bag|bags|carton|cartons|scoop|scoops|coat|coats|pinch|plate|plates|wrap|wraps|sleeve|sleeves|ball|balls|lid|lids|straw|straws)\b/i);
-    if (!match) return "";
-    const total = Number(match[1]) * Number(batch || 0);
-    if (!Number.isFinite(total) || total <= 0) return "";
-    let unit = match[2].toLowerCase();
+  // "1 day in 3" reads better than 33%, and it is what a cook will repeat.
+  function runOutWords(percent) {
+    const value = Number(percent);
+    if (!Number.isFinite(value)) return "";
+    if (value < 3) return "almost never";
+    if (value > 97) return "almost every day";
+    const options = [[1, 2], [1, 3], [2, 3], [1, 4], [3, 4], [1, 5], [2, 5], [3, 5], [4, 5], [1, 6], [5, 6],
+      [1, 8], [7, 8], [1, 10], [9, 10], [1, 20], [19, 20]];
+    let best = options[0];
+    options.forEach((option) => {
+      if (Math.abs(option[0] / option[1] * 100 - value) < Math.abs(best[0] / best[1] * 100 - value)) best = option;
+    });
+    return `${best[0]} ${best[0] === 1 ? "day" : "days"} in ${best[1]}`;
+  }
+
+  function setWhen(updatedAt) {
+    const when = String(updatedAt || "").slice(0, 10);
+    if (!when) return "";
+    return when === todayISO() ? " today" : ` on ${dShort(when)}`;
+  }
+
+  function weekSentence(wp, days) {
+    const best = days.find((d) => d.weekday === wp.busiest_day);
+    const worst = days.find((d) => d.weekday === wp.quietest_day);
+    if (!best || !worst || !Number(worst.typical)) return "";
+    const ratio = Number(best.typical) / Number(worst.typical);
+    if (ratio >= 2.5) return `${best.weekday}s sell more than twice what ${worst.weekday}s do.`;
+    if (ratio >= 1.75) return `${best.weekday}s sell almost twice what ${worst.weekday}s do.`;
+    if (ratio >= 1.12) return `${best.weekday}s sell about ${num(best.typical - worst.typical)} more than ${worst.weekday}s.`;
+    return "It sells about the same every day of the week.";
+  }
+
+  // The rush: the hours around the peak that carry at least six tenths of it.
+  // hourLabel is the shared helper from the onboarding block.
+  function rushWords(hours) {
+    let peakAt = 0;
+    hours.forEach((row, index) => { if (row.share_percent > hours[peakAt].share_percent) peakAt = index; });
+    const floor = hours[peakAt].share_percent * 0.6;
+    let a = peakAt, b = peakAt;
+    while (a > 0 && hours[a - 1].share_percent >= floor && hours[a - 1].hour === hours[a].hour - 1) a -= 1;
+    while (b < hours.length - 1 && hours[b + 1].share_percent >= floor && hours[b + 1].hour === hours[b].hour + 1) b += 1;
+    const start = Number(hours[a].hour) % 24, end = (Number(hours[b].hour) + 1) % 24;
+    if (a === b) return hourLabel(start);
+    const from = hourLabel(start), to = hourLabel(end);
+    return from.slice(-2) === to.slice(-2) ? `${from.slice(0, -3)} to ${to}` : `${from} to ${to}`;
+  }
+
+  function itemHourSentence(hourly) {
+    const hours = hourly.hours || [];
+    const half = hourly.half_sold_by ? `Half are gone by ${hourly.half_sold_by}. ` : "";
+    return `${half}The rush is ${rushWords(hours)}.`;
+  }
+
+  // Whole items per hour, with the busiest hour picked out in green.
+  function hourShape(hourly) {
+    const rows = (hourly && hourly.hours) || [];
+    if (!rows.length) return "";
+    const peak = rows.reduce((best, row) => (row.share_percent > best.share_percent ? row : best), rows[0]);
+    return `<p class="shape-unit">Items per hour · Green marks the busiest hour</p><div class="shape">${rows.map((row) => `<div class="shape-col ${row === peak ? "peak" : ""}">
+        <b class="shape-value">${num(row.per_day ?? row.units ?? 0)}</b>
+        <div class="shape-track"><i style="--h:${Math.round((row.share_percent / Math.max(1, peak.share_percent)) * 100)}%;${Number(row.share_percent) ? "" : "min-height:0"}"></i></div>
+        <span class="shape-lab">${e(String(row.label || "").replaceAll(" ", "").toLowerCase())}</span></div>`).join("")}</div>`;
+  }
+
+  const listWords = (items) => (items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`);
+
+  function driversPara(drivers) {
+    if (!drivers.length) return "";
+    const live = drivers.filter((d) => d.matters && Math.abs(Math.round(Number(d.today_effect_units) || 0)) >= 1);
+    if (!live.length) return "Weather, daylight, holidays and what is on nearby were all checked. None of them changes this item by more than one a day.";
+    return live.slice(0, 3).map((d) => {
+      const units = Math.round(Number(d.today_effect_units));
+      return `${e(d.label)} ${units > 0 ? "adds" : "takes off"} about ${num(Math.abs(units))} today.`;
+    }).join(" ");
+  }
+
+  function callsPara(acc) {
+    if (!acc || !acc.days) return "";
+    const lean = /low/i.test(acc.bias_direction || "") ? "usually low"
+      : /high/i.test(acc.bias_direction || "") ? "usually high" : "with no steady lean";
+    const miss = Math.round(Number(acc.average_miss) || 0);
+    return `Over the last ${noun(acc.days, "day")} the number for this item has been within about ${num(miss)} a day, ${lean}.`
+      + (acc.sold_out_days ? ` It ran out on ${noun(acc.sold_out_days, "of those days")}.` : " It has not run out.");
+  }
+
+  function alongsidePara(related) {
+    const link = (r) => `<button class="textlink" data-item-sheet="${e(r.item_id)}" data-name="${e(r.name)}">${e(r.name)}</button>`;
+    const rises = related.filter((r) => Number(r.r) > 0).slice(0, 3);
+    const against = related.filter((r) => Number(r.r) < 0).slice(0, 2);
+    const parts = [];
+    if (rises.length) parts.push(`${listWords(rises.map(link))} ${rises.length === 1 ? "rises and falls" : "rise and fall"} with it.`);
+    against.forEach((r) => parts.push(`People pick between it and ${link(r)}.`));
+    return parts.join(" ");
+  }
+
+  function oddCause(note) {
+    const text = String(note || "").trim().replace(/\.$/, "");
+    if (!text || /nothing in the (data|record)/i.test(text)) return "";
+    const lower = text.charAt(0).toLowerCase() + text.slice(1);
+    if (/rain/i.test(text)) return `, in ${lower}`;
+    if (/nearby/i.test(text)) return ", with something big on nearby";
+    if (/ran out/i.test(text)) return ", and it ran out during service";
+    return `, ${lower}`;
+  }
+
+  // At most three days that did something unusual, each with a cause.
+  function oddDaysPara(unusual, dateISO) {
+    const rows = unusual.filter((u) => oddCause(u.note))
+      .sort((a, b) => Math.abs(Number(b.sigma) || 0) - Math.abs(Number(a.sigma) || 0)).slice(0, 3);
+    if (!rows.length) return "";
+    const year = String(dateISO || "").slice(0, 4);
+    return rows.map((u) => {
+      const units = Math.round(Number(u.above_normal) || 0);
+      const sameYear = String(u.date).slice(0, 4) === year;
+      const when = dFmt(u.date, sameYear
+        ? { weekday: "short", month: "short", day: "numeric" }
+        : { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+      return `${e(when)} sold ${num(u.sold)}, about ${num(Math.abs(units))} ${units >= 0 ? "more" : "fewer"} than a normal ${e(u.weekday)}${e(oddCause(u.note))}.`;
+    }).join(" ");
+  }
+
+  function standingPara(standing) {
+    if (!standing || !standing.of_items || standing.revenue_share_percent === undefined) return "";
+    const share = Math.round(Number(standing.revenue_share_percent) || 0);
+    const rank = Number(standing.revenue_rank);
+    return `About ${share}% of takings over the last 90 days, ${rank === 1 ? `the biggest seller of ${num(standing.of_items)}` : `ranked ${num(rank)} of ${num(standing.of_items)}`}.`;
+  }
+
+  // Multiplies a per-item amount up to the batch. A range stays a range
+  // ("1 to 2 patties" for 81 is "81 to 162 patties"), a weight climbs a unit
+  // when it passes one, and an amount with no number stays blank.
+  const COUNTABLE = { slice: "slices", piece: "pieces", patty: "patties", bun: "buns", egg: "eggs",
+    set: "sets", portion: "portions", box: "boxes", bag: "bags", carton: "cartons", scoop: "scoops",
+    coat: "coats", plate: "plates", wrap: "wraps", sleeve: "sleeves", ball: "balls", lid: "lids",
+    straw: "straws", cup: "cups", pinch: "pinches", leaf: "leaves", basket: "baskets", tray: "trays",
+    sheet: "sheets", shot: "shots", pump: "pumps", dash: "dashes", handful: "handfuls", strip: "strips",
+    rasher: "rashers", fillet: "fillets", breast: "breasts", thigh: "thighs", wing: "wings" };
+
+  function scaledUnit(total, unitText) {
+    let unit = String(unitText || "").toLowerCase().trim();
     let value = total;
-    if (unit === "g" && total >= 1000) { value = total / 1000; unit = "kg"; }
-    if (unit === "ml" && total >= 1000) { value = total / 1000; unit = "l"; }
-    if (unit === "oz" && total >= 16) { value = total / 16; unit = "lb"; }
-    const rounded = value >= 100 ? Math.round(value) : Math.round(value * 10) / 10;
-    // Weights and volumes stay as they are; countable things take a plural.
-    const countable = { slice: "slices", piece: "pieces", patty: "patties", bun: "buns", egg: "eggs",
-      set: "sets", portion: "portions", box: "boxes", bag: "bags", carton: "cartons", scoop: "scoops",
-      coat: "coats", plate: "plates", wrap: "wraps", sleeve: "sleeves", ball: "balls", lid: "lids",
-      straw: "straws", cup: "cups" };
-    if (rounded !== 1 && countable[unit]) unit = countable[unit];
-    return `${rounded.toLocaleString()} ${unit}`;
+    const words = unit.split(/\s+/);
+    const first = words[0] || "";
+    if (first === "g" && total >= 1000) { value = total / 1000; unit = "kg"; }
+    else if (first === "ml" && total >= 1000) { value = total / 1000; unit = "l"; }
+    else if (first === "oz" && total >= 16) { value = total / 16; unit = "lb"; }
+    else if (words.length === 1) {
+      const singular = Object.keys(COUNTABLE).find((key) => first === key || first === COUNTABLE[key]);
+      if (singular) unit = Math.round(value) === 1 ? singular : COUNTABLE[singular];
+    }
+    const rounded = value >= 10 ? Math.round(value) : Math.round(value * 10) / 10;
+    return { value: rounded.toLocaleString("en-US"), unit };
   }
 
-  function formatP(p) {
-    const value = Number(p);
-    if (!Number.isFinite(value)) return "unknown";
-    if (value < 0.0001) return "under 1 in 10,000";
-    if (value < 0.001) return "about 1 in 1,000";
-    if (value < 0.01) return `about 1 in ${Math.round(1 / value)}`;
-    if (value < 0.2) return `about 1 in ${Math.round(1 / value)}`;
-    return `${Math.round(value * 100)}%`;
+  function scaleQuantity(quantity, batch) {
+    const text = String(quantity || "").trim();
+    const match = text.match(/^(?:about|roughly|around)?\s*([\d.]+)(?:\s*(?:to|-)\s*([\d.]+))?\s*(.*)$/i);
+    const count = Number(batch || 0);
+    if (!match || !count || /share/i.test(match[3])) return "";
+    const lo = Number(match[1]) * count;
+    const hi = match[2] ? Number(match[2]) * count : null;
+    if (!Number.isFinite(lo) || lo <= 0) return "";
+    const a = scaledUnit(lo, match[3]);
+    if (hi === null || !Number.isFinite(hi) || hi <= lo) return `${a.value} ${a.unit}`.trim();
+    const b = scaledUnit(hi, match[3]);
+    return a.unit === b.unit ? `${a.value} to ${b.value} ${b.unit}`.trim() : `${a.value} ${a.unit} to ${b.value} ${b.unit}`.trim();
   }
+
+  // Region-local wiring. The tapped row lends its name to the loading state,
+  // Adjust from the sheet asks for the sheet back, a link to Settings closes
+  // the sheet first, and the tickets fold loads its page when opened.
+  document.addEventListener("click", (event) => {
+    const opener = event.target.closest("[data-item-sheet]");
+    if (opener) {
+      const cell = opener.tagName === "TR" ? opener.querySelector("td.name b") : null;
+      const name = opener.dataset.name || (cell ? cell.textContent : "") || "";
+      const context = opener.closest(".sheet[data-date]");
+      S.sheetHint = { id: opener.dataset.itemSheet, name: String(name).trim(),
+        date: opener.dataset.date || (context && context.dataset.date) || (S.view === "today" ? S.date : todayISO()) };
+    }
+    const moreTickets = event.target.closest("[data-tickets-more]");
+    if (moreTickets) {
+      const box = moreTickets.closest("details[data-tickets]");
+      if (box) loadTickets(box, { before: moreTickets.dataset.before, skip: moreTickets.dataset.skip });
+      return;
+    }
+    const sheet = event.target.closest(".sheet.item");
+    if (!sheet) return;
+    if (event.target.closest("a[data-stab]")) closeLayer();
+  }, true);
+
+  document.addEventListener("toggle", (event) => {
+    const box = event.target;
+    if (box && box.matches && box.matches("details[data-tickets]") && box.open && !box.dataset.loaded) loadTickets(box, null);
+  }, true);
 
   /* ---------- first run tutorial ---------- */
   // Five stops. Each one lands on a real part of the real product with the
@@ -3851,78 +4104,159 @@
     layer.insertAdjacentHTML("afterbegin", tourFrame(cut, 8));
   }
   /* ---------- sheets ---------- */
+  // One closed day: what sold against what was expected, where the call
+  // missed, and the tickets behind it, loaded only when asked for.
+  function daySheetShell(dateISO, sub, body) {
+    return `<div class="scrim" data-do="close-layer"></div>
+      <aside class="sheet day" role="dialog" aria-modal="true" aria-label="Day" data-date="${e(dateISO)}">
+        <div class="sheet-head"><div><h2>${e(dLong(dateISO))}</h2><p>${sub}</p></div>
+          <button class="icon-btn" data-do="close-layer" aria-label="Close">${icon("close")}</button></div>
+        <div class="sheet-body">${body}</div>
+      </aside>`;
+  }
+
   async function openDaySheet(dateISO) {
-    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-      <aside class="sheet"><div class="sheet-head"><div><h2>${e(dLong(dateISO))}</h2><p>Loading the day</p></div>
-      <div style="margin-left:auto"><button class="icon-btn" data-do="close-layer">${icon("close")}</button></div></div>
-      <div class="sheet-body">${skeleton()}</div></aside>`;
+    openLayer(daySheetShell(dateISO, "Loading", ""));
+    const token = openLayer._seq, location = S.locationId;
     try {
-      const d = await API.get(`/api/history/day?location_id=${encodeURIComponent(S.locationId)}&date=${dateISO}`);
-      const r = d.review || {};
-      const acc = d.accuracy;
-      const maxHour = Math.max(...(d.hourly || []).flatMap((h) => [h.actual, h.predicted]), 1);
-      layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-        <aside class="sheet">
-          <div class="sheet-head">
-            <div><h2>${e(dLong(dateISO))}</h2><p>${e(d.weekday)} · ${num(d.orders)} orders · ${money(d.sales)}</p></div>
-            <div style="margin-left:auto;display:flex;gap:6px">
-              <button class="btn sm" data-open-date="${dateISO}" data-do="close-layer">Open the plan</button>
-              <button class="icon-btn" data-do="close-layer">${icon("close")}</button></div>
-          </div>
-          <div class="sheet-body">
-            <section class="card"><div class="card-body">
-              <div class="eyebrow">How the call went</div>
-              <h3 style="margin-top:8px;font-size:16px;line-height:1.4">${e(r.headline || "")}</h3>
-              <p class="lede" style="margin-top:10px">${e(r.where_error_sat || "")}</p>
-              <p class="lede" style="margin-top:8px">${e(r.likely_reason || "")}</p>
-              <p class="lede" style="margin-top:8px"><b>${e(r.matters || "")}</b></p>
-              ${acc !== null ? `<div class="accmeter" style="margin-top:14px">
-                <div class="top"><b>${Math.round(acc)}% per item</b><small>${num(d.predicted_units)} called, ${num(d.units)} sold</small></div>
-                <div class="line"><i class="${acc >= 90 ? "" : acc >= 80 ? "mid" : "low"}" style="width:${Math.max(4, acc)}%"></i></div></div>` : ""}
-            </div></section>
-
-            <section class="tiles" style="grid-template-columns:repeat(${d.costs ? 3 : 2},minmax(0,1fr))">
-              ${tile("Rang up", money(d.sales), `<b>${num(d.units)}</b> items across <b>${num(d.orders)}</b> orders.`, `Average order ${money(d.average_order, true)}`)}
-              ${d.costs ? tile("Left after costs", money(d.costs.left_after_costs),
-                `<b>${money(d.costs.cogs)}</b> in food and <b>${money(d.costs.labour)}</b> in wages came out of that${d.costs.other ? `, plus <b>${money(d.costs.other)}</b> fixed` : ""}.`,
-                `About ${d.costs.margin_percent}% of net sales`) : ""}
-              ${tile("Called", d.predicted_sales !== null ? money(d.predicted_sales) : "Not scored", d.predicted_units !== null ? `<b>${num(d.predicted_units)}</b> items expected.` : "This day has not been scored yet.", `Called the day before`)}
-            </section>
-
-            ${(d.hourly || []).length ? `<section class="card">
-              <div class="card-head"><div><h2>Hour by hour</h2><p>Solid is what sold. The outline is what was called.</p></div></div>
-              <div class="card-body"><div class="hours">${d.hourly.map((h) => `
-                <div class="hourcol" title="${clock(String(h.hour).padStart(2, "0") + ":00")}: ${num(h.actual)} sold, ${num(h.predicted)} called">
-                  <div class="track"><i class="ghost" style="height:${Math.max(3, (h.predicted / maxHour) * 100)}%"></i><i style="height:${Math.max(3, (h.actual / maxHour) * 100)}%"></i></div>
-                  <span>${((h.hour % 12) || 12)}</span></div>`).join("")}</div></div>
-            </section>` : ""}
-
-            ${(d.item_scores || []).length ? `<section class="card">
-              <div class="card-head"><div><h2>Item by item</h2><p>Sorted by how far off each one was.</p></div></div>
-              <div class="tablewrap"><table class="dt" style="min-width:0"><thead><tr>
-                <th>Item</th><th class="num right">Called</th><th class="num right">Sold</th><th class="num right">Gap</th></tr></thead><tbody>
-                ${d.item_scores.map((row) => `<tr>
-                  <td class="name"><b>${e(row.name)}</b>${row.sold_out ? `<small class="down">ran out during service</small>` : ""}</td>
-                  <td class="num right">${num(row.predicted)}</td><td class="num right">${num(row.actual)}</td>
-                  <td class="num right ${row.gap >= 0 ? "up" : "down"}">${row.gap >= 0 ? "+" : ""}${num(row.gap)}</td></tr>`).join("")}
-              </tbody></table></div>
-            </section>` : ""}
-
-            <section class="card">
-              <div class="card-head"><div><h2>Where the orders came from</h2></div></div>
-              <div class="card-body" style="display:grid;gap:10px">
-                ${(() => { const gross = d.channels.reduce((n, r) => n + r.sales, 0) || 1; return d.channels.map((c) => `<div class="mixrow">
-                  <div class="who"><b>${e(c.channel)}</b><small>${num(c.orders)} orders</small></div>
-                  <div class="mixbar"><i style="width:${Math.max(2, Math.min(100, (c.sales / gross) * 100))}%"></i></div>
-                  <span class="qty">${money(c.sales)}<div class="small muted">${Math.round((c.sales / gross) * 100)}% of tickets</div></span>
-                  </div>`).join(""); })()}
-              </div>
-            </section>
-          </div>
-        </aside>`;
+      const d = await API.get(`/api/history/day?location_id=${encodeURIComponent(location)}&date=${dateISO}`);
+      if (token !== openLayer._seq || location !== S.locationId) return;
+      const closed = d.closed === true || (!Number(d.units) && !Number(d.orders));
+      const sub = closed ? "Not open" : `${money(d.sales)} · ${noun(d.orders, "ticket")}`;
+      openLayer(daySheetShell(dateISO, sub, closed
+        ? `<section class="isec"><p class="lede">Nothing was recorded on this day.</p></section>`
+        : daySheetBody(d, dateISO)));
     } catch (error) {
-      toast(error.message, "error");
+      if (token !== openLayer._seq || location !== S.locationId) return;
+      toast(plainError(error), "error");
       closeLayer();
+    }
+  }
+
+  function daySheetBody(d, dateISO) {
+    const r = d.review || {};
+    const day = d.weekday || weekday(dateISO);
+    const normal = Number(d.normal_sales);
+    let sold = `${money(d.sales)} sold`;
+    if (Number.isFinite(normal) && normal > 0) {
+      const diff = Number(d.sales) - normal;
+      sold += Math.abs(diff) < normal * 0.02
+        ? `, about the same as a normal ${day}.`
+        : `, about ${money(Math.abs(diff))} ${diff > 0 ? "more" : "less"} than a normal ${day}.`;
+    } else {
+      sold += ` on ${noun(d.orders, "ticket")}.`;
+    }
+    const items = d.predicted_units !== null && d.predicted_units !== undefined
+      ? `${num(d.units)} items sold against ${num(d.predicted_units)} expected.`
+      : `${num(d.units)} items sold.`;
+    const c = d.costs;
+    const kept = c && c.left_after_costs !== undefined && c.left_after_costs !== null
+      ? `Kept about ${money(c.left_after_costs)} after ${money(c.cogs)} in food and ${money(c.labour)} in wages.`
+        + (c.configured === false ? ` Wages are estimated until you enter yours in <a href="#" data-stab="costs">Settings > Costs</a>.` : "")
+      : "";
+    const went = `<section class="isec"><h2>How the day went</h2>
+      <p class="lede">${e(sold)} ${e(items)}</p>
+      ${kept ? `<p class="lede isec-note">${kept}</p>` : ""}
+      ${r.matters ? `<p class="lede isec-note">${e(r.matters)}</p>` : ""}
+    </section>`;
+
+    const scores = Array.isArray(d.item_scores) ? d.item_scores : [];
+    const scored = scores.map((row) => {
+      const predicted = Math.round(Number(row.predicted) || 0), actual = Math.round(Number(row.actual) || 0);
+      return { ...row, predicted, actual, gap: actual - predicted };
+    });
+    const missed = scored.filter((row) => Math.abs(row.gap) >= 5 || row.sold_out)
+      .sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap));
+    const rest = scored.length - missed.length;
+    const missedPart = scored.length ? `<section class="isec"><h2>Where the call missed</h2>
+      ${missed.length ? `<table class="dt tight"><thead><tr>
+          <th>Item</th><th class="num right">Expected</th><th class="num right">Sold</th><th class="num right">Gap</th></tr></thead><tbody>
+        ${missed.map((row) => `<tr class="clickable" tabindex="0" data-item-sheet="${e(row.item_id)}" data-name="${e(row.name)}" data-date="${e(dateISO)}">
+          <td class="name"><b>${e(row.name)}</b>${row.sold_out ? `<small class="down">Ran out during service</small>` : ""}</td>
+          <td class="num right">${num(row.predicted)}</td><td class="num right">${num(row.actual)}</td>
+          <td class="num right ${row.gap > 0 ? "up" : row.gap < 0 ? "down" : ""}">${row.gap > 0 ? "+" : ""}${num(row.gap)}</td></tr>`).join("")}
+        </tbody></table>
+        ${rest > 0 ? `<p class="small muted">The other ${noun(rest, "item")} ${rest === 1 ? "was" : "were"} within 4.</p>` : ""}`
+        : `<p class="lede">Every item landed within 4 of expected.</p>`}
+    </section>` : "";
+
+    const busiest = d.busiest_hour;
+    const busyPart = busiest && busiest.label ? `<section class="isec"><h2>Busiest hour</h2>
+      <p class="lede">${e(busiest.label)} was the busiest hour, with ${num(busiest.actual)} items sold${busiest.predicted !== undefined && busiest.predicted !== null ? ` against ${num(busiest.predicted)} expected for that hour` : ""}.</p></section>` : "";
+
+    const paragraphs = [channelSentence(d), weatherLine(d.conditions), reasonLine(r)].filter(Boolean);
+    const more = paragraphs.length ? `<details class="fold"><summary>More about this day</summary>
+      <div class="fold-body">${paragraphs.map((text) => `<p>${text}</p>`).join("")}</div></details>` : "";
+
+    const tickets = `<details class="fold" data-tickets="${e(dateISO)}"><summary>Tickets</summary><div class="fold-body"></div></details>`;
+    return went + missedPart + busyPart + more + tickets;
+  }
+
+  // Where the tickets came from, as a share of tickets, in one sentence.
+  function channelSentence(d) {
+    const rows = (d.channels || []).filter((c) => Number(c.orders) > 0).sort((a, b) => Number(b.orders) - Number(a.orders));
+    const total = rows.reduce((n, c) => n + Number(c.orders), 0);
+    if (!total) return "";
+    const words = { counter: "at the counter", pickup: "pickup", delivery: "delivery", "dine in": "dine in",
+      online: "online", phone: "by phone", kiosk: "at the kiosk" };
+    const parts = rows.map((c, index) => {
+      const key = String(c.channel || "").toLowerCase();
+      return `${Math.round(Number(c.orders) / total * 100)}%${index === 0 ? " were" : ""} ${e(words[key] || key)}`;
+    });
+    return `Of ${noun(total, "ticket")}, ${listWords(parts)}.`;
+  }
+
+  function weatherLine(cond) {
+    if (!cond || !cond.weather) return "";
+    let text = String(cond.weather);
+    if (cond.high !== undefined && cond.high !== null && cond.low !== undefined && cond.low !== null) {
+      text += `, high of ${Math.round(cond.high)} and low of ${Math.round(cond.low)}`;
+    }
+    const rain = Number(cond.rain_mm) || 0;
+    text += rain >= 1 ? `, ${Math.round(rain)} mm of rain.` : ".";
+    if (cond.occasion) text += ` ${cond.occasion}.`;
+    if (Number(cond.events) > 0) text += ` ${noun(cond.events, "event")} nearby.`;
+    return e(text);
+  }
+
+  // The reason only when it names a cause.
+  function reasonLine(r) {
+    const text = String((r && r.likely_reason) || "").trim();
+    if (!text || /nothing in the day|ordinary variation|no clear cause|not explain|nothing explains/i.test(text)) return "";
+    return e(text);
+  }
+
+  function ticketRow(order) {
+    const lines = (order.lines || []).map((line) => `${line.name}${Number(line.quantity) > 1 ? ` x${num(line.quantity)}` : ""}`).join(", ");
+    const head = [clock(order.time), order.number, order.channel].filter(Boolean).join(" · ");
+    return `<div class="ticket"><div class="t-main"><b>${e(head)}</b><span>${e(lines)}</span></div>
+      <span class="t-amt">${money(order.total, true)}</span></div>`;
+  }
+
+  // Twenty tickets at a time, newest first, for the day the sheet shows.
+  async function loadTickets(box, cursor) {
+    const date = box.dataset.tickets;
+    const body = box.querySelector(".fold-body");
+    if (!date || !body) return;
+    const more = body.querySelector("[data-tickets-more]");
+    if (more) more.disabled = true;
+    try {
+      const before = cursor && cursor.before ? cursor.before : date;
+      const skip = cursor ? Number(cursor.skip) || 0 : 0;
+      const page = await API.get(`/api/history/orders?location_id=${encodeURIComponent(S.locationId)}&start=${date}&before=${before}&skip=${skip}&limit=20`);
+      if (more) more.closest(".btn-row").remove();
+      const rows = (page.orders || []).map(ticketRow).join("");
+      if (rows) body.insertAdjacentHTML("beforeend", rows);
+      else if (!body.querySelector(".ticket")) body.insertAdjacentHTML("beforeend", `<p class="small muted">No tickets were recorded for this day.</p>`);
+      if (page.has_more && page.next_before_date) {
+        body.insertAdjacentHTML("beforeend", `<div class="btn-row"><button class="btn sm" data-tickets-more data-before="${e(page.next_before_date)}" data-skip="${Number(page.next_skip) || 0}">Show 20 more</button></div>`);
+      } else if (rows) {
+        body.insertAdjacentHTML("beforeend", `<p class="small muted">Totals include tax.</p>`);
+      }
+      box.dataset.loaded = "1";
+    } catch (error) {
+      if (more) more.disabled = false;
+      toast(plainError(error), "error");
     }
   }
 
@@ -3931,6 +4265,7 @@
   // gives it back on close. Screens still setting layer.innerHTML directly
   // are converted by their own region; new code uses openLayer.
   function openLayer(html) {
+    openLayer._seq = (openLayer._seq || 0) + 1;
     if (!openLayer._from) openLayer._from = document.activeElement;
     layer.innerHTML = html;
     const first = layer.querySelector("[autofocus], input:not([type=hidden]), textarea, select, button:not(.modal-close):not(.scrim)");
@@ -3939,7 +4274,9 @@
 
   function closeLayer() {
     if (S.tour) return endTour(false);
+    openLayer._seq = (openLayer._seq || 0) + 1;
     layer.innerHTML = "";
+    S.adjustReturn = null;
     S.cancelFlow = null;
     const from = openLayer._from;
     openLayer._from = null;
@@ -4014,35 +4351,6 @@
     S.history.costs = null; S.pulse.version = null; S.pulse.pending = false;
   }
 
-  async function moreDays() {
-    if (S.history.loading || !S.history.hasMore || !S.history.nextBefore) return;
-    S.history.loading = true;
-    try {
-      const start = rangeStart(S.history.range);
-      const page = await API.get(`/api/history/days?location_id=${encodeURIComponent(S.locationId)}&before=${S.history.nextBefore}&limit=18${start ? `&start=${start}` : ""}`);
-      S.history.days = S.history.days.concat(page.days);
-      S.history.nextBefore = page.next_before;
-      S.history.hasMore = page.has_more;
-    } catch (error) { toast(error.message, "error"); }
-    S.history.loading = false;
-    render(true);
-  }
-
-  async function moreOrders() {
-    if (S.orders.loading || !S.orders.hasMore || !S.orders.nextDate) return;
-    S.orders.loading = true;
-    try {
-      const start = rangeStart(S.orders.range);
-      const page = await API.get(`/api/history/orders?location_id=${encodeURIComponent(S.locationId)}&before=${S.orders.nextDate}&skip=${S.orders.nextSkip}&limit=40${start ? `&start=${start}` : ""}`);
-      S.orders.rows = S.orders.rows.concat(page.orders);
-      S.orders.nextDate = page.next_before_date;
-      S.orders.nextSkip = page.next_skip;
-      S.orders.hasMore = page.has_more;
-    } catch (error) { toast(error.message, "error"); }
-    S.orders.loading = false;
-    render(true);
-  }
-
   /* ---------- interactions ---------- */
   // Moves to another day. The page starts at the top and any order quantities
   // typed for the old window are let go.
@@ -4107,7 +4415,11 @@
       const panel = document.getElementById("daypanes");
       const head = panel && panel.querySelector(".card-head");
       if (panel && head && S.data && typeof todayPane === "function") {
-        head.querySelectorAll("[data-pane]").forEach((node) => node.classList.toggle("on", node.dataset.pane === S.todayPane));
+        head.querySelectorAll("[data-pane]").forEach((node) => {
+          const selected = node.dataset.pane === S.todayPane;
+          node.classList.toggle("on", selected);
+          node.setAttribute("aria-pressed", String(selected));
+        });
         while (head.nextSibling) head.nextSibling.remove();
         head.insertAdjacentHTML("afterend", todayPane(S.data));
       } else render(true);
@@ -4115,7 +4427,6 @@
       return;
     }
     if (target.dataset.drange) { S.history.range = target.dataset.drange; return loadView(); }
-    if (target.dataset.orange) { S.orders.range = target.dataset.orange; return loadView(); }
     if (target.dataset.day) return setDate(addDays(S.date, Number(target.dataset.day)));
     if (target.dataset.openDate) {
       S.view = "today"; S.todayPane = "make"; closeLayer();
@@ -4224,8 +4535,8 @@
         API.setCsrf(""); S.auth = null; S.boot = null; S.cache = {}; S.date = "";
         store.set("quantify.view", "today");
         return go("/", true);
-      case "more-days": return moreDays();
-      case "more-orders": return moreOrders();
+      case "days-earlier": return historyPage(1);
+      case "days-later": return historyPage(-1);
       case "cancel-start": return cancelStart();
       case "cancel-confirm": return cancelConfirm();
       case "close-toast": toastNode.className = "toast"; return;
@@ -4365,16 +4676,16 @@
         return loadView(true);
       }
       if (form.id === "f-adjust") {
-        await API.send(`/api/forecast/override?location_id=${encodeURIComponent(S.locationId)}`, "POST",
-          { item_id: data.item_id, date: S.date, quantity: Number(data.quantity), reason: data.reason });
-        // The item sheet notes which item it has open in S.sheetItem, so an
-        // adjustment made from the sheet lands back on the sheet.
-        const back = S.sheetItem || "";
+        const back = S.adjustReturn, token = openLayer._seq, location = S.locationId;
+        await API.send(`/api/forecast/override?location_id=${encodeURIComponent(location)}`, "POST",
+          { item_id: data.item_id, date: data.date, quantity: Number(data.quantity), reason: String(data.reason || "").trim() });
+        forgetItem(data.item_id);
+        if (token !== openLayer._seq || location !== S.locationId) return;
         closeLayer();
+        const closedToken = openLayer._seq;
         toast("Adjusted");
-        if (S.view !== "today") { S.view = "today"; S.todayPane = "make"; store.set("quantify.view", S.view); }
-        await loadView(true);
-        if (back) openItemSheet(back);
+        if (S.view === "today") await loadView(true);
+        if (back && closedToken === openLayer._seq && location === S.locationId) openItemSheet(back.item, back.name, back.date);
         return;
       }
     } catch (error) {
@@ -4436,9 +4747,10 @@
         <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
         <div class="modal-head"><h2>Morning email</h2></div>
         <div class="modal-body"><div class="skel" style="height:60vh;border-radius:10px"></div></div></div></div>`);
+    const token = openLayer._seq, location = S.locationId;
     try {
       const result = await API.get(`/api/email/preview?location_id=${encodeURIComponent(S.locationId)}&date=${S.date}`);
-      if (!layer.innerHTML) return;
+      if (token !== openLayer._seq || location !== S.locationId) return;
       openLayer(`<div class="scrim" data-do="close-layer"></div>
         <div class="modal-wrap"><div class="modal wide" role="dialog" aria-modal="true" aria-label="Morning email">
           <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
@@ -4446,7 +4758,7 @@
           <div class="modal-body"><iframe class="emailframe" title="Email preview"></iframe></div>
         </div></div>`);
       layer.querySelector("iframe").srcdoc = result.html;
-    } catch (error) { closeLayer(); toast(plainError(error), "error"); }
+    } catch (error) { if (token === openLayer._seq && location === S.locationId) { closeLayer(); toast(plainError(error), "error"); } }
   }
 
   async function sendTest() {
@@ -4456,34 +4768,71 @@
     } catch (error) { toast(plainError(error), "error"); }
   }
 
+  // The adjust modal works from the button's own data attributes, so it opens
+  // from the make list, from a "do this" row and from the item sheet on any
+  // page, whether or not the brief is in memory.
   function openAdjust(target) {
-    const item = S.data.items.find((row) => row.item_id === target.dataset.item);
-    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-      <div class="modal-wrap"><div class="modal">
-        <button class="modal-close" data-do="close-layer">${icon("close")}</button>
-        <div class="modal-head"><h2>Set your own number for ${e(target.dataset.name)}</h2>
-          <p>The model's number was ${num(item?.model_expected ?? target.dataset.qty)}.</p></div>
+    const d = target.dataset;
+    const sheet = target.closest(".sheet.item");
+    const date = d.date || (sheet && sheet.dataset.date) || S.date || todayISO();
+    if (date < todayISO()) return;
+    S.adjustReturn = sheet ? { item: sheet.dataset.item, date, name: d.name || "" } : null;
+    const item = ((S.data && S.data.items) || []).find((row) => row.item_id === d.item) || null;
+    const ok = (v) => v !== undefined && v !== null && v !== "" && Number.isFinite(Number(v));
+    const qty = ok(d.qty) ? Number(d.qty) : Number((item && (item.make ?? item.expected)) || 0);
+    const expected = ok(d.expected) ? Number(d.expected) : Number((item && (item.model_expected ?? item.expected)) ?? qty);
+    const override = ok(d.override) ? Number(d.override) : (item && item.override ? Number(item.override.quantity) : null);
+    const suggested = ok(d.suggested) ? Number(d.suggested) : (override === null ? qty : null);
+    const reason = d.reason || (item && item.override && item.override.reason) || "";
+    const lead = override !== null
+      ? `You set ${num(override)}. About ${num(expected)} are expected to sell.`
+      : `Quantify suggested ${num(suggested)}. About ${num(expected)} are expected to sell.`;
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="adjust-title">
+        <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
+        <div class="modal-head"><h2 id="adjust-title">Adjust ${e(d.name || (item && item.name) || "")}</h2>
+          <p>${e(lead)}</p></div>
         <form id="f-adjust" class="modal-body">
-          <input type="hidden" name="item_id" value="${e(target.dataset.item)}">
-          <label class="field"><span>Make this many</span><input name="quantity" type="number" min="0" max="100000" value="${e(target.dataset.qty)}" required></label>
-          <label class="field"><span>Why</span><textarea name="reason" rows="3" required minlength="4" placeholder="Catering order for 30 confirmed this morning"></textarea>
-            <small>Whoever opens this tomorrow will see the reason next to the number.</small></label>
+          <input type="hidden" name="item_id" value="${e(d.item)}">
+          <input type="hidden" name="date" value="${e(date)}">
+          <div class="field"><span class="field-label">Make</span>
+            <div class="stepper">
+              <button type="button" class="step" data-adjstep="-5" aria-label="Five fewer">-5</button>
+              <button type="button" class="step" data-adjstep="-1" aria-label="One fewer">-1</button>
+              <input id="adjust-qty" name="quantity" type="number" inputmode="numeric" min="0" max="100000" value="${e(qty)}" required autofocus aria-label="How many to make">
+              <button type="button" class="step" data-adjstep="1" aria-label="One more">+1</button>
+              <button type="button" class="step" data-adjstep="5" aria-label="Five more">+5</button>
+            </div></div>
+          <label class="field"><span>Why</span><textarea name="reason" rows="2" placeholder="Catering for 30">${e(reason)}</textarea>
+            <small>Optional. Shown to whoever opens this next.</small></label>
           <div class="modal-foot" style="margin:6px -22px -20px">
-            ${item?.override ? `<button class="btn ghost" type="button" data-do="clear-adjust" data-item="${e(target.dataset.item)}">Go back to the model</button>` : ""}
+            ${override !== null ? `<button class="btn ghost" type="button" data-do="clear-adjust" data-item="${e(d.item)}">Use ${suggested !== null ? num(suggested) : "Quantify's number"}</button>` : ""}
             <button class="btn accent" type="submit">Save</button>
           </div>
         </form>
-      </div></div>`;
+      </div></div>`);
   }
 
   async function clearAdjust(target) {
+    target.disabled = true;
+    const sheet = target.closest(".sheet.item"), form = target.closest("form");
+    const date = target.dataset.date || (sheet && sheet.dataset.date) || (form && form.elements.date && form.elements.date.value) || S.date;
+    const back = sheet ? { item: sheet.dataset.item, date, name: "" } : S.adjustReturn;
+    const token = openLayer._seq, location = S.locationId;
     try {
-      await API.send(`/api/forecast/override?location_id=${encodeURIComponent(S.locationId)}`, "DELETE",
-        { item_id: target.dataset.item, date: S.date });
+      await API.send(`/api/forecast/override?location_id=${encodeURIComponent(location)}`, "DELETE",
+        { item_id: target.dataset.item, date });
+      forgetItem(target.dataset.item);
+      if (token !== openLayer._seq || location !== S.locationId) return;
       closeLayer();
-      toast("Back to the model result");
-      await loadView();
-    } catch (error) { toast(error.message, "error"); }
+      const closedToken = openLayer._seq;
+      toast("Back to Quantify's number");
+      if (S.view === "today") await loadView(true);
+      if (back && closedToken === openLayer._seq && location === S.locationId) openItemSheet(back.item, back.name, back.date);
+    } catch (error) {
+      target.disabled = false;
+      toast(plainError(error), "error");
+    }
   }
 
   // Re-reads what an item is made of from its till label. A recipe somebody
@@ -4719,6 +5068,17 @@
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && layer.innerHTML) closeLayer();
+    if ((event.key === "Enter" || event.key === " ") && event.target.matches("tr[data-item-sheet]")) {
+      event.preventDefault();
+      event.target.click();
+    }
+    if (event.key === "Tab" && layer.querySelector('[aria-modal="true"]')) {
+      const controls = [...layer.querySelectorAll('button:not([disabled]), a[href], input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex="0"]')].filter((node) => node.getClientRects().length);
+      if (!controls.length) return;
+      const first = controls[0], last = controls[controls.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !layer.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && (document.activeElement === last || !layer.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
+    }
   });
 
   boot();

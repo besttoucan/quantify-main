@@ -328,23 +328,40 @@ input:disabled, textarea:disabled { background: var(--surface-3); color: var(--i
 .down { color: var(--down); }
 
 /* ---------- headline block ---------- */
+/* The day in one card: the level, one sentence, three figures with their
+   comparisons, and the money line when costs are set. */
 .headline {
-  display: grid; grid-template-columns: minmax(0, 1fr) 268px; gap: 0;
+  display: grid; grid-template-columns: minmax(0, 1fr);
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow-sm);
   overflow: hidden;
 }
-.headline-main { padding: 22px 24px 20px; min-width: 0; }
-.headline-main h2 { font-size: var(--t-2xl); line-height: 1.2; letter-spacing: -.022em; max-width: 34ch; }
-.headline-main .sum { margin-top: 10px; font-size: var(--t-md); line-height: 1.65; color: var(--ink-2); max-width: 66ch; }
-.headline-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 13px; }
-.headline-side {
-  padding: 20px 22px; background: var(--surface-2); border-left: 1px solid var(--line);
-  display: flex; flex-direction: column; gap: 12px;
+.headline-main { padding: 18px 20px 16px; min-width: 0; }
+.headline-main h2 { font-size: var(--t-2xl); line-height: 1.2; letter-spacing: -.022em; max-width: 40ch; }
+.headline-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.headline-meta button.tag { cursor: pointer; }
+.headline-meta button.tag:hover { border-color: var(--warn); }
+.figures { display: flex; flex-wrap: wrap; gap: 10px 0; margin-top: 12px; }
+.figure { padding-right: 24px; margin-right: 24px; border-right: 1px solid var(--line); }
+.figure:last-child { border-right: 0; margin-right: 0; padding-right: 0; }
+.figure b { font-size: var(--t-xl); font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.figure .flabel { font-size: var(--t-base); color: var(--ink-2); }
+.figure .under { display: block; margin-top: 2px; font-size: var(--t-sm); color: var(--ink-3); }
+.headline-main .profit { margin-top: 12px; font-size: var(--t-sm); color: var(--ink-3); line-height: 1.5; }
+@media (min-width: 900px) {
+  .headline-main { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; align-items: center; }
+  .headline-main h2 { grid-column: 1; grid-row: 1; }
+  .headline-meta { grid-column: 2; grid-row: 1; margin-bottom: 0; }
+  .headline-main .figures, .headline-main .profit { grid-column: 1 / -1; }
 }
-.trust-score { display: flex; align-items: baseline; gap: 7px; }
-.trust-score b { font-size: var(--t-2xl); font-weight: 600; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
-.trust-score span { font-size: var(--t-sm); color: var(--ink-3); }
-.headline-side p { font-size: var(--t-sm); line-height: 1.6; color: var(--ink-3); }
+.pastbanner { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.pastbanner p { flex: 1 1 240px; font-size: var(--t-md); color: var(--ink-2); line-height: 1.5; }
+.pastbanner p b { color: var(--ink); }
+@media (max-width: 620px) {
+  .figures { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .figure { padding-right: 0; margin-right: 0; border-right: 0; }
+  .figure b { font-size: var(--t-lg); display: block; }
+  .figure .flabel { font-size: var(--t-sm); }
+}
 
 /* ---------- metric tiles ---------- */
 .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
@@ -360,21 +377,17 @@ input:disabled, textarea:disabled { background: var(--surface-3); color: var(--i
 .tile .basis { font-size: var(--t-xs); color: var(--ink-4); margin-top: 5px; padding-top: 8px; border-top: 1px solid var(--line); line-height: 1.5; }
 
 /* ---------- action list ---------- */
-.actions { display: grid; }
+/* "Do this" rows above the make list: one sentence that opens the item, and
+   the Adjust button beside it. */
+.actions { display: grid; border-bottom: 1px solid var(--line); }
 .action {
-  display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 13px; align-items: start;
-  padding: 15px 18px; border-bottom: 1px solid var(--line);
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center;
+  padding: 8px 18px; border-bottom: 1px solid var(--line);
 }
 .action:last-child { border-bottom: 0; }
-.action .mark {
-  width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center;
-  background: var(--accent-soft); color: var(--accent); font-size: var(--t-xs); font-weight: 600;
-}
-.action.watch .mark { background: var(--warn-soft); color: var(--warn); }
-.action.steady .mark { background: var(--surface-3); color: var(--ink-3); }
-.action b { display: block; font-size: var(--t-md); font-weight: 600; letter-spacing: -.01em; }
-.action p { margin-top: 4px; font-size: var(--t-base); line-height: 1.6; color: var(--ink-2); max-width: 72ch; }
-.action .metric { font-size: var(--t-base); font-weight: 600; color: var(--ink); white-space: nowrap; font-variant-numeric: tabular-nums; padding-top: 2px; }
+.action-open { text-align: left; color: var(--ink); padding: 6px 0; min-height: 32px; }
+.action-open b { font-size: var(--t-md); font-weight: 600; letter-spacing: -.01em; }
+.action-open:hover b { text-decoration: underline; text-underline-offset: 3px; }
 
 /* ---------- reasons ---------- */
 .reasons { display: grid; }
@@ -383,8 +396,6 @@ input:disabled, textarea:disabled { background: var(--surface-3); color: var(--i
 .reason-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .reason-top b { font-size: var(--t-md); font-weight: 600; }
 .reason p { margin-top: 6px; font-size: var(--t-base); line-height: 1.65; color: var(--ink-2); max-width: 76ch; }
-.reason .basis { margin-top: 7px; font-size: var(--t-xs); color: var(--ink-4); display: flex; align-items: center; gap: 6px; }
-.reason .basis svg { width: 12px; height: 12px; flex: 0 0 auto; }
 .effect-chip {
   display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px;
   font-size: var(--t-sm); font-weight: 600; font-variant-numeric: tabular-nums;
@@ -393,20 +404,23 @@ input:disabled, textarea:disabled { background: var(--surface-3); color: var(--i
 .effect-chip.down { background: var(--down-soft); color: var(--down); }
 
 /* ---------- hour chart ---------- */
-.hours { display: flex; align-items: stretch; gap: 5px; height: 168px; padding: 4px 0 0; }
-.hourcol { flex: 1 1 0; min-width: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 7px; }
-.hourcol .track { position: relative; display: flex; align-items: flex-end; }
+/* Separate solid bars and labelled values keep both series visible. The
+   strip scrolls only when there are more hours than can fit at 28px each. */
+.hours { display: flex; align-items: stretch; gap: 3px; height: 196px; padding: 12px 0 0; overflow-x: auto; }
+.hourcol { flex: 1 0 26px; min-width: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 6px; }
+.hourcol .track { position: relative; display: flex; align-items: flex-end; gap: 3px; background: var(--surface-3); border-bottom: 1px solid var(--line); }
 .hourcol .track i {
-  display: block; width: 100%; min-height: 3px; border-radius: 4px 4px 2px 2px;
-  background: var(--mark); opacity: .82;
+  display: block; flex: 1 1 0; min-height: 6px; border-radius: 3px 3px 0 0;
+  background: var(--series-1);
 }
-.hourcol.peak .track i { background: var(--ink); opacity: 1; }
-.hourcol .track i.ghost { position: absolute; left: 0; right: 0; bottom: 0; background: transparent; border: 1px dashed var(--line-2); border-radius: 4px 4px 0 0; opacity: 1; }
-.hourcol span { font-size: var(--t-xs); color: var(--ink-4); text-align: center; font-variant-numeric: tabular-nums; }
+.hourcol.peak .track i { background: var(--accent); }
+.hourcol span { font-size: var(--t-sm); color: var(--ink-2); text-align: center; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .hourcol.peak span { color: var(--ink); font-weight: 600; }
-.hourcol:hover .track i { opacity: 1; }
-.hour-legend { display: flex; gap: 16px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-size: var(--t-sm); color: var(--ink-3); }
-.hour-legend b { color: var(--ink); font-weight: 600; }
+.hour-values { display: grid; gap: 2px; text-align: center; font-size: var(--t-sm); line-height: 1.2; font-variant-numeric: tabular-nums; }
+.hour-values b { color: var(--series-1); font-weight: 600; }
+.hour-values span { color: var(--ink); }
+.hourcol.peak .hour-values b { color: var(--accent); }
+.hour-note { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-size: var(--t-base); color: var(--ink-2); line-height: 1.55; }
 
 /* ---------- tables ---------- */
 .tablewrap { width: 100%; overflow-x: auto; }
@@ -424,14 +438,41 @@ input:disabled, textarea:disabled { background: var(--surface-3); color: var(--i
 .dt td.name b { font-weight: 600; font-size: var(--t-md); }
 .dt td.name small { display: block; margin-top: 2px; font-size: var(--t-sm); color: var(--ink-4); }
 .dt .plan { font-size: var(--t-lg); font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
-.dt .rangecell { color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .dt .right { text-align: right; }
-
-.rangebar { display: grid; gap: 4px; min-width: 108px; }
-.rangebar .line { position: relative; height: 5px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
-.rangebar .line i { position: absolute; top: 0; bottom: 0; background: var(--accent-line); border-radius: 3px; }
-.rangebar .line b { position: absolute; top: -2px; width: 2px; height: 9px; border-radius: 1px; background: var(--accent); }
-.rangebar span { font-size: var(--t-xs); color: var(--ink-4); font-variant-numeric: tabular-nums; }
+.dt.make { table-layout: fixed; width: 100%; }
+.dt.make th:not(:first-child) { width: 104px; }
+.dt.make td.name { overflow-wrap: anywhere; }
+.dt.make td.name small { color: var(--ink-2); }
+.dt.make tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.dt.make th, .sheet .dt th, .dt.misses th { font-size: var(--t-sm); color: var(--ink-2); letter-spacing: 0; text-transform: none; white-space: normal; }
+/* The make list: rows grouped under a small category heading, a tag on the
+   name only when an item is likely to run out. */
+.dt tr.group td {
+  padding: 7px 14px; font-size: var(--t-sm); font-weight: 600;
+  color: var(--ink-2); background: var(--surface-2); border-bottom: 1px solid var(--line);
+}
+.dt td.name .tag { margin-left: 8px; vertical-align: middle; }
+/* On a phone the make list is not a table: the name on one line, then the
+   three numbers with their labels and the Adjust button on the next. */
+@media (max-width: 620px) {
+  .dt.make { min-width: 0; width: 100%; }
+  .dt.make thead { display: none; }
+  .dt.make tbody tr {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; gap: 6px 10px; align-items: end;
+    padding: 12px 14px; border-bottom: 1px solid var(--line);
+  }
+  .dt.make tbody tr:last-child { border-bottom: 0; }
+  .dt.make tbody tr.group { display: block; padding: 0; }
+  .dt.make tbody td { display: block; padding: 0; border: 0; text-align: left; }
+  .dt.make tbody tr.group td { padding: 6px 14px; }
+  .dt.make tbody td.name { grid-column: 1 / -1; }
+  .dt.make tbody td[data-label]::before {
+    content: attr(data-label); display: block; margin-bottom: 2px;
+    font-size: var(--t-sm); font-weight: 500; color: var(--ink-2);
+  }
+  .dt.make tbody td .small { display: inline; margin-left: 4px; }
+  .dt.make tbody tr.clickable:hover td { background: transparent; }
+}
 
 /* ---------- expandable rows ---------- */
 .exp { border-bottom: 1px solid var(--line); }
@@ -448,84 +489,117 @@ input:disabled, textarea:disabled { background: var(--surface-3); color: var(--i
 .exp-head small { display: block; margin-top: 2px; font-size: var(--t-sm); color: var(--ink-4); }
 .exp-body { padding: 2px 18px 18px 49px; background: var(--surface-2); border-top: 1px solid var(--line); }
 
-.mixrow { display: grid; grid-template-columns: 150px minmax(90px, 1fr) auto; gap: 12px; align-items: center; font-size: var(--t-base); }
-.mixrow .who { display: grid; gap: 2px; min-width: 0; }
-.mixrow .who b { font-weight: 500; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mixrow .who small { font-size: var(--t-xs); color: var(--ink-4); }
-.mixbar { height: 8px; border-radius: 4px; background: var(--surface-3); overflow: hidden; border: 1px solid var(--line); }
-.mixbar i { display: block; height: 100%; border-radius: 4px; }
-.mixrow .qty { font-size: var(--t-sm); color: var(--ink-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .role-base { background: #6b7280; } .role-protein { background: #a4402c; } .role-dairy { background: #c9922f; }
 .role-produce { background: #14634f; } .role-bread { background: #8a6a3a; } .role-sauce { background: #b4553c; }
 .role-sweetener { background: #9a6212; } .role-beverage { background: #2f6f8f; } .role-packaging { background: #9aa0a8; }
 .role-other { background: #7a7f88; }
 
 /* ---------- history ---------- */
+/* Day | Sold | Left after costs (or Items) | Accuracy | chevron. One row per
+   closed day, fourteen to a page, paged with Earlier and Later in the head. */
 .dayrow {
-  display: grid; grid-template-columns: 150px repeat(3, minmax(0, 1fr)) 168px 18px;
-  gap: 14px; align-items: center; width: 100%; padding: 13px 18px; text-align: left;
+  display: grid; grid-template-columns: minmax(132px, 1fr) 128px 144px 200px 18px;
+  gap: 14px; align-items: center; width: 100%; padding: 12px 18px; text-align: left;
   border-bottom: 1px solid var(--line);
 }
 .dayrow:last-child { border-bottom: 0; }
 .dayrow:hover { background: var(--surface-2); }
 .dayrow.closed { cursor: default; background: var(--surface-2); }
 .dayrow.closed:hover { background: var(--surface-2); }
+.dayrow.closed .closed-note { grid-column: 2 / -1; }
 .closed-note { display: flex; align-items: baseline; gap: 10px; }
 .closed-note b { font-size: var(--t-sm); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-4); }
 .closed-note span { font-size: var(--t-base); color: var(--ink-3); }
 .dt.parts { min-width: 560px; }
 .dt.parts td { padding: 10px 14px; }
-.dayrow .when b { display: block; font-size: var(--t-md); font-weight: 600; }
-.dayrow .when small { display: block; font-size: var(--t-sm); color: var(--ink-4); margin-top: 1px; }
+.dayrow .when b { display: block; font-size: var(--t-md); font-weight: 600; white-space: nowrap; }
+.dayrow .when small { display: block; font-size: var(--t-sm); color: var(--ink-2); margin-top: 1px; }
 .dayrow .cell { display: grid; gap: 2px; }
 .dayrow .cell b { font-size: var(--t-md); font-weight: 600; font-variant-numeric: tabular-nums; }
-.dayrow .cell small { font-size: var(--t-xs); color: var(--ink-4); }
+.dayrow .cell small { font-size: var(--t-sm); color: var(--ink-2); }
 .dayrow .chev { color: var(--ink-4); display: grid; place-items: center; }
 .dayrow .chev svg { width: 15px; height: 15px; }
 
+/* The column headings above the day rows. It is not a table, so the header
+   borrows the same grid rather than being one. */
+.dayrow.head {
+  font-size: var(--t-sm);
+  color: var(--ink-2); cursor: default; background: none; border-bottom: 1px solid var(--line);
+  padding-top: 10px; padding-bottom: 10px;
+}
+.dayrow.head:hover { background: none; }
+.dayrow.head span { font-weight: 600; white-space: nowrap; }
+
+.card-head.days { align-items: center; }
+.pager { display: inline-flex; gap: 6px; }
+/* One line above the rows when the register has gone quiet. */
+.quiet-note { padding: 10px 18px; border-bottom: 1px solid var(--line); background: var(--warn-soft); color: var(--ink-2); font-size: var(--t-base); line-height: 1.5; }
+.quiet-note a { color: var(--ink); font-weight: 500; }
+
 .accmeter { display: grid; gap: 5px; }
-.accmeter .top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.accmeter b { font-size: var(--t-md); font-weight: 600; font-variant-numeric: tabular-nums; }
-.accmeter small { font-size: var(--t-xs); color: var(--ink-4); }
-.accmeter .line { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; border: 1px solid var(--line); }
-/* The meter is neutral ink: it measures, it does not cheer. Amber when the
-   figure needs a look, red when it is poor. */
+.accmeter .top { display: grid; gap: 1px; }
+.accmeter b { font-size: var(--t-md); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.accmeter small { font-size: var(--t-sm); color: var(--ink-2); }
+.accmeter .line { height: 8px; border-radius: 4px; background: var(--surface-3); overflow: hidden; border: 1px solid var(--line); }
+/* The meter is neutral ink: it measures, it does not cheer. Amber under 80,
+   red under 70. */
 .accmeter .line i { display: block; height: 100%; border-radius: 3px; background: var(--ink); }
 .accmeter .line i.mid { background: var(--warn); }
 .accmeter .line i.low { background: var(--down); }
 
-.orderrow {
-  display: grid; grid-template-columns: 86px 1fr 116px 96px 88px; gap: 14px; align-items: center;
-  padding: 11px 18px; border-bottom: 1px solid var(--line); font-size: var(--t-base);
-}
-.orderrow:last-child { border-bottom: 0; }
-.orderrow.head {
-  background: var(--surface-2); font-size: var(--t-xs); font-weight: 600; letter-spacing: .07em;
-  text-transform: uppercase; color: var(--ink-4);
-}
-.orderrow.head:hover { background: var(--surface-2); }
-.orderrow.head .amt { font-weight: 600; }
-.orderrow:hover { background: var(--surface-2); }
-.orderrow .t { font-variant-numeric: tabular-nums; color: var(--ink-2); }
-.orderrow .what { min-width: 0; }
-.orderrow .what b { font-weight: 500; color: var(--ink); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.orderrow .what small { font-size: var(--t-sm); color: var(--ink-4); }
-.orderrow .amt { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+/* Track record: two tiles on one window, and the misses table. */
+.tiles.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.tiles.two .eyebrow, .tiles.two .basis { font-size: var(--t-sm); color: var(--ink-2); }
+.dt.misses { min-width: 0; width: 100%; }
+/* The generic .stack layout helper (display: grid) also matches a table that
+   carries the .dt.stack phone pattern. A table stays a table above 620px. */
+table.dt.stack { display: table; gap: 0; }
 
-.loadmore { display: grid; place-items: center; padding: 18px; }
-.scroll-sentinel { height: 1px; }
+@media (max-width: 1180px) {
+  .dayrow { grid-template-columns: minmax(104px, 1fr) 108px 128px 176px 18px; gap: 12px; }
+}
+@media (max-width: 620px) {
+  /* Two lines on a phone: the day and its accuracy, then Sold and Left after
+     costs with their labels. */
+  .dayrow.head { display: none; }
+  .dayrow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4px 12px; padding: 10px 14px; align-items: start; }
+  .dayrow .when { grid-row: 1; grid-column: 1; }
+  .dayrow .when small { margin-top: 0; }
+  .dayrow .accmeter { grid-row: 1; grid-column: 2; gap: 4px; }
+  .dayrow .accmeter .top { flex-direction: column; align-items: flex-start; gap: 1px; }
+  .dayrow .cell { grid-row: 2; }
+  .dayrow .chev { display: none; }
+  .dayrow .cell::before {
+    content: attr(data-label); font-size: var(--t-sm); font-weight: 500; color: var(--ink-2);
+  }
+  .dayrow.closed .closed-note { grid-row: 1; grid-column: 2; }
+  .card-head.days { flex-wrap: wrap; }
+  .card-head.days .spacer { display: none; }
+  .card-head.days .pager { margin-left: auto; }
+  .card-head.days .seg { order: 3; width: 100%; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .card-head.days .seg button { text-align: center; }
+}
 
 /* ---------- accuracy chart ---------- */
+/* Labels are HTML at fixed sizes; only the drawing scales. */
 .linechart { width: 100%; }
-.linechart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.linechart svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.linechart svg path, .linechart svg line { vector-effect: non-scaling-stroke; }
 .linechart .grid { stroke: var(--line); stroke-width: 1; }
-.linechart .axis-label { fill: var(--ink-4); font-size: var(--t-xs); font-family: var(--sans); }
 .linechart .actual { fill: none; stroke: var(--ink); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
-.linechart .predicted { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 4 4; stroke-linejoin: round; }
-.chart-key { display: flex; gap: 18px; justify-content: flex-end; margin-top: 10px; font-size: var(--t-sm); color: var(--ink-3); }
+.linechart .predicted { fill: none; stroke: var(--series-1); stroke-width: 2; stroke-dasharray: 6 4; stroke-linejoin: round; }
+.plot-unit { margin-bottom: 12px; font-size: var(--t-sm); color: var(--ink-2); }
+.plot-grid { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 8px; }
+.plot-axis { display: flex; flex-direction: column; justify-content: space-between; text-align: right; font-size: var(--t-sm); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.plot-area { position: relative; height: 200px; background: var(--surface-3); border: 1px solid var(--line); }
+.plot-point { position: absolute; width: 7px; height: 7px; background: var(--ink); border: 1px solid var(--surface); border-radius: 50%; transform: translate(-50%, -50%); }
+.plot-dates { grid-column: 2; display: flex; justify-content: space-between; gap: 8px; font-size: var(--t-sm); color: var(--ink-2); }
+.plot-last { margin-top: 12px; font-size: var(--t-base); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.chart-key { display: flex; flex-wrap: wrap; gap: 8px 18px; justify-content: flex-end; margin-top: 10px; font-size: var(--t-sm); color: var(--ink-2); }
 .chart-key i { display: inline-block; width: 18px; border-top: 2px solid; margin-right: 6px; vertical-align: middle; }
 .chart-key .k-actual { border-color: var(--ink); }
-.chart-key .k-pred { border-color: var(--accent); border-top-style: dashed; }
+.chart-key .k-pred { border-color: var(--series-1); border-top-style: dashed; }
+.chart-key .k-peak { border-color: var(--accent); }
 
 /* ---------- week strip ---------- */
 .week { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); }
@@ -539,20 +613,35 @@ input:disabled, textarea:disabled { background: var(--surface-3); color: var(--i
 .weekday .n { font-size: var(--t-sm); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---------- outlook ---------- */
+/* The next two weeks: day, expected, the biggest line, and the change against
+   a normal day. Rows are buttons that open that day. */
 .outlook-row {
-  display: grid; grid-template-columns: 132px 118px minmax(0, 1fr) 128px 100px;
-  gap: 14px; align-items: center; width: 100%; padding: 13px 18px; text-align: left;
+  display: grid; grid-template-columns: 132px 118px minmax(0, 1fr) 120px;
+  gap: 14px; align-items: center; width: 100%; padding: 12px 18px; text-align: left;
   border-bottom: 1px solid var(--line);
 }
 .outlook-row:last-child { border-bottom: 0; }
 .outlook-row:hover { background: var(--surface-2); }
-.outlook-row b { font-size: var(--t-md); font-weight: 600; display: block; }
+.outlook-row b { font-size: var(--t-md); font-weight: 600; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .outlook-row small { display: block; font-size: var(--t-sm); color: var(--ink-4); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .outlook-row .money { font-variant-numeric: tabular-nums; }
 .outlook-head {
-  display: grid; grid-template-columns: 132px 118px minmax(0, 1fr) 128px 100px; gap: 14px;
+  display: grid; grid-template-columns: 132px 118px minmax(0, 1fr) 120px; gap: 14px;
   padding: 9px 18px; background: var(--surface-2); border-bottom: 1px solid var(--line);
   font-size: var(--t-xs); font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-4);
+}
+/* On a phone the four columns fold to two lines: the day and its money, then
+   the biggest line and the change. */
+@media (max-width: 620px) {
+  .outlook-head { display: none; }
+  button.outlook-row {
+    grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "day money" "line delta";
+    gap: 4px 12px; padding: 12px 16px;
+  }
+  button.outlook-row > :nth-child(1) { grid-area: day; }
+  button.outlook-row > :nth-child(2) { grid-area: money; text-align: right; }
+  button.outlook-row > :nth-child(3) { grid-area: line; min-width: 0; }
+  button.outlook-row > :nth-child(4) { grid-area: delta; text-align: right; }
 }
 
 /* ---------- empty + loading ---------- */
@@ -571,7 +660,6 @@ input:disabled, textarea:disabled { background: var(--surface-3); color: var(--i
 /* ---------- overlays ---------- */
 .scrim { position: fixed; inset: 0; z-index: 200; background: rgba(21, 23, 26, .42); backdrop-filter: blur(3px); animation: fade .16s ease; }
 @keyframes fade { from { opacity: 0; } }
-.sheet.wide { width: min(1000px, 100%); }
 
 /* One line per recurring cost: what it is, how much, how often. */
 .costline { display: grid; grid-template-columns: 1fr 130px 150px 36px; gap: 8px; margin-bottom: 8px; align-items: center; }
@@ -581,25 +669,13 @@ input:disabled, textarea:disabled { background: var(--surface-3); color: var(--i
 input.mini { width: 74px; text-align: right; padding: 6px 8px; margin: 0; }
 @media (max-width: 640px) { .costline { grid-template-columns: 1fr 1fr; } .costline .icon-btn { grid-column: 2; justify-self: end; } }
 
-/* The column headings above the day rows. It is not a table, so the header
-   borrows the same grid rather than being one. */
-.dayrow.head {
-  font-size: var(--t-xs); letter-spacing: .06em; text-transform: uppercase;
-  color: var(--ink-4); cursor: default; background: none; border-bottom: 1px solid var(--line);
-  padding-top: 10px; padding-bottom: 10px;
-}
-.dayrow.head:hover { background: none; }
-.dayrow.head span { font-weight: 600; }
-
 /* The day as it is running. The rung bar sits in front of the called bar in a
    clearly different weight, so at a glance you can see which hours delivered. */
 .card.live { border-color: var(--accent-line, var(--line)); }
 .hourcol .track i.rung {
-  position: absolute; left: 0; right: 0; bottom: 0;
-  background: var(--ink); border-radius: 3px 3px 0 0; opacity: .85;
+  background: var(--ink); border-radius: 3px 3px 0 0;
 }
-.hourcol.ahead .track i:not(.ghost) { opacity: .38; }
-.hourcol.now .track { box-shadow: inset 0 0 0 1px var(--accent); border-radius: 4px; }
+.hourcol.now > span { color: var(--accent); font-weight: 600; text-decoration: underline; text-decoration-thickness: 3px; text-underline-offset: 3px; }
 .live-split { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
 .live-split > div {
   padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2);
@@ -630,8 +706,11 @@ input.mini { width: 74px; text-align: right; padding: 6px 8px; margin: 0; }
 }
 @keyframes slidein { from { transform: translateX(22px); opacity: .4; } }
 .sheet-head { display: flex; align-items: flex-start; gap: 14px; padding: 18px 22px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
-.sheet-head h2 { font-size: 17px; }
+.sheet-head h2 { font-size: var(--t-lg); }
 .sheet-head p { font-size: var(--t-base); color: var(--ink-3); margin-top: 3px; }
+.sheet-head > .icon-btn { margin-left: auto; flex: 0 0 auto; }
+/* On an iPad the sheet takes the width; the close button stays in reach. */
+@media (max-width: 900px) { .sheet { width: 100%; } }
 /* grid-auto-rows must stay max-content. This is a flex item with a definite
    height, so without it the browser distributes the rows evenly instead of
    sizing them to their content, and every card inside clips its own body. */
@@ -680,6 +759,76 @@ input.mini { width: 74px; text-align: right; padding: 6px 8px; margin: 0; }
 .toast svg { width: 15px; height: 15px; flex: 0 0 auto; }
 
 .emailframe { width: 100%; height: 66vh; border: 1px solid var(--line); border-radius: var(--r-sm); background: #fff; }
+
+/* ---------- item sheet and day sheet ---------- */
+/* Both sheets are one white column of short sections divided by hairlines,
+   with the record behind one fold at the bottom. No cards inside a sheet. */
+.sheet.item .sheet-body, .sheet.day .sheet-body {
+  display: block; padding: 0 22px 32px; background: var(--surface);
+}
+.isec { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.isec h2 { font-size: var(--t-lg); font-weight: 600; letter-spacing: -.008em; margin-bottom: 6px; }
+.isec .lede { font-size: var(--t-md); line-height: 1.6; color: var(--ink-2); max-width: 66ch; }
+.isec .lede + .lede { margin-top: 6px; }
+.isec-note { margin-top: 6px; }
+.isec-row { margin-top: 10px; }
+.isec .dt + p { margin-top: 10px; }
+.isec-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.isec-head h2 { font-size: var(--t-xl); margin: 0; }
+.isec-head .btn { flex: 0 0 auto; }
+.isec a[data-stab] { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+
+/* Small tables inside a sheet: three or four columns, so they never need to
+   be wider than the sheet, and the rows sit closer together. */
+.sheet .dt, .sheet .dt.tight { min-width: 0; }
+.dt.tight thead th { padding: 5px 10px; }
+.dt.tight tbody td { padding: 5px 10px; }
+.dt.tight td.name { font-weight: 500; }
+.dt.tight td.name b { font-size: var(--t-base); }
+.dt.tight tbody tr.highlight td { font-weight: 600; color: var(--ink); }
+@media (pointer: coarse) { .sheet .dt.tight tbody tr.clickable td { padding-top: 12px; padding-bottom: 12px; } }
+
+/* Through the week: seven whole numbers, today with the accent bar. */
+.wk { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; margin-bottom: 8px; }
+.wk-day { display: grid; gap: 2px; padding: 4px 6px 2px 8px; border-top: 6px solid var(--series-1); min-width: 0; }
+.wk-day span { font-size: var(--t-sm); color: var(--ink-2); font-weight: 500; }
+.wk-day b { font-size: var(--t-md); font-weight: 500; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.wk-day.on { border-top-color: var(--accent); }
+.wk-day.on b { font-weight: 600; color: var(--ink); }
+
+/* The one fold at the bottom of a sheet. */
+.fold { border-bottom: 1px solid var(--line); }
+.fold > summary {
+  list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; min-height: 44px;
+  font-size: var(--t-md); font-weight: 500; color: var(--ink-2);
+}
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary::before { content: "+"; width: 14px; color: var(--ink-4); font-weight: 400; }
+.fold[open] > summary::before { content: "-"; }
+.fold > summary:hover { color: var(--ink); }
+.fold-body { padding: 0 0 16px; font-size: var(--t-base); line-height: 1.6; color: var(--ink-2); max-width: 66ch; }
+.fold-body p + p { margin-top: 8px; }
+.textlink {
+  background: none; border: 0; padding: 0; margin: 0; font: inherit; color: var(--ink); cursor: pointer;
+  text-decoration: underline; text-underline-offset: 2px;
+}
+.textlink:hover { color: var(--accent); }
+
+/* Tickets, twenty at a time. */
+.ticket { display: flex; gap: 12px; align-items: baseline; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.t-main { display: grid; gap: 2px; min-width: 0; }
+.t-main b { font-weight: 500; color: var(--ink); font-size: var(--t-base); }
+.t-main span { font-size: var(--t-sm); color: var(--ink-3); }
+.t-amt { font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fold-body .btn-row { margin-top: 12px; }
+.fold-body .ticket + p { margin-top: 10px; }
+
+@media (max-width: 620px) {
+  .sheet.item .sheet-body, .sheet.day .sheet-body { padding: 0 16px 32px; }
+  .isec-head { flex-wrap: wrap; }
+  .wk-day { padding: 6px 2px 4px 4px; }
+  .wk-day b { font-size: var(--t-base); }
+}
 
 /* ---------- auth ---------- */
 /* One column: the wordmark, then the form in a card, nothing beside it. */
@@ -1030,8 +1179,6 @@ input.mini { width: 74px; text-align: right; padding: 6px 8px; margin: 0; }
   .headline-side { border-left: 0; border-top: 1px solid var(--line); flex-direction: row; align-items: center; gap: 20px; }
   .headline-side > div:first-child { flex: 0 0 auto; }
   .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .dayrow { grid-template-columns: 130px repeat(2, minmax(0, 1fr)) 150px 18px; }
-  .dayrow > :nth-child(4) { display: none; }
 }
 
 /* The rail becomes a four-cell bar along the bottom, clear of the home
@@ -1067,8 +1214,6 @@ input.mini { width: 74px; text-align: right; padding: 6px 8px; margin: 0; }
   .settings-body .dt, .sheet .dt { min-width: 0; }
   .mfa-grid { grid-template-columns: 1fr; justify-items: center; text-align: center; }
   .mfa-grid .steps { text-align: left; }
-  .orderrow { grid-template-columns: 72px 1fr 84px; }
-  .orderrow .ch, .orderrow .pay { display: none; }
   .outlook-head, .outlook-row { grid-template-columns: 108px 96px minmax(0, 1fr) 96px; }
   .outlook-head > :nth-child(5), .outlook-row > :nth-child(5) { display: none; }
   .week { grid-template-columns: repeat(3, 1fr); }
@@ -1081,8 +1226,6 @@ input.mini { width: 74px; text-align: right; padding: 6px 8px; margin: 0; }
   .form-grid.two { grid-template-columns: 1fr; }
   .headline-main { padding: 18px 17px; }
   .headline-side { flex-direction: column; align-items: flex-start; padding: 16px 17px; }
-  .dayrow { grid-template-columns: 1fr 138px; row-gap: 10px; }
-  .dayrow > :nth-child(3), .dayrow > :nth-child(4), .dayrow .chev { display: none; }
   .mixrow { grid-template-columns: 1fr; gap: 5px; }
   .week { grid-template-columns: repeat(2, 1fr); }
   .plancard { grid-template-columns: 1fr; }
@@ -1256,23 +1399,22 @@ body.tour-on { overflow: hidden; }
 
 
 /* ---------- share of day ---------- */
-/* One bar per hour, but only the peak carries a number and the half-sold hour
-   is marked, so the shape can be read rather than just looked at. */
-.shape { display: flex; align-items: flex-end; gap: 4px; height: 132px; }
-.shape-col { flex: 1 1 0; min-width: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto auto; gap: 4px; }
-.shape-track { position: relative; display: flex; align-items: flex-end; }
+/* One labelled bar per hour, with the peak in green. */
+.shape { display: flex; align-items: stretch; gap: 3px; height: 100px; overflow-x: auto; }
+.shape-col { flex: 1 0 28px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.shape-track { flex: 1 1 auto; min-height: 0; display: flex; align-items: flex-end; background: var(--surface-3); border-bottom: 1px solid var(--line); }
 .shape-track i {
-  display: block; width: 100%; min-height: 3px; border-radius: 3px 3px 0 0;
-  background: var(--mark-line);
+  display: block; width: 100%; height: var(--h, 0%); min-height: 6px; border-radius: 3px 3px 0 0;
+  background: var(--series-1);
 }
-.shape-col.peak .shape-track i { background: var(--mark); }
-.shape-col.half .shape-track { box-shadow: inset 0 0 0 1px var(--accent-line); border-radius: 4px; }
-.shape-val {
-  font-size: var(--t-xs); font-weight: 600; text-align: center; color: var(--ink);
-  font-variant-numeric: tabular-nums; min-height: 13px;
+.shape-col.peak .shape-track i { background: var(--accent); }
+.shape-value { font-size: var(--t-sm); font-weight: 600; color: var(--ink); text-align: center; font-variant-numeric: tabular-nums; }
+.shape-unit { font-size: var(--t-sm); color: var(--ink-2); margin: 4px 0; }
+.shape-lab {
+  font-size: var(--t-sm); color: var(--ink-2); text-align: center; font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
-.shape-lab { font-size: var(--t-xs); color: var(--ink-4); text-align: center; font-variant-numeric: tabular-nums; }
-.shape-col.peak .shape-lab { color: var(--ink-2); font-weight: 600; }
+.shape-col.peak .shape-lab { color: var(--ink); font-weight: 600; }
 
 /* ---------- ingredient roles ---------- */
 /* The one genuinely categorical thing in the product, so this is where hue
@@ -1304,22 +1446,7 @@ body.tour-on { overflow: hidden; }
 }
 
 
-/* ---------- today: three figures and one switching panel ---------- */
-/* Three tiles stay three across on an iPad, because they are the whole top of
-   the screen and two-plus-one reads as a mistake. */
-.tiles.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-@media (max-width: 1180px) { .tiles.three { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-/* On a phone the three figures stay in one short strip: number and one line
-   each, the footnotes folded away. */
-@media (max-width: 620px) {
-  .tiles.three { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-  .tiles.three .tile { padding: 10px 10px 9px; gap: 2px; }
-  .tiles.three .tile .value { font-size: var(--t-xl); }
-  .tiles.three .tile .versus { font-size: var(--t-sm); margin-top: 3px; }
-  .tiles.three .tile .versus b + span, .tiles.three .tile .basis { display: none; }
-  .tiles.three .eyebrow { font-size: var(--t-xs); letter-spacing: .04em; }
-}
-
+/* ---------- today: one switching panel ---------- */
 .card-head.panehead { padding: 10px 12px; }
 .seg.panes { gap: 3px; }
 .seg.panes button { min-height: 36px; padding: 6px 14px; font-size: var(--t-base); }
@@ -1327,26 +1454,43 @@ body.tour-on { overflow: hidden; }
   .seg.panes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
   .seg.panes button { text-align: center; }
 }
-#daypanes .context-disclosure > summary { padding: 12px 0; }
-#daypanes .context-detail { padding-bottom: 14px; }
-#daypanes .context-detail .tablewrap { margin-top: 8px; }
 
-/* Running low: one line per short ingredient, with the date it has to be
-   ordered by carrying the only colour on the card. */
+/* Running low: always on the page. One sentence when nothing is counted or
+   nothing is short; otherwise one line per ingredient, soonest first, with
+   when to order carrying the only colour on the card. */
+.lowline { font-size: var(--t-base); color: var(--ink-2); line-height: 1.55; }
+#runninglow .card-head { padding: 6px 18px; }
+#runninglow .card-body { padding: 12px 18px; }
 .lowlist { display: grid; }
 .lowrow {
-  display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 1.4fr) auto; gap: 14px; align-items: baseline;
-  padding: 12px 18px; border-bottom: 1px solid var(--line); font-size: var(--t-base);
+  display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 1fr) auto; gap: 14px; align-items: baseline;
+  padding: 4px 18px; border-bottom: 1px solid var(--line); font-size: var(--t-base);
 }
 .lowrow:last-child { border-bottom: 0; }
 .lowrow b { font-weight: 600; color: var(--ink); }
 .lowrow > span { color: var(--ink-2); }
 .lowrow .when { color: var(--warn); font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
-@media (max-width: 620px) { .lowrow { grid-template-columns: 1fr; gap: 3px; } }
+.lowrow.late .when { color: var(--down); }
+@media (max-width: 620px) { .lowrow { grid-template-columns: 1fr; gap: 3px; } .lowrow .when { white-space: normal; } }
+
+/* The adjust modal: the number with -5 -1 +1 +5 around it. */
+.stepper { display: flex; align-items: stretch; gap: 6px; }
+.stepper .step {
+  flex: 0 0 auto; min-width: 44px; min-height: 44px; border-radius: var(--r-xs); border: 1px solid var(--line-2);
+  background: var(--surface); box-shadow: var(--shadow-xs); color: var(--ink-2);
+  font-size: var(--t-base); font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.stepper .step:hover { background: var(--surface-2); color: var(--ink); }
+.stepper input {
+  flex: 1 1 auto; min-width: 0; width: 100%; text-align: center; min-height: 44px;
+  font-size: var(--t-xl); font-weight: 600; font-variant-numeric: tabular-nums;
+}
 
 /* Fingers, not pointers. On a touch screen every control gets room to be hit
    without the row next to it being hit instead. */
 @media (pointer: coarse) {
+  .headline button.tag { min-height: 44px; }
+  .action-open { min-height: 44px; }
   .btn, .btn.sm, .topbar-tools .btn.sm { min-height: 44px; height: auto; }
   .icon-btn, .topbar-tools .icon-btn { width: 44px; height: 44px; }
   .datebtn, .topbar-tools .datebtn { min-height: 44px; height: 44px; }
@@ -1527,4 +1671,3 @@ label.field > small.field-err { color: var(--down); }
    run the full width instead of leaving an empty panel on the right. */
 .headline.solo { grid-template-columns: minmax(0, 1fr); }
 .headline.solo .headline-main h2 { max-width: 40ch; }
-.headline.solo .headline-main .sum { max-width: 78ch; }

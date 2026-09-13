@@ -1,164 +1,138 @@
-# Quantify Architecture
+# Quantify architecture
 
-## System shape
+Contracts reviewed September 13, 2026.
 
-```text
-POS catalog + completed orders + live webhooks
-                         │
-                         ▼
-              Normalization and deduplication
-                         │
-        ┌────────────────┼────────────────┐
-        ▼                ▼                ▼
-  item/day sales   item/hour sales   menu interpretation
-        │                │                │
-        └──────────────┬─┴────────────────┘
-                       ▼
-       weather + calendar + broad event context
-                       │
-                       ▼
-       item-specific explainable ensemble model
-                       │
-          ┌────────────┼─────────────┐
-          ▼            ▼             ▼
-        Brief       Outlook       Results
-          │
-          ▼
-   owner HTML/text email
+## Runtime and application
+
+The local application uses Python, SQLite with WAL, browser JavaScript, and responsive HTML/CSS. It has no npm runtime or browser framework. `server.py` serves static files and JSON routes. Operating queries are scoped to an authenticated organization and location.
+
+```mermaid
+flowchart TD
+    Register[Register catalog and orders] --> Sales[Daily and hourly item sales]
+    Geography[Resolved place and time zone] --> Context[Weather and events]
+    Sales --> Forecast[Expected, Normal, and Make]
+    Context --> Forecast
+    Forecast --> Today[Today and Morning email]
+    Forecast --> Order[Order]
+    Recipes[Recipes, counts, packs, and suppliers] --> Order
+    Forecast --> Calls[Opening calls and revisions]
+    Calls --> History[History]
+    Sales --> History
+    Sales --> Updates[Updates]
+    Forecast --> Updates
+    Order --> Updates
 ```
 
-## Runtime
+The browser has five destinations: Today, Order, History, Updates, and Settings. `web/app.js` owns application state, navigation, sheets, and forms. `web/updates.js` owns feed requests, receipt state, notification timing, and feed rendering through callbacks. `web/index.html` loads `api.js`, `updates.js`, and `app.js` as ordered deferred scripts.
 
-- Python 3.11+ standard library
-- SQLite with WAL mode
-- Browser-native JavaScript
-- Responsive HTML/CSS
-- No npm runtime or external framework required
+## Ingestion and location context
 
-## Data ingestion
+Register catalog variations retain stable `pos_item_id` values and raw labels. `menu_intelligence.py` creates readable interpretations without replacing the register's identity. Text import requires a usable price and does not overwrite register-owned items.
 
-### POS catalog
+`pos_order_lines` is the normalization boundary for provider, order, and line identity. A changed order replaces its normalized lines and rebuilds affected daily and hourly aggregates. The application retains register order records. Where only aggregates are available, reconstructed ticket detail is labelled as rebuilt.
 
-Catalog variations are stored as stable `pos_item_id` values. The raw menu label remains the source of truth. The interpretation layer creates a normalized display label and broad operational family without overwriting the original.
+Square webhooks verify the signature over the public notification URL and exact raw body before processing. Provider configuration and retention determine which history can be synchronized.
 
-### POS orders
+Time zones govern trading dates, forecast dates, history, supplier cutoffs, and email schedules. Geography and time zone resolution are separate facts. A matched place point can support local context; an unresolved place cannot silently reuse default coordinates. Weather and event records must match the queried geography before use. [Personalization](PERSONALIZATION.md) describes coverage, source dates, and missing-context behavior.
 
-`pos_order_lines` is the idempotent raw-normalization boundary. Its composite primary key prevents duplicate provider/order/line records. When an order changes, Quantify removes the prior normalized lines for that order, inserts the current completed state, and rebuilds only the affected item/day aggregates.
+The resolver uses exact normalized city/state matches from the 2025 US Census place reference. A resolved place has `geography_status="city"`; unsupported or ambiguous places remain `"unverified"`. Existing coordinates without provenance are repaired from the saved place, with prior values retained in a setting. Event attendance and distance each carry provenance: missing values are exposed as `null`, venue capacity is not attendance, and provider rank is not a crowd count.
 
-Daily and hourly aggregates are stored separately for fast model and service-curve access.
+## Forecast and cache contracts
 
-### Webhooks
+`intelligence.py` combines a same-weekday baseline, regularized regression, and comparable historical days. Held-out history determines component weights. Each item returns whole-unit expected sales, a comparable baseline, a likely range, confidence, evidence, and preparation detail.
 
-Square webhook signatures are verified with HMAC-SHA256 over the public notification URL plus exact raw request body. Unverified webhook data is rejected before JSON processing.
+The `expected` and `model_expected` fields describe predicted sales. `baseline` describes normal sales. `make` describes preparation. A saved override changes Make exactly, including zero, without moving the sales prediction or its comparison. Override records include item, date, quantity, optional reason, author, and time.
 
-### Weather
+An item with fewer than seven selling days has `new_item=true`. The UI shows that it has no number yet. Forecast totals and ingredient demand exclude those rows. A location without history returns an explicit empty state.
 
-Historical weather is fetched in date-range chunks and upcoming weather by planning horizon. Records are cached by location/date. Model variables include high/low temperature, seasonal temperature anomaly, precipitation, snow, snowfall, UV, condition, and daylight.
+The reusable function is:
 
-### Events and day context
-
-Event records retain name, raw type, date/time, distance, attendance, relevance, and source. Known provider types are mapped to broad groups:
-
-- sports
-- concerts
-- conferences
-- festivals
-- performing arts
-- community
-- calendar
-- disruptions
-- other
-
-Unknown categories map to `other` and remain eligible. Event impact is continuous:
-
-```text
-relevance × attendance scale × distance decay × service-time overlap
+```python
+daily_brief(conn, location_id, target_date, week_days=7,
+            data_version=None, refresh=False)
 ```
 
-There is no hard two-mile cutoff. The model uses both group-specific loads and total event pressure.
+Its cache is bounded to 96 entries with a five-minute lifetime. The key includes database identity, location, date, requested horizon, data version, and model version. The data version reflects relevant sales, hourly sales, menu, location, integrations, settings, weather, events, overrides, counts, purchase orders, scores, cost assumptions, and recipes. In-process locks share a build for the same cache shard. Callers receive deep copies, so attaching costs or live state cannot mutate a cached result. `refresh=True` rebuilds the brief; it does not synchronize the register.
 
-Calendar context includes weekday, seasonal phase, holiday/occasion indicators, holiday eve/aftermath, long-weekend behavior, pay-cycle timing, month end, and daylight.
+Separate bounded caches hold training context and item models. Saved food-cost, staffing, or recipe changes rebuild the brief immediately, including edits within one timestamp, without changing the training version or refitting an unchanged sales model. Overrides likewise do not require retraining. Database identities distinguish files and in-memory connections.
 
-## Menu intelligence
+`forecast_runs` stores a result once per location, target date, model version, and data version. A unique index and INSERT OR IGNORE prevent repeated page reads from accumulating identical runs. This run log is separate from the opening forecast used for scoring.
 
-`menu_intelligence.py` normalizes punctuation and common POS abbreviations, then scores broad restaurant-item families using label, category, and modifiers.
+## Opening calls, revisions, and history
 
-Output includes:
+`intraday.py` saves an opening call only before service on the location's current trading date. A forecast generated after opening cannot be relabelled as a morning prediction. Once saved, the opening call is retained. Intraday revisions separately record changes as completed sales slots arrive.
 
-- Raw name
-- Normalized name
-- Broad item family
-- Daypart
-- Production unit
-- Directional material families
-- Confidence
-- Optional-review flag
+`transactions.py` scores completed days against opening calls where available. Otherwise it rebuilds a comparison from prior observations and records `call_source="reconstructed"`. Later revisions are described separately from opening accuracy. Scoring and day detail use the same rounded item quantities.
 
-The layer never fabricates an exact recipe. Unknown labels remain `menu-item` and `forecast_ready=true`.
+History Days uses calendar pagination. Its default page starts yesterday and includes dates without sales; next_before is exclusive. Day detail identifies closed days and avoids generating a sales review for them. Register receipts and reconstructed orders expose their source.
 
-## Forecast model
+## Recipes and supply
 
-For each item/date, Quantify builds:
+`item_composition` stores suggested or owner-confirmed recipe parts. Opening Menu queues missing recipes in the background and immediately returns existing rows with `pending_compositions`. The browser polls only while the same location's Menu tab remains active. An owner's saved recipe wins over a late generated result. Valid saved shares total between 95 and 105 inclusive.
 
-1. A weighted same-weekday baseline
-2. A regularized regression over calendar, weather, event, and trend features
-3. A nearest-analog estimate from contextually similar historical days
+`ordering.py` multiplies usable recipe quantities by Make across the selected dates. Ingredients without usable quantities remain in a review backlog. `supply.py` adds suppliers, packs, saved shelf counts, recorded incoming orders, and local delivery/cutoff rules. Common base units keep mass, volume, and counted units consistent. Pack purchases round only after a valid pack is configured.
 
-Candidate components are evaluated on held-out history. Validation performance determines ensemble weights. The output includes expected quantity, lower/upper likely range, confidence, drivers, model diagnostics, and comparable dates.
+Counts distinguish zero from unknown. Empty/null clears a count; zero stores an empty shelf. The count response includes recalculated order lines for immediate UI replacement. Supply attention uses a bounded cache and invalidates it after supplier, pack, count, or order changes.
 
-The item models are cached by database identity, location, item, target horizon, and data version. Cache entries invalidate when relevant sales/context data changes.
+Purchase order channels have distinct outcomes. Server email records the provider result, including failed and outbox states. A mail-app request without confirmation returns a draft and writes no order. Confirmation records it as sent by the operator. A site request records the operator's confirmation of external placement. Copying is not an order channel. Only eligible recorded deliveries reduce the remaining buying requirement.
 
-## Hourly curve
+Supplier websites and curated names are contact aids. Their presence does not establish a direct supplier API connection.
 
-The service curve learns the target weekday's historical hourly distribution, with fallbacks to broader history. It allocates expected units and revenue across the location's open hours.
+## Updates persistence and lifecycle
 
-## Results
+`quantify_app/updates.py` derives observations from the current brief, supply attention, and aggregate item/time sales. It does not use customer identity. Repeated time patterns require multiple comparable weekdays and expire when their service window ends.
 
-Results executes a walk-forward backtest. Each evaluation date uses only prior observations, preventing future leakage. Accuracy is based on POS item units and weighted absolute percentage error.
+| Table | Responsibility |
+| --- | --- |
+| operating_updates | Location facts, evidence, action, effective window, rank, and resolution |
+| operating_update_receipts | Per-user shown and read timestamps |
+| operating_update_checks | Last check time and review mode for each location |
+
+Stable note IDs let refresh update observations without losing receipts. Notes absent from a later refresh become resolved. Feed state is active, scheduled, expired, or resolved. The unread count includes active and scheduled notes. Earlier notes remain readable in a bounded history response.
+
+GET refreshes observations when the last check is more than five minutes old. Explicit refresh bypasses that interval and can use the optional writing service to rank supplied observation IDs. It cannot invent a title, quantity, claim, deadline, or action. Concurrent checks use an in-flight claim guard.
+
+The feed provides an important `notification` and an optional `timely_notification` for an active pattern. Opening and visibility-return reads consider only important notices. A visible session's five-minute poll may consider the timely field too. The browser rechecks expiry, defers while a sheet or typing is active, and displays one corner notice at most. It records `read:false` only after display, suppressing a repeat while leaving the note unread. Explicit read actions persist `read:true`.
+
+`QuantifyUpdates.create` receives transport, context, and rendering/navigation callbacks. Its load, panel, start, stop, and reset methods do not access application state directly. Request epochs and user/location keys discard late responses. Reset clears the old badge and feed; the app follows it with a new-context load. Stopping removes listeners, timers, and the notice. Local expiry timers prevent stale notices and badges surviving until the next poll.
+
+## Costs, email, and external services
+
+Cost estimates combine recipe/category food shares, staffing assumptions, owner-entered pay and employer payroll costs, and recurring expenses. Missing labor inputs produce unknown amounts and incomplete totals. Dated wage references are review material, not inferred payroll. [Personalization](PERSONALIZATION.md) documents sources and owner override rules.
+
+Morning email uses the location's time zone and saved send time. The local scheduler checks due messages while the application runs and records delivery attempts. Without a provider it writes an email outbox artifact. A saved message is not a delivered message. A hosted service needs an always-running worker and delivery monitoring.
+
+The numeric forecast operates locally. Optional writing services supply structured narrative, suggested recipes, or observation ranking, with deterministic local fallbacks. Cached writing and in-flight guards avoid duplicate work. External provider readiness is reported separately from local functionality.
+
+The optional model is configurable; model selection is not a finalized product promise. The transport uses a 45-second timeout and disables SDK retries. Composition and Updates calls explicitly carry their location ID for spend attribution.
+
+`budget.py` keeps completed-call token usage and estimated cost in `ai_spend`. Before another request, the application checks a $6 monthly recorded-spend threshold, 12 recorded forced generations per UTC day, and an estimated 60,000-token payload limit. A blocked, unavailable, or failed writing call uses the local fallback so the operating information remains available.
+
+This is a soft spend guard, not a guaranteed provider billing cap. It accounts for completed calls, has no atomic reservation for concurrent requests, and cannot fully account for billed failures or discrepancies in model pricing and usage. Provider-side limits and actual invoice monitoring remain necessary for a hard spending boundary. See [Constitution](CONSTITUTION.md) for the product's limits and cost assumptions.
+
+## Authentication and billing
+
+Account setup verifies email before workspace access. TOTP is optional. Passwords use salted PBKDF2-HMAC-SHA256; session bearer tokens and recovery codes are stored as hashes. The application must retain TOTP secrets to verify codes. Production secret storage and deployment controls remain operational responsibilities.
+
+Authenticated mutations require the session CSRF token. Location routes verify ownership through the session's organization. Public authentication, showcase, time zone, health, and provider webhook routes have their own boundaries. See [API reference](API_REFERENCE.md).
+
+`billing.public_catalog` supplies the public page and Account plans. Capacity is checked inside the location creation transaction; limits do not erase existing locations or history. Trial selection preserves dates. Paid changes use the provider portal, and checkout remains pending until a signed provider event arrives. Stripe signatures and configured price, currency, and recurrence are checked before applying commercial state. Legacy offers retain their terms. See [Pricing decision](PRICING_DECISION.md).
 
 ## Database groups
 
-### Tenant and operating data
+The current core schema version is 8. Initialization adds missing declared columns and runs pending versioned migrations. Geography, context provenance, and payroll provenance columns are additive. Updates and spend-ledger modules ensure their own tables before use.
 
-- `organizations`
-- `locations`
-- `menu_items`
-- `menu_interpretations`
-- `sales`
-- `sales_hourly`
-- `pos_order_lines`
-- `weather`
-- `events`
-- `context_daily`
-- `forecast_overrides`
-- `forecast_runs`
-- `integrations`
-- `settings`
+| Area | Main tables |
+| --- | --- |
+| Workspace | organizations, locations, settings, integrations |
+| Register and menu | menu_items, menu_interpretations, sales, sales_hourly, `pos_order_lines`, pos_orders, `item_composition` |
+| Context and forecasts | weather, events, context_daily, forecast_overrides, `forecast_runs`, forecast_calls, forecast_revisions, day_accuracy |
+| Supply | suppliers, supplier_items, stock_counts, purchase_orders |
+| Costs | cost_settings, category_costs, recurring_costs |
+| Updates | operating_updates, operating_update_receipts, operating_update_checks |
+| Writing and email | ai_generations, `ai_spend`, email_preferences, email_deliveries |
+| Account and billing | users, sessions, auth_challenges, email_verifications, recovery_codes, security_events, subscriptions, billing_events, cancellation_feedback |
 
-### Email
+## Local verification
 
-- `email_preferences`
-- `email_deliveries`
-
-### Security
-
-- `users`
-- `sessions`
-- `auth_challenges`
-- `recovery_codes`
-- `security_events`
-
-
-## Authentication and authorization
-
-The local package supports one organization and an owner account, but all operating lookups are scoped by organization and location. Passwords use PBKDF2-HMAC-SHA256 with a unique salt. TOTP secrets are generated per user, and recovery codes are stored only as hashes. The local database stores the TOTP secret because verification requires it; a hosted deployment should encrypt that field with managed application keys and rotate those keys operationally.
-
-State-changing requests require a valid session and matching CSRF token. Sessions use opaque random bearer values; only their hashes are stored.
-
-A hosted multi-tenant deployment must add formal tenant-isolation tests, role-based permissions, encrypted provider-secret storage, secure-cookie enforcement, key rotation, audit retention, and operational monitoring.
-
-## Email scheduler
-
-A lightweight local thread checks due email preferences while the application is running. It uses each location's IANA time zone and sends at most once per local forecast date.
-
-Production should move this function into an always-on job queue or scheduled worker with retries, delivery metrics, dead-letter handling, and provider webhooks.
+Use a copied database selected with QUANTIFY_DB for experiments. QUANTIFY_AUTH_BYPASS=1 is a local QA convenience. QUANTIFY_DISABLE_SCHEDULER=1 disables background scheduler work. Run `node --check web/app.js`, `node --check web/updates.js`, and `python -m pytest tests/ -q` for source and contract checks. Browser QA should cover actual API integration as well as delayed fixture responses, context changes, read persistence, expiry, and touch layouts. Identify fixture screenshots as fixtures.

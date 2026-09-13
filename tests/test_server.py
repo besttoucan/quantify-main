@@ -134,6 +134,37 @@ class ServerTests(unittest.TestCase):
 
     # -- gates ---------------------------------------------------------------
 
+    def test_updates_feed_and_receipts_are_scoped_and_protected(self):
+        client = self._account("updates@quantify.test", "Updates owner")
+        now = datetime.now(timezone.utc)
+        with connect(self.db_path) as conn:
+            org = conn.execute("SELECT organization_id FROM users WHERE email='updates@quantify.test'").fetchone()[0]
+            _insert_location(conn, "loc-updates", org, "Updates Cafe", "UTC")
+            conn.commit()
+            note = server.updates._note("stock-test", "stock", "important", "Coffee is running low",
+                "One bag is left.", "Counted today.", now, expires=now + timedelta(hours=2))
+            server.updates.save_observations(conn, "loc-updates", [note], now)
+        with patch.object(server.updates, "refresh"):
+            response, feed = client.call("GET", "/api/updates?location_id=loc-updates")
+            self.assertEqual(response.status, 200, feed)
+            note_id = feed["notification"]["id"]
+            response, _ = self.two.call("GET", "/api/updates?location_id=loc-updates")
+            self.assertEqual(response.status, 400)
+            path = "/api/updates/read?location_id=loc-updates"
+            response, _ = client.call("POST", path, {"ids": [note_id]}, with_csrf=False)
+            self.assertEqual(response.status, 403)
+            response, seen = client.call("POST", path, {"ids": [note_id], "read": False})
+            self.assertEqual(response.status, 200, seen)
+            self.assertIsNone(seen["notification"])
+            self.assertEqual(seen["unread_count"], 1)
+            response, read = client.call("POST", path, {"ids": [note_id], "read": True})
+            self.assertEqual(response.status, 200, read)
+            self.assertEqual(read["unread_count"], 0)
+            response, _ = client.call("POST", path, {"ids": ["not-here"], "read": True})
+            self.assertEqual(response.status, 400)
+            response, refreshed = client.call("POST", "/api/updates/refresh?location_id=loc-updates", {})
+            self.assertEqual(response.status, 200, refreshed)
+
     def test_the_api_needs_a_session(self) -> None:
         response, data = _Client(self.port).call("GET", "/api/bootstrap")
         self.assertEqual(response.status, 403)

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from quantify_app import ai, billing, costs, intraday, localtime, ordering, supply, timezones, transactions
+from quantify_app import ai, billing, costs, intraday, localtime, ordering, supply, timezones, transactions, updates
 from quantify_app.auth import (
     EMAIL_CODE_MINUTES,
     auth_state,
@@ -1155,6 +1155,23 @@ class QuantifyHandler(BaseHTTPRequestHandler):
         # tomorrow's brief all evening, and the opening call would never lock
         # because its date would never match.
         today = _location_today(conn, location_id)
+
+        if path == "/api/updates" and method == "GET":
+            updates.refresh(conn, location_id)
+            self.json_response(updates.feed(conn, location_id, session["user_id"]))
+            return True
+
+        if path == "/api/updates/refresh" and method == "POST":
+            self._read_json()
+            updates.refresh(conn, location_id, force=True)
+            self.json_response(updates.feed(conn, location_id, session["user_id"]))
+            return True
+
+        if path == "/api/updates/read" and method == "POST":
+            data = self._read_json()
+            updates.acknowledge(conn, location_id, session["user_id"], data.get("ids", []), read=data.get("read") is True)
+            self.json_response(updates.feed(conn, location_id, session["user_id"]))
+            return True
 
         if path == "/api/brief" and method == "GET":
             target = parse_date((query.get("date") or [today.isoformat()])[0])

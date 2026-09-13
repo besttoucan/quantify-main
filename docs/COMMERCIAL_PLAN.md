@@ -1,5 +1,7 @@
 # Quantify Commercial Plan
 
+Historical proposal, superseded on 2026-09-13 by [the pricing decision](PRICING_DECISION.md). The prices, trial length and feature priorities below are retained as prior planning assumptions, not the current offer. Existing customer subscription records remain unchanged.
+
 ## Final price
 
 ### Founding cohort

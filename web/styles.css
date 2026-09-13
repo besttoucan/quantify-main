@@ -929,7 +929,7 @@ input.mini { width: 74px; text-align: right; padding: 6px 8px; margin: 0; }
 }
 @media (max-width: 620px) {
   .screen-rail-head { display: none; }
-  .screen-nav-list { width: 100%; grid-auto-flow: row; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .screen-nav-list { width: 100%; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); grid-template-columns: none; }
   .screen-nav { flex-direction: column; justify-content: center; gap: 3px; padding: 6px 2px; font-size: var(--t-base); }
   .screen-top .seg { margin-left: 0; }
   .sample-figures { gap: 8px 18px; }
@@ -1140,6 +1140,18 @@ input.mini { width: 74px; text-align: right; padding: 6px 8px; margin: 0; }
 .account-edit input { flex: 1 1 200px; margin: 0; }
 
 .plancard { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 22px; align-items: center; padding: 20px 22px; }
+.pricing { display: grid; gap: 16px; margin: 36px 0; max-width: 880px; }
+.pricing h2 { font-size: var(--t-xl); }
+.pricing > p { color: var(--ink-2); line-height: 1.6; max-width: 76ch; }
+.pricing > .btn { justify-self: start; }
+.plan-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.plan-option { display: grid; align-content: start; gap: 12px; min-width: 0; padding: 20px; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }
+.plan-option h3 { font-size: var(--t-lg); font-weight: 600; }
+.plan-option p, .plan-choice-note { font-size: var(--t-base); color: var(--ink-2); line-height: 1.5; }
+.plan-option .plan-amount { font-size: var(--t-2xl); font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.plan-amount span { font-size: var(--t-base); font-weight: 400; color: var(--ink-2); }
+.plan-option .btn { justify-self: start; }
+@media (max-width: 620px) { .plan-options { grid-template-columns: minmax(0, 1fr); } }
 .plancard .price { font-size: var(--t-2xl); font-weight: 600; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
 .plancard .price span { font-size: var(--t-base); font-weight: 400; color: var(--ink-3); letter-spacing: 0; }
 .plan-state { margin-top: 10px; font-size: var(--t-base); color: var(--ink); line-height: 1.55; max-width: 48ch; }
@@ -1569,7 +1581,7 @@ body.tour-on { overflow: hidden; }
   input[type=date], input[type=search], input[type=tel], input[type=url], input:not([type]),
   select, textarea, .count input, .qty input.qin, input.mini, .code-input { font-size: var(--t-lg); }
   .toast-x { min-width: 44px; min-height: 44px; display: grid; place-items: center; }
-  #f-composition input, #f-composition select { font-size: var(--t-lg); min-height: 44px; }
+  #f-composition input, #f-composition select, #f-new-location input, #f-new-location select { font-size: var(--t-lg); min-height: 44px; }
 }
 
 

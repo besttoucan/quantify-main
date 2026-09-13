@@ -135,10 +135,10 @@ class ServerTests(unittest.TestCase):
     # -- gates ---------------------------------------------------------------
 
     def test_updates_feed_and_receipts_are_scoped_and_protected(self):
-        client = self._account("updates@quantify.test", "Updates owner")
+        client = self.one
         now = datetime.now(timezone.utc)
         with connect(self.db_path) as conn:
-            org = conn.execute("SELECT organization_id FROM users WHERE email='updates@quantify.test'").fetchone()[0]
+            org = self.org_one
             _insert_location(conn, "loc-updates", org, "Updates Cafe", "UTC")
             conn.commit()
             note = server.updates._note("stock-test", "stock", "important", "Coffee is running low",
@@ -361,6 +361,34 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(data["error"], "Payments are not set up on this account yet")
 
     # -- static files and the connection -----------------------------------------
+
+    def test_location_allowance_and_blank_location_creation(self) -> None:
+        client = self._account('location-plan@quantify.test', 'Location plan')
+        body = {'name': 'New cafe', 'concept': 'Cafe', 'place': 'Denver CO', 'open_hour': 8, 'close_hour': 19}
+        response, result = client.call('POST', '/api/locations', body)
+        self.assertEqual(response.status, 201, result)
+        location_id = result['location']['id']
+        self.assertEqual(result['location']['timezone'], 'America/Denver')
+        with connect(self.db_path) as conn:
+            for table in ['menu_items', 'sales', 'forecast_calls', 'context_daily']:
+                self.assertEqual(conn.execute(f'SELECT COUNT(*) FROM {table} WHERE location_id=?', (location_id,)).fetchone()[0], 0)
+        response, result = client.call('POST', '/api/locations', body | {'name': 'Second cafe'})
+        self.assertEqual(response.status, 400, result)
+        response, result = client.call('POST', '/api/billing/plan', {'plan': 'team'})
+        self.assertEqual(response.status, 200, result)
+        for name in ['Second cafe', 'Third cafe']:
+            response, result = client.call('POST', '/api/locations', body | {'name': name})
+            self.assertEqual(response.status, 201, result)
+        response, result = client.call('POST', '/api/locations', body | {'name': 'Fourth cafe'})
+        self.assertEqual(response.status, 400, result)
+        response, result = client.call('POST', '/api/billing/plan', {'plan': 'solo'})
+        self.assertEqual(response.status, 400, result)
+        response, result = client.call('GET', '/api/bootstrap')
+        self.assertEqual(len(result['locations']), 3)
+
+    def test_unsigned_payment_webhook_cannot_change_plans(self) -> None:
+        response, result = _Client(self.port).call('POST', '/api/webhooks/stripe', {'type': 'customer.subscription.updated'}, with_csrf=False)
+        self.assertEqual(response.status, 403, result)
 
     def test_unknown_assets_are_404_and_screens_get_the_shell(self) -> None:
         response, data = _Client(self.port).call("GET", "/nope.js")

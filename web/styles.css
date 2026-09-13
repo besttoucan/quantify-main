@@ -626,7 +626,7 @@ table.dt.stack { display: table; gap: 0; }
 .outlook-row:last-child { border-bottom: 0; }
 .outlook-row:hover { background: var(--surface-2); }
 .outlook-row b { font-size: var(--t-md); font-weight: 600; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.outlook-row small { display: block; font-size: var(--t-sm); color: var(--ink-4); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.outlook-row small { display: block; font-size: var(--t-sm); color: var(--ink-2); margin-top: 1px; white-space: normal; }
 .outlook-row .money { font-variant-numeric: tabular-nums; }
 .outlook-head {
   display: grid; grid-template-columns: 132px 118px minmax(0, 1fr) 120px; gap: 14px;
@@ -1230,6 +1230,7 @@ input.mini { width: 74px; text-align: right; padding: 6px 8px; margin: 0; }
 .updates-spinner { width: 14px; height: 14px; flex: 0 0 auto; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: updates-spin .7s linear infinite; }
 @keyframes updates-spin { to { transform: rotate(360deg); } }
 .updates-notice { position: fixed; z-index: 180; right: 20px; bottom: max(20px, env(safe-area-inset-bottom)); width: min(380px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); overflow: auto; padding: 16px; border: 1px solid var(--line-2); border-radius: var(--r); background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+body:has(.savebar) .updates-notice { bottom: calc(88px + env(safe-area-inset-bottom)); max-height: calc(100dvh - 120px - env(safe-area-inset-bottom)); }
 .updates-notice-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: -8px; margin-right: -8px; }
 .updates-dismiss { display: grid; place-items: center; width: 44px; height: 44px; flex: 0 0 auto; border-radius: var(--r-xs); }
 .updates-dismiss:hover { background: var(--surface-3); }
@@ -1240,6 +1241,7 @@ input.mini { width: 74px; text-align: right; padding: 6px 8px; margin: 0; }
 .updates-notice > .btn { min-height: 44px; margin-top: 12px; }
 @media (max-width: 900px) {
   .updates-notice { right: 16px; bottom: calc(var(--bottom-nav-h, 64px) + 12px + env(safe-area-inset-bottom)); max-height: calc(100dvh - var(--bottom-nav-h, 64px) - 44px - env(safe-area-inset-bottom)); }
+  body:has(.savebar) .updates-notice { bottom: calc(var(--bottom-nav-h, 64px) + 88px + env(safe-area-inset-bottom)); max-height: calc(100dvh - var(--bottom-nav-h, 64px) - 120px - env(safe-area-inset-bottom)); }
 }
 @media (max-width: 620px) {
   .updates-card { padding: 16px; }

@@ -114,6 +114,17 @@ def test_simultaneous_briefs_write_one_run(sample):
         assert conn.execute("SELECT COUNT(*) FROM forecast_runs").fetchone()[0] == 1
 
 
+def test_unknown_geography_does_not_publish_fallback_weather(sample):
+    database, location, _, _ = sample
+    with connect(database) as conn:
+        conn.execute("UPDATE locations SET city='Unknown place',region='ZZ' WHERE id=?", (location,))
+        brief = intelligence.daily_brief(conn, location, TODAY, week_days=1)
+        assert brief["context"]["weather"]["available"] is False
+        assert brief["context"]["weather"]["high"] is None
+        assert brief["context"]["weather"]["low"] is None
+        assert brief["context"]["material_events"] == []
+
+
 def test_new_items_do_not_add_invented_demand_and_import_preserves_register(sample):
     database, location, _, _ = sample
     with connect(database) as conn:

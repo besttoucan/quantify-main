@@ -1566,12 +1566,13 @@ def forecast_day(
         "items": items,
         "service_curve": curve,
         "context": {
-            "weather": {
+            "weather": ({
                 "condition": context["weather_condition"], "high": round(context["temp_high"]),
                 "low": round(context["temp_low"]), "precipitation_mm": round(context["precipitation_mm"], 1),
                 "snowfall_cm": round(context.get("snowfall_cm", 0.0), 1), "uv_index": round(context.get("uv_index", 0.0), 1),
-                "source": context["weather_source"],
-            },
+                "source": context["weather_source"], "available": True,
+            } if context["weather_available"] else {"available": False, "source": "", "condition": None,
+                "high": None, "low": None, "precipitation_mm": None, "snowfall_cm": None, "uv_index": None}),
             "occasion_name": context["occasion_name"],
             "signals": context_signals,
             "material_events": [event for event in context["events"] if event["impact"] >= 0.12][:5],

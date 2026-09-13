@@ -1552,7 +1552,7 @@
         const change = Number(day.revenue_change_percent ?? day.change_percent ?? 0);
         const cls = change >= 4 ? "up" : change <= -4 ? "down" : "";
         const surge = (day.top_surges || [])[0];
-        const under = day.occasion_name || (day.weather ? `${day.weather.condition}, ${day.weather.high}°` : "");
+        const under = day.occasion_name || (day.weather?.available !== false && has(day.weather?.high) ? `${day.weather.condition}, ${day.weather.high}°` : "");
         const line = day.top_item ? (has(day.top_item_units) ? `${num(day.top_item_units)} ${day.top_item}` : day.top_item) : "";
         return `<button class="outlook-row" data-open-date="${e(day.date)}">
           <span><b>${e(dMed(day.date))}</b>${under ? `<small>${e(under)}</small>` : ""}</span>
@@ -3268,7 +3268,7 @@
             ${unitField("Employer payroll costs on top", "payroll_load_percent", w.payroll_load_source === "owner" ? s.payroll_load_percent : "", "%", 'step="0.01" min="0" max="60"', "Employer taxes, insurance and benefits divided by gross wages, from the same payroll period. Blank means unknown.")}
           </div>
           <p class="field-note">${known(w.loaded) ? `With your figures, an hour costs about ${money(w.loaded, true)} including employer payroll costs.` : "Wages and money kept stay unknown until both pay fields are entered."}</p>
-          <details class="cost-reference"><summary>Wage and payroll references</summary><div class="cost-reference-body">
+          <details class="cost-reference"><summary>Wage and payroll references${reference.place ? ` for ${e(reference.place)}` : ""}</summary><div class="cost-reference-body">
             <p>${referenceNote} <a href="${e(reference.source_url || "https://www.dol.gov/agencies/whd/minimum-wage/state")}" target="_blank" rel="noopener">Wage source</a>.</p>
             ${(payroll.components || []).map((row) => `<p><b>${e(row.name)}: ${e(row.percent)}%.</b> ${e(row.detail)}</p>`).join("")}
             ${(payroll.notes || []).map((note) => `<p>${e(note)}</p>`).join("")}
@@ -4333,8 +4333,7 @@
     const c = d.costs;
     const kept = c && c.left_after_costs !== undefined && c.left_after_costs !== null
       ? `Kept about ${money(c.left_after_costs)} after ${money(c.cogs)} in food and ${money(c.labour)} in wages.`
-        + (c.configured === false ? ` Wages are estimated until you enter yours in <a href="#" data-stab="costs">Settings > Costs</a>.` : "")
-      : "";
+      : `Wages and money kept need your actual pay and employer costs. <a href="/app" data-stab="costs">Add them in Settings > Costs</a>.`;
     const went = `<section class="isec"><h2>How the day went</h2>
       <p class="lede">${e(sold)} ${e(items)}</p>
       ${kept ? `<p class="lede isec-note">${kept}</p>` : ""}

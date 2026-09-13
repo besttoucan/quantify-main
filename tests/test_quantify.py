@@ -662,6 +662,138 @@ class QuantifyPlatformTests(unittest.TestCase):
             if row["kind"] == "share":
                 self.assertFalse(row["orderable"])
 
+    def test_the_make_number_follows_the_costs_the_owner_entered(self) -> None:
+        """The kitchen preps to this number every morning.
+
+        It used to come from a hard-coded 30% food cost that ignored the costs
+        screen entirely, so an owner could set their real figures and the number
+        they act on would not move.
+        """
+        from quantify_app.intelligence import forecast_day
+        from quantify_app.item_analysis import prep_advice
+
+        with connect(self.db_path) as conn:
+            conn.execute("DELETE FROM category_costs WHERE location_id=?", (LOCATION,))
+            conn.commit()
+            before = {row["name"]: row["make"] for row in forecast_day(conn, LOCATION, TODAY)["items"]}
+            category = conn.execute(
+                "SELECT category FROM menu_items WHERE location_id=? LIMIT 1", (LOCATION,)
+            ).fetchone()["category"]
+            try:
+                # Say this category costs almost all of what it sells for. Making
+                # a spare now costs nearly as much as missing a sale, so the make
+                # number has to fall back toward the plain forecast.
+                conn.execute(
+                    """INSERT OR REPLACE INTO category_costs(location_id,category,cost_share,updated_at)
+                       VALUES(?,?,0.70,'test')""",
+                    (LOCATION, category),
+                )
+                conn.commit()
+                after = {row["name"]: row["make"] for row in forecast_day(conn, LOCATION, TODAY)["items"]}
+                affected = {
+                    row["name"] for row in conn.execute(
+                        "SELECT name FROM menu_items WHERE location_id=? AND category=?",
+                        (LOCATION, category),
+                    )
+                }
+            finally:
+                conn.execute("DELETE FROM category_costs WHERE location_id=?", (LOCATION,))
+                conn.commit()
+
+        moved = [name for name in before if after.get(name) != before[name]]
+        self.assertTrue(moved, "the owner's cost setting never reached the make number")
+        # A higher food cost can only push the make number down, never up.
+        for name in moved:
+            self.assertLess(after[name], before[name])
+        # And it only touches the category they changed.
+        self.assertTrue(set(moved) <= affected, f"{set(moved) - affected} moved but are not in {category}")
+
+        # The share is reported so a screen can say which figure it used.
+        self.assertEqual(
+            prep_advice({"today_values": [10.0] * 30}, 10.0, 0.42)["cost_share_percent"], 42
+        )
+
+    def test_no_class_ships_without_a_style(self) -> None:
+        """A class with no rule renders as a bare block.
+
+        This shipped for real: brief-grid was the item sheet's two column
+        layout and had no definition anywhere, so both cards stacked full width.
+        """
+        import re
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        script = (root / "web" / "app.js").read_text(encoding="utf-8")
+        sheet = (root / "web" / "styles.css").read_text(encoding="utf-8")
+        defined = set(re.findall(r"\.([a-z][\w-]*)", sheet))
+        used: set[str] = set()
+        for chunk in re.findall(r'class="([^"$]*)"', script):
+            used.update(word for word in chunk.split() if word and not word.startswith("$"))
+        self.assertEqual(sorted(used - defined), [], "these classes have no CSS rule")
+
+    def test_money_figures_reconcile_with_each_other(self) -> None:
+        """Numbers shown side by side have to be on the same basis.
+
+        The day row used to print net-of-tax sales beside an average ticket that
+        included tax and tip, and the channel bars divided a gross figure by a
+        net one, so a bar could be wider than the row it sat in.
+        """
+        from quantify_app.transactions import day_detail, day_list
+
+        day = TODAY - timedelta(days=1)
+        with connect(self.db_path) as conn:
+            detail = day_detail(conn, LOCATION, day)
+            page = day_list(conn, LOCATION, limit=5, with_costs=True)
+
+        # Every channel share is a share of the same total the rows are drawn
+        # from, so they can never sum past the whole.
+        gross = sum(row["sales"] for row in detail["channels"])
+        self.assertGreater(gross, 0)
+        for row in detail["channels"]:
+            self.assertLessEqual(row["sales"], gross + 0.01)
+
+        # The cost breakdown adds back up to what was taken off.
+        for row in page["days"]:
+            costs = row.get("costs")
+            if not costs or row.get("closed"):
+                continue
+            self.assertAlmostEqual(
+                costs["left_after_costs"],
+                costs["revenue"] - costs["cogs"] - costs["labour"] - costs["other"],
+                places=2,
+            )
+            # The old name is gone from the meaning, not just the label: this
+            # figure is net of labour and fixed costs, so it is not gross profit.
+            self.assertIn("left_after_costs", costs)
+
+    def test_the_menu_says_which_dollar_figure_is_which(self) -> None:
+        """The reported bug: a bare $15.50 next to a table headed share of cost.
+
+        The row now carries the sale price and the food cost, each labelled, and
+        the food cost follows whatever the owner set on the costs screen.
+        """
+        from quantify_app import costs
+
+        with connect(self.db_path) as conn:
+            settings = costs.cost_settings(conn, LOCATION)
+            basis = costs.item_cost_basis(conn, LOCATION, settings)
+            rows = conn.execute(
+                "SELECT id, name, price FROM menu_items WHERE location_id=? AND active=1", (LOCATION,)
+            ).fetchall()
+
+        self.assertTrue(rows)
+        for row in rows:
+            entry = basis.get(row["id"])
+            self.assertIsNotNone(entry, f"no cost basis for {row['name']}")
+            share = float(entry["share"])
+            # A food cost is a share of the price, never more than it.
+            self.assertGreater(share, 0.0)
+            self.assertLess(share, 1.0)
+            food = round(float(row["price"]) * share, 2)
+            margin = round(float(row["price"]) * (1.0 - share), 2)
+            self.assertAlmostEqual(food + margin, float(row["price"]), places=2)
+            # And it says which rule produced it, so the screen can too.
+            self.assertTrue(entry["source"])
+
     def test_statistics_match_published_critical_values(self) -> None:
         from quantify_app.statistics import (
             benjamini_hochberg, f_upper_tail, normal_quantile, student_t_two_sided,

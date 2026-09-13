@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from quantify_app import ai, billing, costs, intraday, localtime, ordering, timezones, transactions
+from quantify_app import ai, billing, costs, intraday, localtime, ordering, supply, timezones, transactions
 from quantify_app.auth import (
     auth_state,
     begin_login,
@@ -1062,6 +1062,14 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                     (location_id,),
                 ).fetchall()
             }
+            # What each item costs to make, so the menu screen can say which of
+            # its two dollar figures is the price and which is the cost. The
+            # owner could not tell them apart, and they were forty pixels apart.
+            try:
+                settings = costs.cost_settings(conn, location_id)
+                basis = costs.item_cost_basis(conn, location_id, settings)
+            except Exception:  # noqa: BLE001 - the menu must render without costing
+                basis = {}
             for item in view["items"]:
                 record = stored.get(item["id"])
                 item["composition"] = {
@@ -1071,6 +1079,13 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                     "components": json.loads(record["components_json"] or "[]"),
                     "writer": record["writer"],
                 } if record else None
+                entry = basis.get(item["id"])
+                if entry:
+                    share = float(entry["share"])
+                    item["cost_share_percent"] = round(share * 100)
+                    item["food_cost"] = round(float(item["price"]) * share, 2)
+                    item["margin"] = round(float(item["price"]) * (1.0 - share), 2)
+                    item["cost_source"] = entry["source"]
             view["writer"] = ai.status()
             self.json_response(view)
             return True
@@ -1128,7 +1143,46 @@ class QuantifyHandler(BaseHTTPRequestHandler):
         if path == "/api/ordering" and method == "GET":
             days = max(1, min(14, int((query.get("days") or ["3"])[0])))
             start = parse_date((query.get("start") or [today.isoformat()])[0])
-            self.json_response(ordering.order_plan(conn, location_id, start, days))
+            plan = ordering.order_plan(conn, location_id, start, days)
+            self.json_response(supply.attach(conn, location_id, plan) if plan.get("ready") else plan)
+            return True
+
+        # -- Supply: suppliers, how things are bought, what is on the shelf ----
+        if path == "/api/supply" and method == "GET":
+            self.json_response(supply.supplier_view(conn, location_id))
+            return True
+
+        if path == "/api/supply/supplier" and method in {"POST", "PUT"}:
+            self.json_response(supply.save_supplier(conn, location_id, self._read_json()))
+            return True
+
+        if path == "/api/supply/supplier" and method == "DELETE":
+            data = self._read_json()
+            supply.delete_supplier(conn, location_id, str(data.get("id", "")))
+            self.json_response({"ok": True})
+            return True
+
+        if path == "/api/supply/item" and method in {"POST", "PUT"}:
+            self.json_response(supply.save_item(conn, location_id, self._read_json()))
+            return True
+
+        if path == "/api/supply/count" and method in {"POST", "PUT"}:
+            data = self._read_json()
+            rows = data.get("counts") if isinstance(data.get("counts"), list) else [data]
+            saved = [supply.save_count(conn, location_id, row, session.get("display_name", "")) for row in rows]
+            self.json_response({"saved": saved})
+            return True
+
+        if path == "/api/supply/attention" and method == "GET":
+            self.json_response(supply.attention(conn, location_id))
+            return True
+
+        if path == "/api/supply/order" and method == "POST":
+            self.json_response(supply.record_order(conn, ROOT, location_id, self._read_json(), session.get("display_name", "")))
+            return True
+
+        if path == "/api/supply/orders" and method == "GET":
+            self.json_response({"orders": supply.recent_orders(conn, location_id)})
             return True
 
         if path == "/api/costs" and method == "GET":

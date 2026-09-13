@@ -461,6 +461,81 @@ CREATE INDEX IF NOT EXISTS idx_email_verify_user ON email_verifications(user_id,
 CREATE INDEX IF NOT EXISTS idx_forecast_calls_day ON forecast_calls(location_id, date);
 CREATE INDEX IF NOT EXISTS idx_forecast_revisions_day ON forecast_revisions(location_id, date, slot);
 CREATE INDEX IF NOT EXISTS idx_recurring_costs_location ON recurring_costs(location_id);
+
+-- Supply: who the kitchen buys from, how each thing is bought, what is on the
+-- shelf, and what has been ordered. Everything below hangs off the ingredient
+-- name the recipe lines use, lowercased, because that is the only identity an
+-- ingredient has until a supplier's own catalogue is connected.
+
+CREATE TABLE IF NOT EXISTS suppliers (
+    id TEXT PRIMARY KEY,
+    location_id TEXT NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    rep_name TEXT NOT NULL DEFAULT '',
+    order_email TEXT NOT NULL DEFAULT '',
+    phone TEXT NOT NULL DEFAULT '',
+    website TEXT NOT NULL DEFAULT '',
+    account_number TEXT NOT NULL DEFAULT '',
+    -- Weekdays they deliver, as "mon,thu". Empty means any day, which is how a
+    -- cash and carry works.
+    delivery_days TEXT NOT NULL DEFAULT '',
+    -- Local time an order has to be in by, "15:00". Empty means no cutoff.
+    cutoff_time TEXT NOT NULL DEFAULT '',
+    -- Days between placing the order and the truck arriving. 0 is same day.
+    lead_days INTEGER NOT NULL DEFAULT 1,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS supplier_items (
+    location_id TEXT NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+    ingredient TEXT NOT NULL,
+    supplier_id TEXT REFERENCES suppliers(id) ON DELETE SET NULL,
+    -- How it is bought. pack_size in pack_unit per pack_label, so "80 patty per
+    -- case". 0 means nobody has said yet and the screen keeps to recipe units.
+    pack_size REAL NOT NULL DEFAULT 0,
+    pack_unit TEXT NOT NULL DEFAULT '',
+    pack_label TEXT NOT NULL DEFAULT '',
+    product_code TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(location_id, ingredient)
+);
+
+CREATE TABLE IF NOT EXISTS stock_counts (
+    location_id TEXT NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+    ingredient TEXT NOT NULL,
+    -- Kept in the base unit for its kind (grams, millilitres, or a count) so a
+    -- count taken in pounds still adds up with usage worked out in grams.
+    on_hand_base REAL NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'count',
+    counted_at TEXT NOT NULL,
+    counted_by TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(location_id, ingredient)
+);
+
+CREATE TABLE IF NOT EXISTS purchase_orders (
+    id TEXT PRIMARY KEY,
+    location_id TEXT NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+    supplier_id TEXT REFERENCES suppliers(id) ON DELETE SET NULL,
+    supplier_name TEXT NOT NULL DEFAULT '',
+    -- email: sent by Quantify. mail-app: opened in the operator's own mail
+    -- program. site: typed into the supplier's portal. copy: copied to paste.
+    channel TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'sent',
+    window_start TEXT NOT NULL DEFAULT '',
+    window_end TEXT NOT NULL DEFAULT '',
+    expected_on TEXT NOT NULL DEFAULT '',
+    lines_json TEXT NOT NULL DEFAULT '[]',
+    line_count INTEGER NOT NULL DEFAULT 0,
+    sent_at TEXT NOT NULL,
+    sent_by TEXT NOT NULL DEFAULT '',
+    artifact_path TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_suppliers_location ON suppliers(location_id);
+CREATE INDEX IF NOT EXISTS idx_purchase_orders_location ON purchase_orders(location_id, sent_at DESC);
 """
 
 # Columns added after the first release. SQLite has no "add column if missing",

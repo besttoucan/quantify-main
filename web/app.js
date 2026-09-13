@@ -20,6 +20,10 @@
     costs: null,
     tour: null,
     order: { days: 3, edits: {}, extras: [] },
+    todayPane: "make",
+    outlook: null,
+    menu: null,
+    attention: null,
     orders: { rows: [], nextDate: null, nextSkip: 0, hasMore: true, loading: false, range: "all" },
     challenge: "",
     setup: null,
@@ -62,6 +66,7 @@
     forecast: '<path d="M3 17l5-6 4 3 4-6 5 5"/><path d="M3 21h18"/>',
     history: '<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v4l3 2"/>',
     menu: '<path d="M4 5h16M4 12h16M4 19h10"/>',
+    order: '<path d="M3 7.5 12 3l9 4.5v9L12 21l-9-4.5v-9Z"/><path d="M3 7.5 12 12l9-4.5M12 12v9"/>',
     settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 7.5 19a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3 13.5H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 7.5a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/>',
     chevR: '<path d="M9 5l7 7-7 7"/>',
     chevL: '<path d="M15 5l-7 7 7 7"/>',
@@ -178,6 +183,11 @@
     const known = S.boot.locations.some((row) => row.id === S.locationId);
     if (!known) S.locationId = S.boot.default_location_id || "";
     localStorage.setItem("quantify.location", S.locationId);
+    // Two screens that used to be top level now live inside others. A browser
+    // that remembers the old name lands on the new place, not on a blank page.
+    if (S.view === "forecast") { S.view = "today"; S.todayPane = "ahead"; }
+    if (S.view === "menu") { S.view = "settings"; S.settingsTab = "menu"; }
+    if (!["today", "ordering", "history", "settings"].includes(S.view)) S.view = "today";
     await loadView();
     startPulse();
     // First arrival gets the tutorial, once. It waits for the real screen so
@@ -217,7 +227,6 @@
 
       <section class="hero">
         <div class="hero-copy fade-up">
-          <span class="pill">For any business, small and big</span>
           <h1>Know how much of each thing to make tomorrow.</h1>
           <p>Quantify reads what your register has already sold and works out how many of each item tomorrow needs. It gives you a number per item, what that number rests on, and how far off it has been before.</p>
           <div class="hero-actions">
@@ -298,11 +307,7 @@
       <footer class="site-foot">
         <div class="site-foot-inner">
           ${wordmark()}
-          <p>Demand forecasting for anyone who has to decide how much to make.</p>
-          <div class="site-foot-links">
-            <a href="/login" data-link="/login">Sign in</a>
-            <a href="/signup" data-link="/signup">Create account</a>
-          </div>
+          <p>Built for kitchens that have to decide how much to make before anyone has ordered it.</p>
         </div>
       </footer>
     </div>`;
@@ -344,9 +349,9 @@
         <div class="screen-tiles">
           ${[
             ["Expected sales", money(f.expected_sales), `${money(f.normal_sales)} on a normal ${f.weekday}`, `${f.difference_sales >= 0 ? "+" : "-"}${money(Math.abs(f.difference_sales))}`, f.difference_sales >= 0],
-            ["Items to make", num(f.expected_units), `${num(f.normal_units)} on a normal ${f.weekday}`, `${f.difference_units >= 0 ? "+" : ""}${num(f.difference_units)}`, f.difference_units >= 0],
+            ["Units it will sell", num(f.expected_units), `${num(f.normal_units)} on a normal ${f.weekday}`, `${f.difference_units >= 0 ? "+" : ""}${num(f.difference_units)}`, f.difference_units >= 0],
+            ["Days of evidence", num(f.comparable_days), `comparable ${f.weekday}s in the record`, "", true],
             ["Busiest hour", f.peak_hour || "Not set", `${num(f.peak_units)} items in that hour`, `${f.peak_share}% of the day`, true],
-            ["Orders", num(f.expected_orders), `${money(f.average_order, true)} average order`, `${num(f.comparable_days)} days of evidence`, true],
           ].map(([label, value, versus, delta, up]) => `
             <div class="screen-tile">
               <span class="eyebrow">${label}</span><b>${e(value)}</b>
@@ -814,10 +819,10 @@
         </div>
         <div class="onb-next">
           ${[
-            ["Today", "What to make, why, and how sure to be."],
-            ["Forecast", "The next fourteen days in one list."],
-            ["History", "Every order, and how close each call was."],
-            ["Menu", "What each item is made of."],
+            ["Today", "What to make, why, and the next two weeks."],
+            ["Order", "What to buy, from whom, and what is running low."],
+            ["History", "Every closed day, and how close each call was."],
+            ["Settings", "Your menu, recipes, suppliers, and costs."],
           ].map(([t, d]) => `<div class="onb-next-item"><b>${t}</b><span>${d}</span></div>`).join("")}
         </div>
         <div class="onb-actions">
@@ -917,12 +922,14 @@
   };
 
   /* ---------- shell ---------- */
+  // Three places to work and one place to set things up. What to make today,
+  // what to buy, and what happened. The next two weeks are a panel inside
+  // Today, and the menu is a settings page, because both are read far less
+  // often than they are worth a button on every screen.
   const NAV = [
     ["today", "Today", "today"],
-    ["forecast", "Forecast", "forecast"],
-    ["ordering", "Order", "menu"],
+    ["ordering", "Order", "order"],
     ["history", "History", "history"],
-    ["menu", "Menu", "menu"],
   ];
 
   function shell(title, subtitle, tools, body) {
@@ -974,17 +981,27 @@
     if (!silent) root.innerHTML = shell(viewTitle(), "", "", skeleton());
     const q = `location_id=${encodeURIComponent(S.locationId)}`;
     try {
-      if (S.view === "today") S.data = await API.get(`/api/brief?${q}&date=${S.date}`);
-      if (S.view === "forecast") S.data = await API.get(`/api/outlook?${q}&start=${S.date}&days=14`);
-      if (S.view === "menu") S.data = await API.get(`/api/menu?${q}`);
+      if (S.view === "today") {
+        // The stock strip is optional. Nothing on Today waits for it, and a
+        // build without the supply routes just shows no strip.
+        const [brief, attention] = await Promise.all([
+          API.get(`/api/brief?${q}&date=${S.date}`),
+          API.get(`/api/supply/attention?${q}`).catch(() => null),
+        ]);
+        S.data = brief;
+        S.attention = attention;
+      }
       if (S.view === "ordering") S.data = await API.get(`/api/ordering?${q}&start=${S.date}&days=${S.order.days}`);
       if (S.view === "history") await loadHistory(silent);
       if (S.view === "settings") {
         const [setup, billing] = await Promise.all([API.get(`/api/setup?${q}`), API.get("/api/billing")]);
         S.data = { setup, billing };
+        if (S.settingsTab === "menu") S.menu = await API.get(`/api/menu?${q}`);
+        if (S.settingsTab === "costs" && !S.costs) S.costs = await API.get(`/api/costs?${q}`);
       }
       render();
       if (S.view === "today") maybeFetchNarrative();
+      if (S.view === "today" && S.todayPane === "ahead") loadOutlook();
     } catch (error) {
       if (error.status === 403) return boot();
       fatal(error);
@@ -1052,9 +1069,8 @@
 
   function viewTitle() {
     if (S.view === "today") return dLong(S.date);
-    if (S.view === "forecast") return "Next fourteen days";
+    if (S.view === "ordering") return "Order";
     if (S.view === "history") return "History";
-    if (S.view === "menu") return "Menu";
     return "Settings";
   }
 
@@ -1069,9 +1085,7 @@
   function render(preserve = false) {
     const y = window.scrollY;
     if (S.view === "today") renderToday();
-    if (S.view === "forecast") renderForecast();
     if (S.view === "history") renderHistory();
-    if (S.view === "menu") renderMenu();
     if (S.view === "ordering") renderOrdering();
     if (S.view === "settings") renderSettings();
     if (preserve) window.scrollTo(0, y);
@@ -1079,121 +1093,204 @@
   }
 
   /* ---------- today ---------- */
+  // One screen. The call, three figures, what to do, what is running low, then
+  // one panel that switches between the make list, the reasons, the hours and
+  // the two weeks ahead. Nothing stacks under that, so the page ends where the
+  // list ends and a person at the counter never scrolls past what they need.
+  const PANES = [["make", "What to make"], ["why", "Why"], ["hours", "Through the day"], ["ahead", "Next two weeks"]];
+
   function renderToday() {
     const b = S.data;
     const s = b.summary;
     const cmp = b.comparison;
     const n = b.narrative;
     const dir = s.revenue_change_percent >= 0 ? "up" : "down";
-    const writer = b.writer || {};
+    const live = b.intraday && b.intraday.in_service ? b.intraday : null;
 
     const headline = n?.headline || b.headline;
     const summaryText = n?.summary || defaultSummary(b);
-    const confidenceNote = n?.confidence_note || `Built from ${noun(cmp.based_on_days, "comparable " + weekday(b.date))} inside ${noun(b.trust.history_days, "day")} of this location's own sales.`;
+    const actions = (n?.actions?.length ? n.actions : b.actions).slice(0, 3);
 
     const body = `<div class="stack">
-      <section class="headline">
+      <section class="headline solo">
         <div class="headline-main">
           <div class="headline-meta">
             <span class="tag ${dir} dot">${e(s.demand_level)}</span>
-            <span class="tag plain">${e(b.data_health.pos_freshness === "current" ? "Register data is current" : `Register data is ${b.data_health.pos_freshness}`)}</span>
+            ${live && live.revision ? runningTag(live.revision) : `<span class="tag plain">${s.confidence}% sure</span>`}
+            ${b.data_health.pos_freshness === "current" ? "" : `<span class="tag warn dot">Register data is ${e(b.data_health.pos_freshness)}</span>`}
           </div>
           <h2>${e(headline)}</h2>
           <p class="sum">${e(summaryText)}</p>
         </div>
-        <aside class="headline-side">
-          <div>
-            <div class="eyebrow">How sure</div>
-            <div class="trust-score"><b>${s.confidence}%</b><span>${confidenceWord(s.confidence)}</span></div>
-          </div>
-          <div class="trust-bar"><i style="width:${Math.max(6, s.confidence)}%"></i></div>
-          <p>${e(confidenceNote)}</p>
-        </aside>
       </section>
 
-      <section class="tiles" id="daytiles">
+      <section class="tiles three" id="daytiles">
         ${tile("Expected sales", money(s.expected_revenue),
           `<b>${money(cmp.sales)}</b> on ${e(cmp.label)}. ${diffPhrase(s.difference_sales, "money")}`,
-          `Averaged over ${noun(cmp.based_on_days, weekday(b.date))} at this location`)}
-        ${b.costs ? tile("Expected to keep", money(b.costs.gross_profit),
-          `<b>${money(b.costs.cogs)}</b> in food and <b>${money(b.costs.labour)}</b> in wages come out of that${b.costs.other ? `, plus <b>${money(b.costs.other)}</b> in fixed costs` : ""}.`,
-          `About ${b.costs.margin_percent}% of what you ring, on the costs you have set`)
-        : tile("Items to make", num(s.expected_units),
-          `<b>${num(cmp.units)}</b> on ${e(cmp.label)}. ${diffPhrase(s.difference_units, "items")}`,
-          `Across ${noun(b.items.length, "menu item")} currently on sale`)}
-        ${tile("Items to make", num(s.expected_units),
-          `<b>${num(cmp.units)}</b> on ${e(cmp.label)}. ${diffPhrase(s.difference_units, "items")}`,
-          `Across ${noun(b.items.length, "menu item")} currently on sale`)}
+          b.costs ? `About ${money(b.costs.left_after_costs)} kept after food and wages` : `Averaged over ${noun(cmp.based_on_days, weekday(b.date))} here`)}
+        ${tile("Units to make", num(makeTotal(b)),
+          `<b>${num(s.expected_units)}</b> will sell. The rest is the cushion for running out.`,
+          `The Make column, added up`)}
         ${tile("Busiest hour", s.peak_hour || "Not set",
           `<b>${money(s.peak_revenue)}</b> and ${noun(s.peak_units, "item")} in that hour alone.`,
           `${s.peak_share_percent}% of the day lands in one hour`)}
       </section>
 
-      <section class="card">
+      ${actions.length ? `<section class="card" id="whattodo">
         <div class="card-head"><div><h2>What to do</h2></div></div>
-        <div class="actions">${(n?.actions?.length ? n.actions : b.actions).map((row, i) => `
+        <div class="actions">${actions.map((row, i) => `
           <div class="action ${row.type || ""}">
             <span class="mark">${row.type === "watch" ? "!" : (i + 1)}</span>
             <div><b>${e(row.title)}</b><p>${e(row.detail)}</p></div>
             <span class="metric">${e(row.metric)}</span>
           </div>`).join("")}</div>
-      </section>
-
-      ${liveCard(b)}
-
-      <section class="card" id="whytoday">
-        <div class="card-head"><div><h2>Why today looks this way</h2></div></div>
-        <div class="reasons">${reasonRows(b, n)}</div>
-        ${weatherFoot(b)}
-      </section>
-
-      <section class="card">
-        <div class="card-head"><div><h2>Through the day</h2>
-          <p>Expected sales by hour. The dashed outline behind each bar is a normal ${e(weekday(b.date))}.</p></div></div>
-        <div class="card-body">${hourChart(b)}</div>
-      </section>
-
-      <section class="card" id="itemtable">
-        <div class="card-head"><div><h2>What to make</h2>
-          <p>Lean toward the top of the range on anything cheap to make and quick to sell.</p></div>
-          <div class="spacer"></div></div>
-        <div class="tablewrap">${itemTable(b)}</div>
-      </section>
-
-      ${b.material_pressure.length ? `<section class="card">
-        <div class="card-head"><div><h2>What that means for prep</h2>
-          <p>Portions across the whole menu, grouped by what the kitchen holds.</p></div></div>
-        <div class="tablewrap"><table class="dt" style="min-width:520px"><thead><tr>
-          <th>Group</th><th class="num right">Today</th><th class="num right">Normal ${e(weekday(b.date))}</th>
-          <th class="num right">Difference</th><th>Driven by</th></tr></thead><tbody>
-          ${b.material_pressure.slice(0, 7).map((row) => `<tr>
-            <td class="name"><b>${e(row.family)}</b></td>
-            <td class="num right plan">${num(row.demand_index)}</td>
-            <td class="num right">${num(row.baseline_index)}</td>
-            <td class="num right ${row.change_units >= 0 ? "up" : "down"}">${row.change_units >= 0 ? "+" : ""}${num(row.change_units)}</td>
-            <td class="muted small">${e(topItemForFamily(b, row.family))}</td>
-          </tr>`).join("")}
-        </tbody></table></div>
       </section>` : ""}
 
-      <section class="card">
-        <div class="card-head"><div><h2>Next six days</h2><p>Open any day to see the full plan for it.</p></div></div>
-        <div class="week">${b.week_ahead.map((day) => `
-          <button class="weekday" data-open-date="${day.date}">
-            <span class="d">${e(dMed(day.date))}</span>
-            <span class="v">${money(day.expected_revenue)}</span>
-            <span class="n ${day.change_percent >= 0 ? "up" : "down"}">${pct(day.change_percent)} vs normal</span>
-            <span class="n muted">${e(day.top_item || "")}</span>
-          </button>`).join("")}</div>
-      </section>
+      ${runningLow()}
 
-      
+      <section class="card" id="daypanes">
+        <div class="card-head panehead">
+          <div class="seg panes">${PANES.map(([k, l]) =>
+            `<button class="${S.todayPane === k ? "on" : ""}" data-pane="${k}">${l}</button>`).join("")}</div>
+        </div>
+        ${todayPane(b)}
+      </section>
     </div>`;
 
     root.innerHTML = shell(dLong(S.date), `${e((S.boot.locations.find((l) => l.id === S.locationId) || {}).name || "")}`,
       `${dateTools()}<button class="btn sm" data-do="preview-email">Preview email</button>`, body);
   }
 
+  // During service the confidence tag gives way to where the day is actually
+  // running against the morning call, which is the number the record is
+  // scored on. The full split is on the Through the day panel.
+  function runningTag(r) {
+    const pace = r.sold_units - r.called_by_now_units;
+    return `<span class="tag ${pace >= 0 ? "up" : "down"} dot">${pace >= 0 ? "+" : ""}${num(pace)} items against the morning call, read at ${e(r.label)}</span>`;
+  }
+
+  function sureNote(b) {
+    const cmp = b.comparison;
+    return b.narrative?.confidence_note
+      || `Built from ${noun(cmp.based_on_days, "comparable " + weekday(b.date))} inside ${noun(b.trust.history_days, "day")} of this location's own sales.`;
+  }
+
+  // Counted stock against what the next days will use. Empty until somebody
+  // has counted something on the Order screen, and silent when nothing is
+  // short, so it only appears when there is something to act on.
+  function runningLow() {
+    const rows = ((S.attention && S.attention.lines) || []).slice(0, 5);
+    if (!rows.length) return "";
+    return `<section class="card" id="runninglow">
+      <div class="card-head"><div><h2>Running low</h2></div>
+        <div class="spacer"></div><button class="btn sm" data-view="ordering">Open the order</button></div>
+      <div class="lowlist">${rows.map((r) => {
+        const days = Number(r.days_of_cover);
+        const left = days < 1 ? "runs out today" : days < 2 ? "about a day left" : `about ${Math.round(days)} days left`;
+        return `<div class="lowrow">
+          <b>${e(r.name)}</b>
+          <span>${left}, ${num(r.on_hand)} ${e(r.unit || "")} on hand</span>
+          <span class="when">${r.order_by ? `Order by ${e(dMed(r.order_by))}` : ""}${r.supplier ? `${r.order_by ? " from " : ""}${e(r.supplier)}` : ""}</span>
+        </div>`;
+      }).join("")}</div>
+    </section>`;
+  }
+
+  function todayPane(b) {
+    if (S.todayPane === "why") {
+      return `<div class="reasons">
+        <div class="reason"><div class="reason-top"><b>How sure</b>
+          <span class="tag plain">${b.summary.confidence}% ${e(confidenceWord(b.summary.confidence))}</span></div>
+          <p>${e(sureNote(b))}</p></div>
+        ${reasonRows(b, b.narrative)}</div>${weatherFoot(b)}`;
+    }
+    if (S.todayPane === "hours") return `<div class="card-body">${hourChart(b)}</div>${liveTable(b)}`;
+    if (S.todayPane === "ahead") return aheadPane();
+    return `<div class="tablewrap">${itemTable(b)}</div>${prepGroups(b)}
+      <div class="card-foot">Lean toward the top of the range on anything cheap to make and quick to sell. Open any item for its whole record.</div>`;
+  }
+
+  // What the register has rung so far against the morning call, item by item.
+  function liveTable(b) {
+    const live = b.intraday;
+    if (!live || !live.in_service) return "";
+    const r = live.revision;
+    if (!r) return `<div class="card-foot">Not enough of the day has finished to say where it is running yet.</div>`;
+    const ahead = r.difference_units >= 0;
+    return `<div class="card-body" style="border-top:1px solid var(--line)">
+      <p class="small muted" style="margin-bottom:12px">Read at ${e(r.label)}, with ${r.expected_share_percent}% of a normal ${e(weekday(b.date))} behind us. The register has rung ${num(r.sold_units)} items and ${money(r.sold_sales)}.</p>
+      <div class="live-split">
+        <div><span>Called this morning</span><b>${num(r.opening_units)} items</b><small>${money(r.opening_sales)}</small></div>
+        <div><span>Where it looks like finishing</span><b>${num(r.revised_units)} items</b><small>${money(r.revised_sales)}</small></div>
+        <div><span>Change</span><b class="${ahead ? "up" : "down"}">${ahead ? "+" : ""}${num(r.difference_units)} items</b>
+          <small>${ahead ? "+" : ""}${money(r.difference_sales)}</small></div>
+      </div>
+      ${r.items.length ? `<table class="dt" style="margin-top:14px"><thead><tr>
+        <th>Item</th><th class="num right">Called</th><th class="num right">Sold so far</th>
+        <th class="num right">Now expecting</th><th class="num right">Change</th></tr></thead><tbody>
+        ${r.items.map((row) => `<tr class="clickable" data-item-sheet="${e(row.item_id)}">
+          <td class="name"><b>${e(row.name)}</b></td>
+          <td class="num right">${num(row.opening)}</td>
+          <td class="num right">${num(row.sold_so_far)}</td>
+          <td class="num right plan">${num(row.revised)}</td>
+          <td class="num right ${row.difference >= 0 ? "up" : "down"}">${row.difference >= 0 ? "+" : ""}${num(row.difference)}</td>
+        </tr>`).join("")}
+      </tbody></table>` : `<p class="small muted" style="margin-top:12px">Nothing has moved by enough to be worth changing.</p>`}
+    </div>`;
+  }
+
+  // Portions grouped by what the kitchen holds. Folded away, because the make
+  // list above it is the decision and this is the same decision regrouped.
+  function prepGroups(b) {
+    const rows = (b.material_pressure || []).slice(0, 7);
+    if (!rows.length) return "";
+    return `<details class="context-disclosure" style="margin:0 18px">
+      <summary>Grouped by what the kitchen holds</summary>
+      <div class="context-detail"><div class="tablewrap"><table class="dt" style="min-width:520px"><thead><tr>
+        <th>Group</th><th class="num right">Today</th><th class="num right">Normal ${e(weekday(b.date))}</th>
+        <th class="num right">Difference</th><th>Driven by</th></tr></thead><tbody>
+        ${rows.map((row) => `<tr>
+          <td class="name"><b>${e(row.family)}</b></td>
+          <td class="num right plan">${num(row.demand_index)}</td>
+          <td class="num right">${num(row.baseline_index)}</td>
+          <td class="num right ${row.change_units >= 0 ? "up" : "down"}">${row.change_units >= 0 ? "+" : ""}${num(row.change_units)}</td>
+          <td class="muted small">${e(topItemForFamily(b, row.family))}</td>
+        </tr>`).join("")}
+      </tbody></table></div></div>
+    </details>`;
+  }
+
+  // The next fourteen days, fetched the first time the panel is opened and
+  // kept until the date or the location changes.
+  function outlookKey() { return `${S.locationId}:${S.date}`; }
+
+  async function loadOutlook() {
+    const key = outlookKey();
+    if (S.outlook && S.outlook.key === key) return;
+    if (loadOutlook._inflight === key) return;
+    loadOutlook._inflight = key;
+    try {
+      const d = await API.get(`/api/outlook?location_id=${encodeURIComponent(S.locationId)}&start=${S.date}&days=14`);
+      S.outlook = { key, ...d };
+      if (S.view === "today" && S.todayPane === "ahead") render(true);
+    } catch (error) { toast(error.message, "error"); }
+    loadOutlook._inflight = "";
+  }
+
+  function aheadPane() {
+    const d = S.outlook && S.outlook.key === outlookKey() ? S.outlook : null;
+    if (!d) return `<div class="card-body"><div class="skel" style="height:320px;border-radius:9px"></div></div>`;
+    return `<div class="outlook-head"><span>Day</span><span>Expected</span><span>Biggest line</span><span>Against normal</span><span>Busiest</span></div>
+      ${d.days.map((day) => `
+        <button class="outlook-row" data-open-date="${day.date}">
+          <span><b>${e(dMed(day.date))}</b><small>${e(day.weather.condition)}, ${day.weather.high}°</small></span>
+          <span class="money"><b>${money(day.expected_revenue)}</b><small>${num(day.expected_units)} items</small></span>
+          <span><b>${e(day.top_surges[0] ? `${day.top_surges[0].name}, ${day.top_surges[0].vs_baseline_units >= 0 ? "+" : ""}${day.top_surges[0].vs_baseline_units} vs normal` : `${num(day.top_item_units)} ${(day.top_item || "items").toLowerCase()}`)}</b><small>${e(day.occasion_name || "")}</small></span>
+          <span class="money ${day.revenue_change_percent >= 0 ? "up" : "down"}"><b>${pct(day.revenue_change_percent)}</b><small class="muted">${day.confidence}% sure</small></span>
+          <span><b>${e(day.peak_hour || "Not set")}</b><small>${e(day.demand_level)}</small></span>
+        </button>`).join("")}
+      <div class="card-foot">Open a day to work it. Days further out lean more on this location's own repeating pattern, and the confidence on each row already allows for that.</div>`;
+  }
   // Which item contributes most to a prep group, so the row says why it moved.
   function topItemForFamily(brief, family) {
     const key = family.toLowerCase();
@@ -1352,46 +1449,65 @@
     </section>`;
   }
 
+  function makeTotal(b) {
+    return (b.items || []).reduce((total, row) => total + (row.make ?? row.expected), 0);
+  }
+
+  // A share-of-day strip that can actually be read: the busiest hour is the only
+  // one that carries a value, and the half-sold point is drawn where it falls.
+  function hourShape(hourly) {
+    const rows = hourly.hours || [];
+    if (!rows.length) return "";
+    const peak = rows.reduce((best, row) => (row.share_percent > best.share_percent ? row : best), rows[0]);
+    return `<div class="shape" style="margin-top:14px">
+      ${rows.map((row) => {
+        const isPeak = row.label === peak.label;
+        const half = row.label === hourly.half_sold_by;
+        return `<div class="shape-col ${isPeak ? "peak" : ""} ${half ? "half" : ""}"
+             title="${e(row.label)}: ${row.per_day} a day, ${row.share_percent}% of this item">
+          <div class="shape-track"><i style="height:${Math.max(3, (row.share_percent / Math.max(1, peak.share_percent)) * 100)}%"></i></div>
+          <span class="shape-val">${isPeak ? `${row.share_percent}%` : ""}</span>
+          <span class="shape-lab">${e(row.label.replace(" ", ""))}</span>
+        </div>`;
+      }).join("")}
+    </div>
+    <p class="small muted" style="margin-top:8px">Tallest bar is ${e(peak.label)} at ${peak.share_percent}% of this item's day.${
+      hourly.half_sold_by ? ` The marked hour is where half have gone.` : ""}</p>`;
+  }
+
+  const ROLES = new Set(["base", "protein", "dairy", "produce", "bread", "sauce",
+    "sweetener", "beverage", "packaging", "other"]);
+
+  function roleClass(role) {
+    const key = String(role || "other").toLowerCase().trim();
+    return `role-${ROLES.has(key) ? key : "other"}`;
+  }
+
+  // The share column, drawn. Widths are relative to the largest line so the
+  // shape of the cost is readable, and every bar keeps its number.
+  function shareCell(share, largest) {
+    const width = Math.max(3, (Number(share) / Math.max(1, largest)) * 100);
+    return `<div class="sharecell"><span>${share}%</span>
+      <i style="width:${width}%"></i></div>`;
+  }
+
   function itemTable(b) {
     const max = Math.max(...b.items.map((row) => row.upper), 1);
     return `<table class="dt"><thead><tr>
       <th>Item</th><th class="num right">Make</th><th class="num right">Will sell</th><th class="num right">Normal</th>
-      <th>Range</th><th class="num right">How sure</th><th></th></tr></thead><tbody>
+      <th>Range</th><th></th></tr></thead><tbody>
       ${b.items.map((item) => `
         <tr class="clickable" data-item-sheet="${e(item.item_id)}">
           <td class="name"><b>${e(item.name)}</b><small>${e(item.category)}${item.override ? " · you adjusted this" : ""}</small></td>
-          <td class="num right plan">${num(item.make ?? item.expected)}<div class="small muted">${item.sell_out_percent !== null && item.sell_out_percent !== undefined ? `${item.sell_out_percent}% you still run out` : ""}</div></td>
+          <td class="num right plan">${num(item.make ?? item.expected)}<div class="small muted">${item.sell_out_percent !== null && item.sell_out_percent !== undefined ? `${item.sell_out_percent}% chance of running out` : ""}</div></td>
           <td class="num right">${num(item.expected)}</td>
           <td class="num right">${num(item.baseline)}<div class="small ${item.vs_baseline_units >= 0 ? "up" : "down"}">${item.vs_baseline_units >= 0 ? "+" : ""}${num(item.vs_baseline_units)}</div></td>
           <td><div class="rangebar">
             <div class="line"><i style="left:${(item.lower / max) * 100}%;width:${Math.max(3, ((item.upper - item.lower) / max) * 100)}%"></i><b style="left:${(item.expected / max) * 100}%"></b></div>
             <span>${num(item.lower)} to ${num(item.upper)}</span></div></td>
-          <td class="num right">${item.confidence}%</td>
           <td class="right"><button class="btn sm ghost" data-do="adjust" data-item="${e(item.item_id)}" data-name="${e(item.name)}" data-qty="${item.make ?? item.expected}">Adjust</button></td>
         </tr>`).join("")}
     </tbody></table>`;
-  }
-
-  /* ---------- forecast ---------- */
-  function renderForecast() {
-    const d = S.data;
-    const body = `<div class="stack">
-      <section class="card">
-        <div class="card-head"><div><h2>Fourteen days from ${e(dMed(d.start_date))}</h2>
-          <p>Open one to work the day.</p></div></div>
-        <div class="outlook-head"><span>Day</span><span>Expected</span><span>Biggest line</span><span>Against normal</span><span>Busiest</span></div>
-        ${d.days.map((day) => `
-          <button class="outlook-row" data-open-date="${day.date}">
-            <span><b>${e(dMed(day.date))}</b><small>${e(day.weather.condition)}, ${day.weather.high}°</small></span>
-            <span class="money"><b>${money(day.expected_revenue)}</b><small>${num(day.expected_units)} items</small></span>
-            <span><b>${e(day.top_surges[0] ? `${day.top_surges[0].name}, ${day.top_surges[0].vs_baseline_units >= 0 ? "+" : ""}${day.top_surges[0].vs_baseline_units} vs normal` : `${num(day.top_item_units)} ${(day.top_item || "items").toLowerCase()}`)}</b><small>${e(day.occasion_name || day.signals[0]?.detail || "Normal trading pattern")}</small></span>
-            <span class="money ${day.revenue_change_percent >= 0 ? "up" : "down"}"><b>${pct(day.revenue_change_percent)}</b><small class="muted">${day.confidence}% sure</small></span>
-            <span><b>${e(day.peak_hour || "Not set")}</b><small>${e(day.demand_level)}</small></span>
-          </button>`).join("")}
-      </section>
-      <p class="small muted" style="padding:0 2px">Days further out lean more on this location's own repeating pattern, because the weather and event data for them is still provisional. The confidence figure on each row already accounts for that.</p>
-    </div>`;
-    root.innerHTML = shell("Next fourteen days", "", dateTools(), body);
   }
 
   /* ---------- history ---------- */
@@ -1424,7 +1540,7 @@
         </div>
         <div id="dayrows">${days.length ? `<div class="dayrow head">
             <span class="when">Day</span><span class="cell">Rang up</span>
-            <span class="cell">${S.history.costs ? "Kept" : "Items"}</span>
+            <span class="cell">${S.history.costs ? "Left after costs" : "Units"}</span>
             <span class="cell">${S.history.costs ? "Cost to run" : "Average order"}</span>
             <span class="accmeter">How close the call was</span><span class="chev"></span>
           </div>` : ""}
@@ -1450,17 +1566,17 @@
     const c = day.costs;
     return `<button class="dayrow" data-day-detail="${day.date}">
       <span class="when"><b>${e(dMed(day.date))}</b><small>${e(day.weekday)}</small></span>
-      <span class="cell"><b>${money(day.sales)}</b><small>${num(day.orders)} orders</small></span>
+      <span class="cell"><b>${money(day.sales)}</b><small>net of tax, ${num(day.orders)} orders</small></span>
       <span class="cell">${c
-        ? `<b>${money(c.gross_profit)}</b><small>kept, about ${c.margin_percent}%</small>`
-        : `<b>${num(day.units)}</b><small>items sold</small>`}</span>
+        ? `<b>${money(c.left_after_costs)}</b><small>left, about ${c.margin_percent}% of net</small>`
+        : `<b>${num(day.units)}</b><small>units sold</small>`}</span>
       <span class="cell">${c
-        ? `<b>${money(c.cogs + c.labour + c.other)}</b><small>food and wages</small>`
-        : `<b>${money(day.average_order, true)}</b><small>average order</small>`}</span>
+        ? `<b>${money(c.cogs + c.labour + c.other)}</b><small>food, wages and fixed</small>`
+        : `<b>${money(day.average_order, true)}</b><small>average ticket, inc. tax</small>`}</span>
       <span class="accmeter">
         ${acc === null
-          ? `<span class="small muted">Not scored yet</span><span class="line"><i class="skel" style="width:100%"></i></span>`
-          : `<span class="top"><b>${acc}% per item</b><small>day total ${num(day.predicted_units)} called, ${num(day.units)} sold</small></span>
+          ? `<span class="small muted">Not scored yet</span>`
+          : `<span class="top"><b>${Math.round(acc)}% per item</b><small>${num(day.predicted_units)} called, ${num(day.units)} sold</small></span>
              <span class="line"><i class="${cls}" style="width:${Math.max(4, acc)}%"></i></span>`}
       </span>
       <span class="chev">${icon("chevR")}</span>
@@ -1501,7 +1617,7 @@
       <span class="what"><b>${e(names)}</b><small>${order.number} · ${noun(order.item_count, "item")}</small></span>
       <span class="ch"><span class="tag plain">${e(order.channel)}</span></span>
       <span class="pay small muted">${e(order.payment)}</span>
-      <span class="amt">${money(order.total, true)}<div class="small muted" style="font-weight:400">${money(order.subtotal, true)} + tax</div></span>
+      <span class="amt">${money(order.total, true)}<div class="small muted" style="font-weight:400">${money(order.subtotal, true)} before tax${order.tip ? " and tip" : ""}</div></span>
     </div>`;
   }
 
@@ -1511,17 +1627,14 @@
     return `<div class="stack">
       <section class="tiles">
         ${tile("Forecast accuracy", `${d.summary.forecast_accuracy}%`,
-          `Measured on <b>${noun(d.summary.days_evaluated, "closed day")}</b> against what the registers rang.`,
-          "")}
+          `Scored item by item against what the registers rang, so a day whose total lands can still score low.`,
+          `Over the last ${noun(d.summary.days_evaluated, "closed day")}`)}
         ${tile("Days within 10%", trend.within_ten !== null ? `${trend.within_ten}%` : "Scoring",
-          `<b>${noun(trend.days, "day")}</b> scored so far. Best ${trend.best ?? 0}%, worst ${trend.worst ?? 0}%.`,
-          `A day inside 10% almost never changes what a kitchen preps`)}
+          `Best ${trend.best ?? 0}%, worst ${trend.worst ?? 0}%.`,
+          `Over the last ${noun(trend.days, "scored day")}`)}
         ${tile("Items tracked", num(d.summary.items_evaluated),
           `Every item that sold in the window has its own score.`,
-          "")}
-        ${tile("Average error", `${d.summary.wape}%`,
-          `On a ${money(d.daily.length ? d.daily[d.daily.length - 1].revenue : 0)} day that is roughly <b>${money((d.summary.wape / 100) * (d.daily.length ? d.daily[d.daily.length - 1].revenue : 0))}</b>.`,
-          "")}
+          `Over the last ${noun(d.summary.days_evaluated, "closed day")}`)}
       </section>
 
       <section class="card">
@@ -1570,45 +1683,36 @@
     <div class="chart-key"><span><i class="k-actual"></i>Sold</span><span><i class="k-pred"></i>Called</span></div></div>`;
   }
 
-  /* ---------- menu ---------- */
-  function renderMenu() {
-    const d = S.data;
+  /* ---------- menu and recipes, under Settings ---------- */
+  function settingsMenu() {
+    const d = S.menu;
+    if (!d) return `<section class="card"><div class="card-body">${skeleton()}</div></section>`;
     const sum = d.summary;
-    const writer = d.writer || {};
-    const body = `<div class="stack">
-      <section class="tiles">
-        ${tile("Items on sale", num(sum.total), "", `Pulled from the register catalogue`)}
-        ${tile("Read confidently", `${num(sum.high_confidence)} of ${num(sum.total)}`, `Matched from the till label.`, "")}
-        ${tile("Worth a glance", num(sum.review_optional), `Short or unusual till labels.`, "")}
-        ${tile("Parts identified", num(d.items.reduce((n, row) => n + (row.composition?.components?.length || 0), 0)), `Across ${noun(d.items.length, "item")}.`, `Estimated from the till label until a recipe is uploaded`)}
-      </section>
-
+    const parts = d.items.reduce((n, row) => n + (row.composition?.components?.length || 0), 0);
+    return `<div class="stack-tight">
       <section class="card">
         <div class="card-head">
           <div><h2>What each item is made of</h2>
-            <p>Open an item to see what it takes to make.</p></div>
-          <div class="spacer"></div>
+            <p>${noun(sum.total, "item")} from the register, ${noun(parts, "part")} read from the till labels.${sum.review_optional ? ` ${noun(sum.review_optional, "label")} worth a second look.` : ""} Open one to see what it takes to make, and correct anything that is wrong.</p></div>
         </div>
         <div id="menulist">${d.items.map(menuRow).join("")}</div>
+        <div class="card-foot">Estimated from the till label until a recipe is confirmed. A confirmed recipe is what the order list is built on.</div>
       </section>
 
       <section class="card">
         <div class="card-head"><div><h2>Add items by hand</h2>
-          <p>Paste a menu, a supplier list, or anything a scanner gave you. One item per line, price at the end.</p></div></div>
+          <p>For anything the register does not carry. One item per line, price at the end.</p></div></div>
         <div class="card-body">
-          <textarea id="menu-text" rows="6" placeholder="Double cheeseburger, Burgers, 15.50&#10;Pep slice, Slices, 4.25&#10;Iced lat lg, Drinks, 6.00"></textarea>
+          <textarea id="menu-text" rows="5" placeholder="Double cheeseburger, Burgers, 15.50&#10;Pep slice, Slices, 4.25&#10;Iced lat lg, Drinks, 6.00"></textarea>
           <div class="btn-row" style="margin-top:12px">
             <button class="btn" data-do="menu-preview">Show me what it reads</button>
             <button class="btn accent" data-do="menu-import">Add these items</button>
           </div>
           <div id="menu-preview-out"></div>
         </div>
-        <div class="card-foot">For anything the register does not carry.</div>
       </section>
     </div>`;
-    root.innerHTML = shell("Menu", `${d.items.length} items`, "", body);
   }
-
   function menuRow(item) {
     const open = S.open.has(item.id);
     const comp = item.composition;
@@ -1617,22 +1721,28 @@
       <button class="exp-head" data-expand="${e(item.id)}">
         <span class="chev">${icon("chevR")}</span>
         <span><b>${e(item.normalized_name)}</b><small>${e(item.category)}${item.raw_name !== item.normalized_name ? ` · rings up as "${e(item.raw_name)}"` : ""}</small></span>
-        <span class="small muted">${comp ? `${comp.components.length} parts` : "not read yet"}</span>
-        <span class="small muted tnum">${money(item.price, true)}</span>
+        <span class="small muted">${comp ? `${noun(comp.components.length, "ingredient")}` : "not read yet"}</span>
+        <span class="menu-money">
+          <b class="tnum">${money(item.price, true)}</b><small>sells for</small>
+        </span>
+        <span class="menu-money">${item.food_cost !== undefined
+          ? `<b class="tnum">${money(item.food_cost, true)}</b><small>food, ${item.cost_share_percent}%</small>`
+          : `<b class="tnum muted">not set</b><small>food cost</small>`}</span>
       </button>
       ${open ? `<div class="exp-body">
         ${comp ? `
           <p class="lede" style="margin-top:12px">${e(comp.summary)}</p>
           <table class="dt parts"><thead><tr>
             <th>Part</th><th>Role</th><th class="num right">Per ${e(item.production_unit || "unit")}</th>
-            <th class="num right">Share of cost</th><th class="num right">How sure</th></tr></thead><tbody>
-            ${comp.components.map((c) => `<tr>
+            <th class="num right">Share of food cost</th><th class="num right">How sure</th></tr></thead><tbody>
+            ${(() => { const top = Math.max(...comp.components.map((c) => Number(c.share) || 0), 1);
+              return comp.components.map((c) => `<tr>
               <td class="name"><b>${e(c.name)}</b></td>
-              <td class="muted">${e(c.role)}</td>
+              <td><span class="rolechip"><i class="${roleClass(c.role)}"></i>${e(c.role)}</span></td>
               <td class="num right">${e(c.quantity || "not stated")}</td>
-              <td class="num right">${c.share}%</td>
+              <td class="num right">${shareCell(c.share, top)}</td>
               <td class="num right ${c.confidence === "low" ? "down" : ""}">${e(c.confidence)}</td>
-            </tr>`).join("")}
+            </tr>`).join(""); })()}
           </tbody></table>
           <p class="form-note" style="margin-top:10px">${e(comp.verify_note)}</p>
           <div class="btn-row" style="margin-top:12px">
@@ -1646,102 +1756,108 @@
   }
 
   /* ---------- ordering ---------- */
-  // Two kinds of line and they are never mixed. A forecast line has a recipe
-  // behind it, so the quantity comes from what the forecast says will be made.
-  // Anything the recipe cannot speak for is said out loud at the top rather
-  // than quietly folded in.
+  // The buying list, one block per supplier. Three facts a till cannot know are
+  // asked for on this screen once and then kept: who sells the thing, how it is
+  // bought, and what is on the shelf. With those, what you will use becomes what
+  // to order and by when. A forecast line has a recipe behind it; anything the
+  // recipe cannot speak for is said out loud rather than folded in.
   const ORDER_WINDOWS = [["2", "2 days"], ["3", "3 days"], ["5", "5 days"], ["7", "a week"]];
+  const LEAD_CHOICES = [[0, "same day"], [1, "next day"], [2, "two days"], [3, "three days"], [5, "five days"], [7, "a week"]];
+  const WEEKDAY_CHOICES = [["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["fri", "Fri"], ["sat", "Sat"], ["sun", "Sun"]];
+  const PACK_LABELS = ["case", "box", "bag", "tray", "flat", "tub", "bucket", "sleeve", "carton", "sack", "pack"];
+  const UNCHANGED_UNITS = new Set(["g", "kg", "lb", "oz", "ml", "l", "gal", "floz", "qt"]);
+  const CHANNEL_LABELS = { sent: "Sent by email", outbox: "Written to the outbox", drafted: "Opened in the mail app", opened: "Placed on their site", copied: "Copied" };
+
+  const lineKey = (line) => String(line.name || "").toLowerCase();
+  const cap = (text) => (text ? text.charAt(0).toUpperCase() + text.slice(1) : "");
+  const locationName = () => (S.boot.locations.find((row) => row.id === S.locationId) || {}).name || "";
+
+  function plural(n, unit) {
+    const u = String(unit || "");
+    if (Number(n) === 1 || !u || UNCHANGED_UNITS.has(u) || /s$/.test(u)) return u;
+    if (/[^aeiou]y$/.test(u)) return u.slice(0, -1) + "ies";
+    if (/(s|x|ch|sh)$/.test(u)) return u + "es";
+    return u + "s";
+  }
+
+  function hostOf(url) {
+    try { return new URL(url).hostname.replace(/^www\./, ""); } catch (_) { return url; }
+  }
+
+  // Today, tomorrow, a weekday inside the week, otherwise the date.
+  function whenLabel(iso) {
+    if (!iso) return "";
+    const day = String(iso).slice(0, 10);
+    const today = todayISO();
+    if (day === today) return "today";
+    if (day === addDays(today, 1)) return "tomorrow";
+    if (day === addDays(today, -1)) return "yesterday";
+    const gap = Math.round((dObj(day) - dObj(today)) / 86400000);
+    if (gap > 1 && gap < 7) return weekday(day);
+    return dShort(day);
+  }
 
   function orderQty(line) {
-    const key = line.name.toLowerCase();
-    const edit = S.order.edits[key];
-    return edit === undefined ? line.typical : edit;
+    const edit = S.order.edits[lineKey(line)];
+    return edit === undefined ? line.suggested.quantity : edit;
+  }
+
+  // Packs step by one. Loose units step by a grain that suits the size.
+  function orderGrain(line) {
+    if (line.pack_size) return 1;
+    return line.typical >= 100 ? 10 : line.typical >= 20 ? 5 : 1;
+  }
+
+  function groupBySupplier(lines, suppliers) {
+    const byId = new Map(suppliers.map((s) => [s.id, { supplier: s, lines: [], extras: [] }]));
+    const loose = { supplier: null, lines: [], extras: [] };
+    lines.forEach((line) => (byId.get(line.supplier_id) || loose).lines.push(line));
+    S.order.extras.forEach((row) => (byId.get(row.supplier_id) || loose).extras.push(row));
+    const groups = Array.from(byId.values()).filter((g) => g.lines.length || g.extras.length);
+    if (loose.lines.length || loose.extras.length || !groups.length) groups.push(loose);
+    return groups;
+  }
+
+  function findGroup(id) {
+    const d = S.data;
+    if (!d || !d.ready) return null;
+    return groupBySupplier(d.lines.filter((row) => row.orderable), d.suppliers || [])
+      .find((g) => (g.supplier ? g.supplier.id : "") === (id || "")) || null;
   }
 
   function renderOrdering() {
     const d = S.data;
     if (!d || !d.ready) {
-      return root.innerHTML === "" ? null : (root.innerHTML = shell(
-        "Order", "", "",
-        emptyState("Nothing to order yet", "Once the register has some history, this becomes the list of what to buy."),
-      ));
+      root.innerHTML = shell("Order", "", "",
+        emptyState("Nothing to order yet", "Once the register has some history, this becomes the list of what to buy."));
+      return;
     }
+    // Whatever was being typed keeps its cursor through the repaint.
+    const active = document.activeElement;
+    const keep = active && (active.dataset.supplyCount ? ["supplyCount", active.dataset.supplyCount]
+      : active.dataset.oqty ? ["oqty", active.dataset.oqty] : null);
+
     const c = d.counts;
-    const forecastLines = d.lines.filter((row) => row.orderable);
+    const lines = d.lines.filter((row) => row.orderable);
     const shares = d.lines.filter((row) => !row.orderable);
+    const suppliers = d.suppliers || [];
+    const groups = groupBySupplier(lines, suppliers);
     const changed = Object.keys(S.order.edits).length;
 
     const tools = `<div class="seg">${ORDER_WINDOWS.map(([k, l]) =>
       `<button class="${String(S.order.days) === k ? "on" : ""}" data-owin="${k}">${l}</button>`).join("")}</div>`;
 
     const body = `<div class="stack">
-      <section class="card">
-        <div class="card-body">
-          <p class="lede">Enough for <b>${e(dMed(d.start))}</b> through <b>${e(dMed(d.end))}</b>,
-            worked from what the forecast says you will make on each of those days.</p>
-          <p class="lede" style="margin-top:8px">This covers <b>${num(c.covered)}</b> of your
-            <b>${num(c.menu_items)}</b> menu items.${c.uncovered
-              ? ` The other ${num(c.uncovered)} have no recipe on file, so nothing they use is counted below.`
-              : ""}</p>
-        </div>
-      </section>
-
-      <section class="card" id="orderlines">
-        <div class="card-head"><div><h2>What to buy</h2>
-          <p>Change any number. Nothing here is fixed.</p></div>
-          <div class="spacer"></div>
-          ${changed ? `<button class="btn sm ghost" data-do="order-reset">Undo my changes</button>` : ""}</div>
-        <div class="tablewrap"><table class="dt" style="min-width:660px"><thead><tr>
-          <th>Ingredient</th><th class="num right">Needed</th><th>What drives it</th>
-          <th class="num right">Order</th></tr></thead><tbody>
-          ${forecastLines.map((line) => {
-            const key = line.name.toLowerCase();
-            const qty = orderQty(line);
-            const moved = S.order.edits[key] !== undefined && S.order.edits[key] !== line.typical;
-            const cover = line.typical > 0 ? (qty / line.typical) * d.days : 0;
-            return `<tr>
-              <td class="name"><b>${e(line.name)}</b><small>${e(line.role || "")}${
-                line.has_range ? ` · anywhere from ${num(line.low)} to ${num(line.high)}` : ""}</small></td>
-              <td class="num right">${num(line.typical)} <span class="muted">${e(line.unit)}</span></td>
-              <td class="small muted">${line.driven_by.map((x) =>
-                `${e(x.item)} ${x.share_percent}%`).join(", ")}</td>
-              <td class="num right">
-                <div class="qty">
-                  <button class="qstep" data-oadj="${e(key)}" data-step="-1" aria-label="Less">-</button>
-                  <input class="qin" data-oqty="${e(key)}" type="number" min="0" value="${qty}">
-                  <button class="qstep" data-oadj="${e(key)}" data-step="1" aria-label="More">+</button>
-                </div>
-                ${moved ? `<div class="small muted" style="margin-top:4px">${
-                  cover >= d.days ? `${Math.round(cover * 10) / 10} days of cover` : `covers ${Math.round(cover * 10) / 10} days`}</div>` : ""}
-              </td>
-            </tr>`;
-          }).join("")}
-        </tbody></table></div>
-        <div class="card-body" style="border-top:1px solid var(--line)">
-          <div class="btn-row">
-            <button class="btn sm" data-do="order-add">Add something else</button>
-            <button class="btn accent" data-do="order-copy">Copy the list</button>
-          </div>
-          <p class="small muted" style="margin-top:10px">Quantities are in the unit each recipe speaks.
-            Once you tell us how you buy each one, cases and packs go here instead.
-            <a href="/app" data-stab="suppliers">Set that up</a></p>
-        </div>
-      </section>
-
-      ${S.order.extras.length ? `<section class="card">
-        <div class="card-head"><div><h2>Also on the list</h2></div></div>
-        <div class="tablewrap"><table class="dt"><tbody>
-          ${S.order.extras.map((row, i) => `<tr>
-            <td class="name"><b>${e(row.name)}</b><small>added by you</small></td>
-            <td class="num right">${e(row.qty)}</td>
-            <td class="right"><button class="btn sm ghost" data-odrop="${i}">Remove</button></td>
-          </tr>`).join("")}
-        </tbody></table></div>
-      </section>` : ""}
+      ${groups.map((g, i) => supplyGroup(g, d, suppliers, i === 0)).join("")}
+      <div class="btn-row supply-page-actions">
+        <button class="btn sm" data-do="order-add">Add something else</button>
+        ${changed ? `<button class="btn sm ghost" data-do="order-reset">Back to the suggested numbers</button>` : ""}
+      </div>
+      ${c.uncovered ? `<p class="small muted" style="padding:0 2px">${num(c.uncovered)} of your ${num(c.menu_items)} menu items have no recipe on file, so nothing they use is on this list.</p>` : ""}
 
       ${d.backlog.length ? `<section class="card">
         <div class="card-head"><div><h2>Worth adding a recipe for</h2>
-          <p>Each one moves that much of your ordering from guesswork onto the forecast.</p></div></div>
+          <p>Each one moves that much of your buying from guesswork onto the forecast.</p></div></div>
         <div class="tablewrap"><table class="dt"><tbody>
           ${d.backlog.map((row) => `<tr class="clickable" data-item-sheet="${e(row.item_id)}">
             <td class="name"><b>${e(row.name)}</b><small>about ${num(row.monthly_units)} a month</small></td>
@@ -1757,33 +1873,521 @@
         </div></details>` : ""}
     </div>`;
     root.innerHTML = shell("Order", `${e(dMed(d.start))} through ${e(dMed(d.end))}`, tools, body);
+
+    if (keep) {
+      const attr = keep[0] === "supplyCount" ? "data-supply-count" : "data-oqty";
+      const node = document.querySelector(`[${attr}="${CSS.escape(keep[1])}"]`);
+      if (node) { node.focus({ preventScroll: true }); node.select?.(); }
+    }
+  }
+
+  function supplierLine(s) {
+    const parts = [];
+    const days = s.delivery_days || [];
+    parts.push(days.length ? `Delivers ${joinAnd(days.map((k) => cap(k)))}.` : "Delivers any day.");
+    const sched = s.schedule || {};
+    if (sched.next_delivery) parts.push(`Next delivery ${whenLabel(sched.next_delivery)} if the order is in ${e(sched.order_by_label)}.`);
+    if (s.last_order && s.last_order.status !== "copied") {
+      const o = s.last_order;
+      parts.push(`Last order ${whenLabel(o.sent_at)}${o.expected_on ? `, arriving ${whenLabel(o.expected_on)}` : ""}.`);
+    }
+    return parts.map((p) => (p.startsWith("Next") ? p : e(p))).join(" ");
+  }
+
+  function joinAnd(items) {
+    if (items.length <= 1) return items.join("");
+    if (items.length === 2) return `${items[0]} and ${items[1]}`;
+    return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+  }
+
+  function supplyGroup(g, d, suppliers, first) {
+    const s = g.supplier;
+    const id = s ? s.id : "";
+    const title = s ? s.name : (suppliers.length ? "Not assigned to a supplier yet" : "What to buy");
+    const sub = s ? supplierLine(s) : (suppliers.length ? "Choose a supplier on a line and it moves into that list." : "");
+    const rows = g.lines.map((line) => supplyRow(line, suppliers, !s)).join("")
+      + g.extras.map((row) => extraRow(row)).join("");
+    const actions = s ? `
+        ${s.website ? `<a class="btn accent" href="${e(s.website)}" target="_blank" rel="noopener" data-supply="order-site" data-id="${e(id)}">Open ${e(s.name)} ${icon("external")}</a>` : ""}
+        <button class="btn ${s.website ? "" : "accent"}" data-supply="order-email" data-id="${e(id)}">Email the order</button>
+        <button class="btn ghost" data-supply="order-copy" data-id="${e(id)}">Copy</button>`
+      : `<button class="btn" data-supply="order-copy" data-id="">Copy the list</button>`;
+    const foot = first && !d.counts_taken
+      ? `<div class="card-foot">Type what is on the shelf under On hand and the Order column drops to what is actually short.</div>` : "";
+    return `<section class="card supply-group">
+      <div class="card-head">
+        <div><h2>${e(title)}</h2>${sub ? `<p>${sub}</p>` : ""}</div>
+        <div class="spacer"></div>
+        ${s ? `<button class="btn sm ghost" data-supply="supplier-edit" data-id="${e(id)}">Edit</button>`
+            : `<button class="btn sm" data-supply="supplier-new">Add a supplier</button>`}
+      </div>
+      <div class="sline head"><span>Ingredient</span><span class="right">Will use</span><span>On hand</span><span>Runs out</span><span class="right">Order</span></div>
+      ${rows}
+      <div class="card-body supply-actions"><div class="btn-row">${actions}</div></div>
+      ${foot}
+    </section>`;
+  }
+
+  function supplyRow(line, suppliers, loose) {
+    const key = lineKey(line);
+    const qty = orderQty(line);
+    const unit = line.suggested.unit;
+    const counted = line.on_hand !== null && line.on_hand !== undefined;
+    const meta = [line.role || ""];
+    if (line.pack_size) meta.push(`${num(line.pack_size)} ${plural(line.pack_size, line.pack_unit)} per ${line.pack_label}`);
+    if (line.product_code) meta.push(`code ${line.product_code}`);
+    if (line.pack_note) meta.push(line.pack_note);
+    const inPacks = !!line.pack_size;
+    return `<div class="sline">
+      <div class="s-name">
+        <button class="s-open" data-supply="item" data-key="${e(key)}"><b>${e(line.name)}</b></button>
+        <small>${e(meta.filter(Boolean).join(" · "))}</small>
+        ${loose && suppliers.length ? `<select class="s-assign" data-supply-assign="${e(key)}" aria-label="Supplier for ${e(line.name)}">
+            <option value="">Choose a supplier</option>
+            ${suppliers.map((s) => `<option value="${e(s.id)}">${e(s.name)}</option>`).join("")}
+          </select>` : ""}
+      </div>
+      <div class="s-use right"><b>${num(line.typical)} ${e(plural(line.typical, line.unit))}</b><small>about ${num(line.per_day)} a day</small></div>
+      <div class="s-count">
+        <label class="count">
+          <input type="number" inputmode="decimal" min="0" step="any" placeholder="0"
+                 data-supply-count="${e(key)}" data-unit="${inPacks ? "pack" : e(line.unit)}" data-kind="${e(line.kind)}"
+                 value="${counted ? e(inPacks ? line.on_hand_packs : line.on_hand) : ""}" aria-label="On hand, ${e(line.name)}">
+          <span>${e(plural(2, inPacks ? line.pack_label : line.unit))}</span>
+        </label>
+        ${counted && inPacks ? `<small>${num(line.on_hand)} ${e(plural(line.on_hand, line.unit))}</small>` : ""}
+      </div>
+      <div class="s-runs">${runsOutCell(line, counted)}</div>
+      <div class="s-order right">
+        <div class="qty">
+          <button class="qstep" data-oadj="${e(key)}" data-step="-1" aria-label="Less">-</button>
+          <input class="qin" data-oqty="${e(key)}" type="number" inputmode="decimal" min="0" step="any" value="${qty}" aria-label="Order, ${e(line.name)}">
+          <button class="qstep" data-oadj="${e(key)}" data-step="1" aria-label="More">+</button>
+        </div>
+        <small>${e(plural(qty, unit))}${inPacks && qty ? `, ${num(qty * line.pack_size)} ${e(plural(qty * line.pack_size, line.pack_unit))}` : ""}</small>
+      </div>
+    </div>`;
+  }
+
+  function runsOutCell(line, counted) {
+    if (!counted) return `<small>Not counted</small>`;
+    if (line.days_of_cover === null || line.days_of_cover === undefined) return `<small>Not used in this window</small>`;
+    const days = line.days_of_cover;
+    const o = line.order;
+    let note = "";
+    if (o && o.late) note = `<small class="down">Order now${o.arrives ? `, lands ${e(o.arrives_label)}` : ""}</small>`;
+    else if (o) note = `<small class="${o.urgent ? "warn" : ""}">Order ${e(o.order_by_label)}</small>`;
+    return `<b class="${days < 1.5 ? "down" : days < 3 ? "warn" : ""}">${e(cap(line.runs_out_label))}</b>
+      <small>${days < 1 ? "less than a day" : `${days} days`} of cover</small>${note}`;
+  }
+
+  function extraRow(row) {
+    const index = S.order.extras.indexOf(row);
+    return `<div class="sline extra">
+      <div class="s-name"><b>${e(row.name)}</b><small>added by you</small></div>
+      <div class="s-use"></div><div class="s-count"></div><div class="s-runs"></div>
+      <div class="s-order right"><b>${e(row.qty)}</b>
+        <button class="btn sm ghost" data-odrop="${index}" style="margin-top:4px">Remove</button></div>
+    </div>`;
   }
 
   function orderAdjust(key, step) {
-    const line = (S.data.lines || []).find((row) => row.name.toLowerCase() === key);
+    const line = (S.data.lines || []).find((row) => lineKey(row) === key);
     if (!line) return;
     const now = orderQty(line);
-    const grain = line.typical >= 100 ? 10 : line.typical >= 20 ? 5 : 1;
-    S.order.edits[key] = Math.max(0, Math.round((now + step * grain) * 10) / 10);
-    render();
+    S.order.edits[key] = Math.max(0, Math.round((now + step * orderGrain(line)) * 10) / 10);
+    render(true);
   }
 
-  function orderCopy() {
-    const d = S.data;
-    const rows = d.lines.filter((row) => row.orderable).map((line) =>
-      `${line.name}: ${orderQty(line)} ${line.unit}`);
-    S.order.extras.forEach((row) => rows.push(`${row.name}: ${row.qty}`));
-    const text = `Order for ${dMed(d.start)} to ${dMed(d.end)}\n\n` + rows.join("\n");
-    navigator.clipboard?.writeText(text).then(
-      () => toast("Copied. Paste it into an email or a text to your rep."),
-      () => toast("Could not copy on this browser", "error"),
-    );
+  function groupOrderLines(g) {
+    const lines = g.lines.map((line) => ({
+      name: line.name, quantity: orderQty(line), unit: line.suggested.unit,
+      pack_size: line.pack_size || 0, pack_unit: line.pack_unit || "", product_code: line.product_code || "",
+    })).filter((row) => row.quantity > 0);
+    g.extras.forEach((row) => {
+      const match = String(row.qty).match(/^\s*([\d.]+)\s*(.*)$/);
+      lines.push({ name: row.name, quantity: match ? Number(match[1]) : 1, unit: match ? match[2].trim() : String(row.qty),
+        pack_size: 0, pack_unit: "", product_code: "" });
+    });
+    return lines;
   }
+
+  function orderTextFor(g, d) {
+    const s = g.supplier;
+    const head = `Order for ${locationName()}${s ? `, ${s.name}` : ""}, ${dMed(d.start)} to ${dMed(d.end)}`;
+    const rows = groupOrderLines(g).map((row) => `${row.name}: ${row.quantity} ${plural(row.quantity, row.unit)}`
+      + (row.pack_size ? ` (${row.pack_size} ${plural(row.pack_size, row.pack_unit)} each)` : "")
+      + (row.product_code ? `, code ${row.product_code}` : ""));
+    return `${head}${NEWLINE}${NEWLINE}${rows.join(NEWLINE)}`;
+  }
+
+  // Kept for anything that still calls it: copies the loose list.
+  function orderCopy() { return supplyCopy(""); }
+
+  function supplyCopy(id) {
+    const g = findGroup(id);
+    if (!g) return;
+    const text = orderTextFor(g, S.data);
+    if (!groupOrderLines(g).length) return toast("Nothing on this list yet", "error");
+    const done = () => toast("Copied. Paste it into a text or an email to your rep.");
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
+    else fallbackCopy(text, done);
+    if (id) logOrder(id, "copy", g).catch(() => {});
+  }
+
+  function fallbackCopy(text, done) {
+    const box = document.createElement("textarea");
+    box.value = text; box.setAttribute("readonly", ""); box.style.position = "fixed"; box.style.top = "-1000px";
+    document.body.appendChild(box); box.select();
+    try { document.execCommand("copy"); done(); } catch (_) { toast("Could not copy on this browser", "error"); }
+    box.remove();
+  }
+
+  function logOrder(id, channel, g, extra = {}) {
+    const d = S.data;
+    return API.send(`/api/supply/order?location_id=${encodeURIComponent(S.locationId)}`, "POST", {
+      supplier_id: id, channel, lines: groupOrderLines(g), window_start: d.start, window_end: d.end, ...extra,
+    });
+  }
+
+  async function supplyEmail(id) {
+    const g = findGroup(id);
+    if (!g || !g.supplier) return;
+    if (!g.supplier.order_email) {
+      toast("Add an order email for this supplier first", "error");
+      return openSupplierForm(g.supplier);
+    }
+    if (!groupOrderLines(g).length) return toast("Nothing on this order yet", "error");
+    const channel = S.data.mail_provider === "outbox" ? "mail-app" : "email";
+    try {
+      const r = await logOrder(id, channel, g);
+      if (r.mailto) window.location.href = r.mailto;
+      toast(r.message, "ok", r.order.status === "outbox");
+      await loadView(true);
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  async function supplyPlaced(id) {
+    const g = findGroup(id);
+    if (!g || !g.supplier) return;
+    try {
+      const r = await logOrder(id, "site", g);
+      closeLayer();
+      toast(r.order.expected_on ? `Noted. Arriving ${whenLabel(r.order.expected_on)}.` : "Noted.");
+      await loadView(true);
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  // The supplier's site opens in its own tab; this panel is the list to type
+  // in while it is open, and the one button that records the order was placed.
+  function openSitePanel(id) {
+    const g = findGroup(id);
+    const s = g && g.supplier;
+    if (!s || !s.website) return;
+    const lines = groupOrderLines(g);
+    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+      <aside class="sheet">
+        <div class="sheet-head">
+          <div><h2>${e(s.name)}</h2><p>Open in the other tab at ${e(hostOf(s.website))}. Type this in, then come back.</p></div>
+          <div style="margin-left:auto"><button class="icon-btn" data-do="close-layer" aria-label="Close">${icon("close")}</button></div>
+        </div>
+        <div class="sheet-body">
+          <section class="card">
+            <div class="site-list">
+              ${lines.length ? lines.map((row) => `<div class="site-line"><b>${e(row.name)}</b>
+                  <span>${row.quantity} ${e(plural(row.quantity, row.unit))}${row.pack_size ? `, ${num(row.pack_size)} ${e(plural(row.pack_size, row.pack_unit))} each` : ""}${row.product_code ? ` · code ${e(row.product_code)}` : ""}</span></div>`).join("")
+                : `<p class="small muted">Nothing on this order yet.</p>`}
+            </div>
+            ${lines.length ? `<div class="card-body supply-actions"><div class="btn-row">
+              <button class="btn accent" data-supply="order-placed" data-id="${e(id)}">I placed this order</button>
+              <button class="btn ghost" data-supply="order-copy" data-id="${e(id)}">Copy</button>
+            </div></div>` : ""}
+          </section>
+        </div>
+      </aside>`;
+  }
+
+  function openItemSettings(key) {
+    const line = (S.data.lines || []).find((row) => lineKey(row) === key);
+    if (!line) return;
+    const suppliers = S.data.suppliers || [];
+    const drivers = (line.driven_by || []).map((x) => `${x.item} ${x.share_percent}%`).join(", ");
+    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal">
+        <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
+        <div class="modal-head"><h2>${e(line.name)}</h2>
+          <p>About ${num(line.per_day)} ${e(plural(line.per_day, line.unit))} a day${drivers ? `, from ${e(drivers)}` : ""}.</p></div>
+        <form id="f-supply-item" class="modal-body">
+          <input type="hidden" name="ingredient" value="${e(key)}">
+          <label class="field"><span>Who you buy it from</span>
+            <select name="supplier_id">
+              <option value="">Not set</option>
+              ${suppliers.map((s) => `<option value="${e(s.id)}" ${s.id === line.supplier_id ? "selected" : ""}>${e(s.name)}</option>`).join("")}
+            </select></label>
+          <div class="field"><span class="field-label">How it is bought</span>
+            <div class="packrow">
+              <input name="pack_size" type="number" inputmode="decimal" min="0" step="any" value="${line.pack_size || ""}" placeholder="80" aria-label="How many per pack">
+              <input name="pack_unit" value="${e(line.pack_size ? line.pack_unit : line.unit)}" aria-label="Unit" placeholder="${e(line.unit)}">
+              <span>per</span>
+              <select name="pack_label" aria-label="Pack">${PACK_LABELS.map((p) => `<option ${p === (line.pack_label || "case") ? "selected" : ""}>${p}</option>`).join("")}</select>
+            </div>
+            <small>Leave the amount empty to keep ordering in ${e(plural(2, line.unit))}.</small></div>
+          <label class="field"><span>Product code with the supplier</span>
+            <input name="product_code" value="${e(line.product_code || "")}" placeholder="Optional"></label>
+          <div class="modal-foot" style="margin:6px -22px -20px">
+            <button class="btn ghost" type="button" data-do="close-layer">Cancel</button>
+            <button class="btn accent" type="submit">Save</button>
+          </div>
+        </form>
+      </div></div>`;
+  }
+
+  function openSupplierForm(existing) {
+    const s = existing || { delivery_days: [], lead_days: 1 };
+    const days = new Set(s.delivery_days || []);
+    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal">
+        <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
+        <div class="modal-head"><h2>${existing ? e(s.name) : "New supplier"}</h2></div>
+        <form id="f-supply-supplier" class="modal-body">
+          <input type="hidden" name="sid" value="${e(s.id || "")}">
+          <input type="hidden" name="delivery_days" value="${e((s.delivery_days || []).join(","))}">
+          <div class="form-grid two">
+            <label class="field"><span>Name</span><input name="name" required minlength="2" value="${e(s.name || "")}" placeholder="Sysco" ${existing ? "" : "autofocus"}></label>
+            <label class="field"><span>Your rep</span><input name="rep_name" value="${e(s.rep_name || "")}" placeholder="Optional"></label>
+          </div>
+          <div class="form-grid two">
+            <label class="field"><span>Order email</span><input name="order_email" type="email" value="${e(s.order_email || "")}" placeholder="orders@example.com"></label>
+            <label class="field"><span>Phone</span><input name="phone" type="tel" value="${e(s.phone || "")}"></label>
+          </div>
+          <div class="form-grid two">
+            <label class="field"><span>Ordering site</span><input name="website" value="${e(s.website || "")}" placeholder="shop.example.com"></label>
+            <label class="field"><span>Account number</span><input name="account_number" value="${e(s.account_number || "")}"></label>
+          </div>
+          <div class="field"><span class="field-label">Delivery days</span>
+            <div class="chipset">${WEEKDAY_CHOICES.map(([k, l]) =>
+              `<button type="button" class="chip ${days.has(k) ? "on" : ""}" data-supply-day="${k}">${l}</button>`).join("")}</div>
+            <small>Leave them all off if they deliver any day.</small></div>
+          <div class="form-grid two">
+            <label class="field"><span>Order in by</span><input name="cutoff_time" type="time" value="${e(s.cutoff_time || "")}">
+              <small>Their cutoff. Empty if there is none.</small></label>
+            <label class="field"><span>Arrives</span>
+              <select name="lead_days">${LEAD_CHOICES.map(([v, l]) => `<option value="${v}" ${Number(s.lead_days) === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+              <small>After the order goes in.</small></label>
+          </div>
+          <label class="field"><span>Notes</span><textarea name="notes" rows="2" placeholder="Minimum order, who to call when the truck is late">${e(s.notes || "")}</textarea></label>
+          <div class="modal-foot" style="margin:6px -22px -20px">
+            ${existing ? `<button class="btn ghost" type="button" data-supply="supplier-remove" data-id="${e(s.id)}">Remove</button>` : ""}
+            <span style="flex:1"></span>
+            <button class="btn ghost" type="button" data-do="close-layer">Cancel</button>
+            <button class="btn accent" type="submit">Save</button>
+          </div>
+        </form>
+      </div></div>`;
+  }
+
+  function openOrderAdd() {
+    const suppliers = (S.data && S.data.suppliers) || [];
+    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal">
+        <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
+        <div class="modal-head"><h2>Add something else</h2>
+          <p>For anything no recipe speaks for. Foil, gloves, the fryer oil.</p></div>
+        <form id="f-supply-extra" class="modal-body">
+          <label class="field"><span>What</span><input name="name" required minlength="2" placeholder="Fryer oil" autofocus></label>
+          <label class="field"><span>How much</span><input name="qty" required value="1" placeholder="2 cases"></label>
+          ${suppliers.length ? `<label class="field"><span>From</span>
+            <select name="supplier_id"><option value="">Not set</option>
+              ${suppliers.map((s) => `<option value="${e(s.id)}">${e(s.name)}</option>`).join("")}</select></label>` : ""}
+          <div class="modal-foot" style="margin:6px -22px -20px">
+            <button class="btn ghost" type="button" data-do="close-layer">Cancel</button>
+            <button class="btn accent" type="submit">Add it</button>
+          </div>
+        </form>
+      </div></div>`;
+  }
+
+  async function loadSupply() {
+    try {
+      S.supply = await API.get(`/api/supply?location_id=${encodeURIComponent(S.locationId)}`);
+      if (S.view === "settings" && S.settingsTab === "suppliers") render(true);
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  function settingsSuppliers() {
+    const v = S.supply;
+    if (!v) { loadSupply(); return `<section class="card"><div class="card-body">${skeleton()}</div></section>`; }
+    const list = v.suppliers || [];
+    return `<div class="stack-tight">
+      <section class="card">
+        <div class="card-head">
+          <div><h2>Who you buy from</h2>
+            ${list.length ? "" : `<p>Add the people you order from and the Order page sorts itself by who to call.</p>`}</div>
+          <div class="spacer"></div>
+          <button class="btn sm accent" data-supply="supplier-new">Add a supplier</button>
+        </div>
+        ${list.map(supplierRow).join("")}
+        ${v.mail_provider === "outbox" && list.length ? `<div class="card-foot">No mail service is connected, so Email the order opens your own mail app with the order written out.</div>` : ""}
+      </section>
+      ${(v.recent_orders || []).length ? `<section class="card">
+        <div class="card-head"><div><h2>Recent orders</h2></div></div>
+        ${v.recent_orders.map(orderLogRow).join("")}
+      </section>` : ""}
+    </div>`;
+  }
+
+  function supplierRow(s) {
+    const contact = [s.rep_name, s.phone, s.order_email].filter(Boolean).join(" · ");
+    const days = s.delivery_days || [];
+    const when = [
+      days.length ? joinAnd(days.map(cap)) : "Any day",
+      s.cutoff_label ? `order by ${s.cutoff_label}` : "",
+      `arrives ${(LEAD_CHOICES.find(([v]) => v === Number(s.lead_days)) || [0, "next day"])[1]}`,
+    ].filter(Boolean).join(" · ");
+    return `<div class="srow">
+      <div><b>${e(s.name)}</b>${contact ? `<small>${e(contact)}</small>` : ""}</div>
+      <div><span>${e(when)}</span>
+        ${s.last_order ? `<small>Last order ${e(whenLabel(s.last_order.sent_at))}${s.last_order.expected_on ? `, arriving ${e(whenLabel(s.last_order.expected_on))}` : ""}</small>` : ""}</div>
+      <div class="btn-row">
+        ${s.website ? `<a class="btn sm" href="${e(s.website)}" target="_blank" rel="noopener">${e(hostOf(s.website))} ${icon("external")}</a>` : ""}
+        <button class="btn sm ghost" data-supply="supplier-edit" data-id="${e(s.id)}">Edit</button>
+      </div>
+    </div>`;
+  }
+
+  function orderLogRow(o) {
+    return `<div class="srow">
+      <div><b>${e(o.supplier_name || "No supplier")}</b><small>${noun(o.line_count, "line")} · ${e(CHANNEL_LABELS[o.status] || o.status)}${o.sent_by ? ` · ${e(o.sent_by)}` : ""}</small></div>
+      <div><span>${e(cap(whenLabel(o.sent_at)))}</span>${o.expected_on ? `<small>arriving ${e(whenLabel(o.expected_on))}</small>` : ""}</div>
+      <div class="small muted">${e(o.window_start && o.window_end ? `${dShort(o.window_start)} to ${dShort(o.window_end)}` : "")}</div>
+    </div>`;
+  }
+
+  // Counts are saved as they are typed, then the list is refreshed once the
+  // typing pauses, so a fast count down the walk-in never fights the screen.
+  let countRefresh = 0;
+  let countChain = Promise.resolve();
+  function saveCount(input) {
+    const body = { ingredient: input.dataset.supplyCount, on_hand: input.value.trim(), unit: input.dataset.unit, kind: input.dataset.kind };
+    countChain = countChain.then(() => API.send(`/api/supply/count?location_id=${encodeURIComponent(S.locationId)}`, "POST", body))
+      .catch((error) => toast(error.message, "error"));
+    clearTimeout(countRefresh);
+    countRefresh = setTimeout(() => countChain.then(() => { if (S.view === "ordering") loadView(true); }), 600);
+  }
+
+  async function assignSupplier(select) {
+    const key = select.dataset.supplyAssign;
+    const line = (S.data.lines || []).find((row) => lineKey(row) === key);
+    if (!line) return;
+    if (select.value === "new") return openSupplierForm(null);
+    if (!select.value) return;
+    try {
+      await API.send(`/api/supply/item?location_id=${encodeURIComponent(S.locationId)}`, "POST", {
+        ingredient: key, supplier_id: select.value, pack_size: line.pack_size || 0,
+        pack_unit: line.pack_unit || "", pack_label: line.pack_label || "case", product_code: line.product_code || "",
+      });
+      await loadView(true);
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  async function supplySubmit(form) {
+    const data = Object.fromEntries(new FormData(form).entries());
+    const button = form.querySelector("button[type=submit]");
+    if (button) button.disabled = true;
+    try {
+      if (form.getAttribute("id") === "f-supply-supplier") {
+        data.id = data.sid || "";
+        delete data.sid;
+        data.delivery_days = String(data.delivery_days || "").split(",").filter(Boolean);
+        data.lead_days = Number(data.lead_days);
+        const saved = await API.send(`/api/supply/supplier?location_id=${encodeURIComponent(S.locationId)}`, "POST", data);
+        closeLayer();
+        toast(`Saved ${saved.name}`);
+        S.supply = null;
+        return loadView(true);
+      }
+      if (form.getAttribute("id") === "f-supply-item") {
+        data.pack_size = Number(data.pack_size) || 0;
+        await API.send(`/api/supply/item?location_id=${encodeURIComponent(S.locationId)}`, "POST", data);
+        closeLayer();
+        toast("Saved");
+        return loadView(true);
+      }
+      if (form.getAttribute("id") === "f-supply-extra") {
+        S.order.extras.push({ name: String(data.name).trim(), qty: String(data.qty || "1").trim(), supplier_id: data.supplier_id || "" });
+        closeLayer();
+        return render(true);
+      }
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function supplyAction(target) {
+    const kind = target.dataset.supply;
+    const id = target.dataset.id || "";
+    if (kind === "supplier-new") return openSupplierForm(null);
+    if (kind === "supplier-edit") {
+      const s = ((S.data && S.data.suppliers) || (S.supply && S.supply.suppliers) || []).find((row) => row.id === id);
+      return s ? openSupplierForm(s) : loadSupply();
+    }
+    if (kind === "supplier-remove") {
+      target.outerHTML = `<button class="btn danger" type="button" data-supply="supplier-remove-yes" data-id="${e(id)}">Yes, remove it</button>`;
+      return;
+    }
+    if (kind === "supplier-remove-yes") {
+      try {
+        await API.send(`/api/supply/supplier?location_id=${encodeURIComponent(S.locationId)}`, "DELETE", { id });
+        closeLayer();
+        toast("Removed");
+        S.supply = null;
+        return loadView(true);
+      } catch (error) { return toast(error.message, "error"); }
+    }
+    if (kind === "item") return openItemSettings(target.dataset.key);
+    if (kind === "order-copy") return supplyCopy(id);
+    if (kind === "order-email") return supplyEmail(id);
+    if (kind === "order-site") return openSitePanel(id);
+    if (kind === "order-placed") return supplyPlaced(id);
+    return undefined;
+  }
+
+  document.addEventListener("click", (event) => {
+    const day = event.target.closest("[data-supply-day]");
+    if (day) {
+      day.classList.toggle("on");
+      const hidden = day.closest("form")?.querySelector("[name=delivery_days]");
+      if (hidden) hidden.value = Array.from(day.parentElement.querySelectorAll(".chip.on")).map((n) => n.dataset.supplyDay).join(",");
+      return;
+    }
+    const target = event.target.closest("[data-supply]");
+    if (target) supplyAction(target);
+  });
+
+  document.addEventListener("change", (event) => {
+    const count = event.target.closest("[data-supply-count]");
+    if (count) return saveCount(count);
+    const assign = event.target.closest("[data-supply-assign]");
+    if (assign) return assignSupplier(assign);
+    return undefined;
+  });
+
+  document.addEventListener("submit", (event) => {
+    const form = event.target;
+    const formId = form.getAttribute ? (form.getAttribute("id") || "") : "";
+    if (!formId.startsWith("f-supply-")) return;
+    event.preventDefault();
+    supplySubmit(form);
+  });
 
   /* ---------- settings ---------- */
   const SETTINGS_TABS = [
     ["location", "Location"],
+    ["menu", "Menu & recipes"],
     ["costs", "What things cost"],
+    ["suppliers", "Suppliers"],
     ["connections", "Data connections"],
     ["email", "Daily email"],
     ["account", "Account & security"],
@@ -1800,7 +2404,9 @@
 
   function settingsPanel() {
     const { setup, billing } = S.data;
+    if (S.settingsTab === "menu") return settingsMenu();
     if (S.settingsTab === "costs") return settingsCosts();
+    if (S.settingsTab === "suppliers") return settingsSuppliers();
     if (S.settingsTab === "location") return settingsLocation(setup);
     if (S.settingsTab === "connections") return settingsConnections(setup);
     if (S.settingsTab === "email") return settingsEmail(setup);
@@ -1927,7 +2533,7 @@
           <tr><td class="name"><b>Wages</b><small>${ex.staff_hours} staff hours at ${money(ex.loaded_wage, true)}, peak of ${ex.busiest_staff} people</small></td><td class="num right">${money(-ex.labour)}</td></tr>
           ${ex.other ? `<tr><td class="name"><b>Everything else</b><small>one day's share of what you listed</small></td><td class="num right">${money(-ex.other)}</td></tr>` : ""}
         </tbody><tfoot><tr><td><b>Kept</b><small>about ${ex.margin_percent}% of what was rung</small></td>
-          <td class="num right"><b>${money(ex.gross_profit)}</b></td></tr></tfoot></table></div>
+          <td class="num right"><b>${money(ex.left_after_costs)}</b></td></tr></tfoot></table></div>
         <div class="card-foot">Built from the settings on this page, not from your books.</div>
       </section>` : ""}
     </div>`;
@@ -1943,10 +2549,6 @@
     </div>`;
   }
 
-  async function loadCosts() {
-    S.costs = await API.get(`/api/costs?location_id=${encodeURIComponent(S.locationId)}`);
-    render();
-  }
 
   async function saveCosts() {
     const form = document.getElementById("f-costs");
@@ -2301,9 +2903,7 @@
             <td class="num right ${d.today_effect_units >= 0 ? "up" : "down"}">${d.today_effect_units >= 0 ? "+" : ""}${d.today_effect_units}</td>
             <td class="num right">${formatP(d.q)}</td>
             <td class="small muted">${e(d.evidence)}${d.provisional ? " · thin sample" : ""}${d.note ? `<br><b>${e(d.note)}</b>` : ""}</td></tr>`).join("")}
-        </tbody><tfoot><tr><td colspan="2"><b>Added up</b><small>every condition above, together</small></td>
-          <td class="num right ${established.reduce((s, d) => s + d.today_effect_units, 0) >= 0 ? "up" : "down"}"><b>${established.reduce((s, d) => s + d.today_effect_units, 0) >= 0 ? "+" : ""}${Math.round(established.reduce((s, d) => s + d.today_effect_units, 0) * 10) / 10}</b></td>
-          <td colspan="2" class="small muted">against a normal ${e(p.today.weekday || "day")}. This total will not always match the number at the top.</td></tr></tfoot></table></div>`
+        </tbody></table></div>`
         : `<div class="empty">${icon("empty")}<b>Nothing outside the restaurant moves this item</b>
              <span>Once the day of the week is accounted for, no condition tested here changes it enough to be sure of.</span></div>`}
         ${watching.length ? `<div class="card-body" style="padding-top:0">
@@ -2337,10 +2937,7 @@
           <div class="card-body">
             <p class="lede">Busiest at <b>${e(p.hourly.busiest || "no clear hour")}</b>, which takes ${p.hourly.busiest_share}% of the day.
             Half of them are gone by <b>${e(p.hourly.half_sold_by || "the end of service")}</b>.</p>
-            <div class="hours" style="height:118px;margin-top:14px">${p.hourly.hours.map((h) => `
-              <div class="hourcol" title="${e(h.label)}: ${h.per_day} a day, ${h.share_percent}% of this item">
-                <div class="track"><i style="height:${Math.max(4, (h.share_percent / Math.max(1, p.hourly.busiest_share)) * 100)}%"></i></div>
-                <span>${e(h.label.replace(" ", ""))}</span></div>`).join("")}</div>
+            ${hourShape(p.hourly)}
             <p class="small muted" style="margin-top:10px">Averaged over the last ${p.hourly.window_days} days.</p>
           </div>
         </section>
@@ -2391,7 +2988,7 @@
           <th class="num right">For ${num(prep.quantity ?? p.today.expected)} today</th></tr></thead><tbody>
           ${p.composition.components.map((c) => `<tr>
             <td class="name"><b>${e(c.name)}</b></td>
-            <td class="muted">${e(c.role)}</td>
+            <td><span class="rolechip"><i class="${roleClass(c.role)}"></i>${e(c.role)}</span></td>
             <td class="num right">${e(c.quantity || "not stated")}</td>
             <td class="num right">${e(scaleQuantity(c.quantity, prep.quantity ?? p.today.expected))}</td></tr>`).join("")}
         </tbody></table></div>
@@ -2441,24 +3038,33 @@
   const TOUR = [
     {
       view: "today",
-      target: ".tiles",
+      target: "#daytiles",
       title: "What today is worth",
-      body: "What you will ring, and what is left after the food and the hours. Both move as the day does.",
+      body: "What you will ring, how many to make, and the hour to have the line ready. All three move as the day does.",
       place: "bottom",
     },
     {
       view: "today",
-      target: "#itemtable",
+      pane: "make",
+      target: "#daypanes",
       title: "How many to make",
       body: "A number for every item, not just the big ones. Make sits above what will sell, because running out costs more than throwing away.",
       place: "top",
     },
     {
       view: "today",
-      target: "#whytoday",
+      pane: "why",
+      target: "#daypanes",
       title: "Why it says that",
       body: "Every reason is tested against your own sales before it is shown. If nothing is really moving today, it says that instead of inventing something.",
       place: "top",
+    },
+    {
+      view: "today",
+      target: "[data-view='ordering']",
+      title: "What to buy",
+      body: "The forecast turned into a shopping list, by supplier. Count what is in the walk-in and it tells you what runs out when, and who to order it from.",
+      place: "bottom",
     },
     {
       view: "history",
@@ -2468,7 +3074,8 @@
       place: "top",
     },
     {
-      view: "menu",
+      view: "settings",
+      tab: "menu",
       target: "#menulist",
       title: "Down to the ingredient",
       body: "What each item is made of, so a busy Saturday turns into how much beef and how many buns. Correct anything we read wrong and it stays corrected.",
@@ -2476,13 +3083,13 @@
     },
     {
       view: "today",
-      target: "#itemtable .dt tbody tr",
+      pane: "make",
+      target: "#daypanes .dt tbody tr",
       title: "Open anything",
-      body: "Click any item name anywhere in Quantify for its whole record: which days it belongs to, what actually moves it, and how well we have called it before.",
+      body: "Tap any item name anywhere in Quantify for its whole record: which days it belongs to, what actually moves it, and how well we have called it before.",
       place: "center",
     },
   ];
-
   function tourEligible() {
     if (localStorage.getItem("quantify.tour") === "done") return false;
     return S.view === "today" && !!S.data;
@@ -2521,12 +3128,19 @@
     const stop = TOUR[S.tour.step];
     if (!stop) return endTour(true);
 
-    if (stop.view && S.view !== stop.view) {
+    const needsView = stop.view && S.view !== stop.view;
+    const needsTab = stop.tab && S.settingsTab !== stop.tab;
+    if (needsView || needsTab) {
       S.view = stop.view;
+      if (stop.tab) S.settingsTab = stop.tab;
       localStorage.setItem("quantify.view", S.view);
       await loadView();
       // loadView repaints the whole screen, so the tour card has to go back on.
       document.body.classList.add("tour-on");
+    }
+    if (stop.pane && S.todayPane !== stop.pane) {
+      S.todayPane = stop.pane;
+      render();
     }
 
     const node = stop.target ? document.querySelector(stop.target) : null;
@@ -2647,15 +3261,15 @@
               <p class="lede" style="margin-top:8px">${e(r.likely_reason || "")}</p>
               <p class="lede" style="margin-top:8px"><b>${e(r.matters || "")}</b></p>
               ${acc !== null ? `<div class="accmeter" style="margin-top:14px">
-                <div class="top"><b>${acc}% per item</b><small>day total ${num(d.predicted_units)} called, ${num(d.units)} sold</small></div>
+                <div class="top"><b>${Math.round(acc)}% per item</b><small>${num(d.predicted_units)} called, ${num(d.units)} sold</small></div>
                 <div class="line"><i class="${acc >= 90 ? "" : acc >= 80 ? "mid" : "low"}" style="width:${Math.max(4, acc)}%"></i></div></div>` : ""}
             </div></section>
 
             <section class="tiles" style="grid-template-columns:repeat(${d.costs ? 3 : 2},minmax(0,1fr))">
               ${tile("Rang up", money(d.sales), `<b>${num(d.units)}</b> items across <b>${num(d.orders)}</b> orders.`, `Average order ${money(d.average_order, true)}`)}
-              ${d.costs ? tile("Kept", money(d.costs.gross_profit),
+              ${d.costs ? tile("Left after costs", money(d.costs.left_after_costs),
                 `<b>${money(d.costs.cogs)}</b> in food and <b>${money(d.costs.labour)}</b> in wages came out of that${d.costs.other ? `, plus <b>${money(d.costs.other)}</b> fixed` : ""}.`,
-                `About ${d.costs.margin_percent}% of what was rung`) : ""}
+                `About ${d.costs.margin_percent}% of net sales`) : ""}
               ${tile("Called", d.predicted_sales !== null ? money(d.predicted_sales) : "Not scored", d.predicted_units !== null ? `<b>${num(d.predicted_units)}</b> items expected.` : "This day has not been scored yet.", `Called the day before`)}
             </section>
 
@@ -2681,10 +3295,11 @@
             <section class="card">
               <div class="card-head"><div><h2>Where the orders came from</h2></div></div>
               <div class="card-body" style="display:grid;gap:10px">
-                ${d.channels.map((c) => `<div class="mixrow">
+                ${(() => { const gross = d.channels.reduce((n, r) => n + r.sales, 0) || 1; return d.channels.map((c) => `<div class="mixrow">
                   <div class="who"><b>${e(c.channel)}</b><small>${num(c.orders)} orders</small></div>
-                  <div class="mixbar"><i class="role-produce" style="width:${Math.max(3, (c.sales / Math.max(1, d.sales)) * 100)}%"></i></div>
-                  <span class="qty">${money(c.sales)}</span></div>`).join("")}
+                  <div class="mixbar"><i style="width:${Math.max(2, Math.min(100, (c.sales / gross) * 100))}%"></i></div>
+                  <span class="qty">${money(c.sales)}<div class="small muted">${Math.round((c.sales / gross) * 100)}% of tickets</div></span>
+                  </div>`).join(""); })()}
               </div>
             </section>
           </div>
@@ -2791,12 +3406,15 @@
       document.getElementById(anchor.dataset.scroll)?.scrollIntoView({ behavior: "smooth", block: "start" });
       return;
     }
-    const target = event.target.closest("button, a[data-do]");
+    // Links that behave like buttons are handled here too, so a link to a
+    // settings page switches the page instead of reloading the whole app.
+    const target = event.target.closest("button, a[data-do], a[data-stab], a[data-view]");
     if (!target) {
       const row = event.target.closest("[data-item-sheet]");
       if (row) return openItemSheet(row.dataset.itemSheet);
       return;
     }
+    if (target.tagName === "A") event.preventDefault();
 
     if (target.dataset.view) {
       S.view = target.dataset.view;
@@ -2813,15 +3431,21 @@
     }
     if (target.dataset.stab) {
       S.settingsTab = target.dataset.stab;
-      if (S.view !== "settings") { S.view = "settings"; localStorage.setItem("quantify.view", S.view); }
-      if (target.dataset.stab === "costs" && !S.costs) return loadCosts();
-      return S.view === "settings" ? render() : loadView();
+      S.view = "settings"; localStorage.setItem("quantify.view", S.view);
+      window.scrollTo(0, 0);
+      return loadView(true);
+    }
+    if (target.dataset.pane) {
+      S.todayPane = target.dataset.pane;
+      render(true);
+      if (S.todayPane === "ahead") loadOutlook();
+      return;
     }
     if (target.dataset.drange) { S.history.range = target.dataset.drange; return loadView(); }
     if (target.dataset.orange) { S.orders.range = target.dataset.orange; return loadView(); }
     if (target.dataset.day) { S.date = addDays(S.date, Number(target.dataset.day)); return loadView(); }
     if (target.dataset.openDate) {
-      S.date = target.dataset.openDate; S.view = "today"; closeLayer();
+      S.date = target.dataset.openDate; S.view = "today"; S.todayPane = "make"; closeLayer();
       window.scrollTo(0, 0); return loadView();
     }
     if (target.dataset.dayDetail) return openDaySheet(target.dataset.dayDetail);
@@ -2936,13 +3560,7 @@
       case "tour-start": return startTour(true);
       case "order-reset": S.order.edits = {}; return render();
       case "order-copy": return orderCopy();
-      case "order-add": {
-        const name = prompt("What else do you want on the list?");
-        if (!name || !name.trim()) return;
-        const qty = prompt(`How much ${name.trim()}?`, "1");
-        S.order.extras.push({ name: name.trim(), qty: (qty || "1").trim() });
-        return render();
-      }
+      case "order-add": return openOrderAdd();
       case "billing-portal": return billingRedirect("/api/billing/portal");
       case "billing-checkout": return billingRedirect("/api/billing/checkout");
       case "billing-resume":
@@ -3146,7 +3764,7 @@
       const result = force
         ? await API.send(`/api/menu/composition?location_id=${encodeURIComponent(S.locationId)}`, "POST", { item_id: itemId })
         : await API.get(`/api/menu/composition?location_id=${encodeURIComponent(S.locationId)}&item_id=${encodeURIComponent(itemId)}`);
-      const item = S.data.items.find((row) => row.id === itemId);
+      const item = (S.menu?.items || []).find((row) => row.id === itemId);
       if (item) item.composition = result;
       S.open.add(itemId);
       render(true);
@@ -3154,7 +3772,7 @@
   }
 
   function editComposition(itemId) {
-    const item = S.data.items.find((row) => row.id === itemId);
+    const item = (S.menu?.items || []).find((row) => row.id === itemId);
     const comp = item?.composition;
     if (!comp) return toast("Nothing read for that item yet", "error");
     layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>

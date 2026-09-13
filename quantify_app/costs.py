@@ -404,7 +404,9 @@ def _assemble(revenue: float, cogs: float, labour: float, other: float,
         "labour": round(labour, 2),
         "other": round(other, 2),
         "costs": round(total, 2),
-        "gross_profit": round(profit, 2),
+        # Not gross profit: labour and the owner's fixed costs are already out.
+        "left_after_costs": round(profit, 2),
+        "gross_profit": round(profit, 2),  # deprecated alias, remove after one release
         "margin_percent": round(profit / revenue * 100) if revenue > 0 else None,
         "cogs_percent": round(cogs / revenue * 100) if revenue > 0 else None,
         "staff_hours": shift["staff_hours"],
@@ -431,7 +433,8 @@ def closed_day(context: dict[str, Any]) -> dict[str, Any]:
     other = context["recurring"]["daily"]
     return {
         "revenue": 0.0, "cogs": 0.0, "labour": 0.0, "other": round(other, 2),
-        "costs": round(other, 2), "gross_profit": round(-other, 2),
+        "costs": round(other, 2), "left_after_costs": round(-other, 2),
+        "gross_profit": round(-other, 2),  # deprecated alias
         "margin_percent": None, "cogs_percent": None,
         "staff_hours": 0.0, "busiest_staff": 0, "trading_hours": 0,
         "prep_and_close_hours": 0.0, "estimate": True,

@@ -691,7 +691,26 @@ def _future_model_bundle(
     return bundle
 
 
-def forecast_item(conn: sqlite3.Connection, item: sqlite3.Row, target_date: date) -> dict[str, Any]:
+def cost_share_for(conn: sqlite3.Connection, location_id: str, item_id: str) -> float:
+    """The owner's food cost share for one item, or the best available fallback.
+
+    Deferred import because costs.py reads from this module. Callers working
+    through a whole menu should resolve the basis once and pass it down rather
+    than calling this per item.
+    """
+    try:
+        from .costs import DEFAULT_COST_SHARE, cost_settings, item_cost_basis
+
+        settings = cost_settings(conn, location_id)
+        entry = item_cost_basis(conn, location_id, settings).get(item_id)
+        return float(entry["share"]) if entry else float(settings.get("default_cost_share") or DEFAULT_COST_SHARE)
+    except Exception:  # a costing failure must never stop a forecast
+        return 0.30
+
+
+def forecast_item(
+    conn: sqlite3.Connection, item: sqlite3.Row, target_date: date, cost_share: float | None = None
+) -> dict[str, Any]:
     location = _load_location(conn, item["location_id"])
     ensure_location_interpretations(conn, item["location_id"])
     cached = _future_model_bundle(conn, location, item, target_date)
@@ -798,17 +817,25 @@ def forecast_item(conn: sqlite3.Connection, item: sqlite3.Row, target_date: date
         },
         "analog_days": analog_summary,
         "context": target_context,
-        **_production_quantity(history, target_date, target_context, int(round(expected)), float(item["price"])),
+        **_production_quantity(
+            history, target_date, target_context, int(round(expected)), float(item["price"]),
+            cost_share if cost_share is not None else cost_share_for(conn, item["location_id"], item["id"]),
+        ),
     }
 
 
 def _production_quantity(
-    history: list[HistoryRow], target_date: date, context: dict[str, Any], expected: int, price: float
+    history: list[HistoryRow], target_date: date, context: dict[str, Any], expected: int,
+    price: float, cost_share: float | None = None,
 ) -> dict[str, Any]:
     """How many to actually make, which is not the same as how many will sell.
 
     Imported here rather than at module load because the analysis module reads
     from this one. The cost is a few milliseconds an item.
+
+    `cost_share` is the owner's own food cost figure for this item, resolved by
+    the caller. It decides how far above the forecast the make number sits, so
+    it has to be their number and not a constant.
     """
     if not history:
         return {"make": expected, "make_reason": "", "sell_out_percent": None}
@@ -816,7 +843,7 @@ def _production_quantity(
         from .item_analysis import comparable_days, prep_advice
 
         distribution = comparable_days(history, target_date, context, expected)
-        prep = prep_advice(distribution, price)
+        prep = prep_advice(distribution, price, cost_share)
     except Exception:  # the forecast must survive a failure in the extra detail
         return {"make": expected, "make_reason": "", "sell_out_percent": None}
     if not prep.get("quantity"):
@@ -1211,7 +1238,20 @@ def forecast_day(conn: sqlite3.Connection, location_id: str, target_date: date, 
     location = _load_location(conn, location_id)
     ensure_location_interpretations(conn, location_id)
     item_rows = conn.execute("SELECT * FROM menu_items WHERE location_id=? AND active=1 ORDER BY category,name", (location_id,)).fetchall()
-    items = [forecast_item(conn, item, target_date) for item in item_rows]
+    # Resolved once for the whole menu rather than per item, so the make number
+    # follows the owner's costs screen without a query per row.
+    shares: dict[str, float] = {}
+    try:
+        from .costs import cost_settings, item_cost_basis
+
+        settings = cost_settings(conn, location_id)
+        shares = {
+            key: float(value["share"])
+            for key, value in item_cost_basis(conn, location_id, settings).items()
+        }
+    except Exception:  # a costing failure must never stop a forecast
+        shares = {}
+    items = [forecast_item(conn, item, target_date, shares.get(item["id"])) for item in item_rows]
     items.sort(key=lambda row: row["expected"] * row["price"], reverse=True)
     expected_revenue = round(sum(row["expected"] * row["price"] for row in items), 2)
     baseline_revenue = round(sum(row["baseline"] * row["price"] for row in items), 2)

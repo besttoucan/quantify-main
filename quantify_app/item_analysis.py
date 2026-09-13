@@ -35,6 +35,7 @@ from .intelligence import (
     _load_location,
     build_context,
     calendar_occasions,
+    cost_share_for,
     forecast_item,
 )
 from .statistics import (
@@ -52,6 +53,10 @@ from .statistics import (
 )
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+# Last resort only. Every real call resolves the share through
+# costs.item_cost_basis so the kitchen's number follows the costs screen.
+DEFAULT_COST_SHARE = 0.30
 
 # Each driver is (key into the context, human label, how to say it in a sentence).
 DRIVERS: list[tuple[str, str, str]] = [
@@ -384,18 +389,28 @@ def comparable_days(
     }
 
 
-def prep_advice(distribution: dict[str, Any], price: float, food_cost_share: float = 0.30) -> dict[str, Any]:
+def prep_advice(
+    distribution: dict[str, Any], price: float, food_cost_share: float | None = None
+) -> dict[str, Any]:
     """How many to make, once you account for it costing more to run out.
 
     Throwing a portion away loses its food cost. Missing a sale loses the whole
     margin, and sometimes the customer. Those are not the same number, so the
     right quantity is not the average.
+
+    `food_cost_share` must come from `costs.item_cost_basis`, which resolves the
+    owner's own figure for the item's category before falling back to anything
+    built in. This number decides how many the kitchen makes every morning, so
+    it has to be the one the owner entered on the costs screen rather than a
+    constant that quietly disagrees with it.
     """
     values = distribution.get("today_values") or distribution.get("values") or []
     if not values:
         return {}
-    cost_of_over = max(0.01, price * food_cost_share)
-    cost_of_under = max(0.01, price * (1.0 - food_cost_share))
+    share = DEFAULT_COST_SHARE if food_cost_share is None else float(food_cost_share)
+    share = min(0.95, max(0.01, share))
+    cost_of_over = max(0.01, price * share)
+    cost_of_under = max(0.01, price * (1.0 - share))
     result = newsvendor_quantity(values, cost_of_over, cost_of_under)
     quantity = int(round(result["quantity"]))
     levels = []
@@ -419,9 +434,10 @@ def prep_advice(distribution: dict[str, Any], price: float, food_cost_share: flo
         "typical_leftover": at_quantity["typical_leftover"] if at_quantity else None,
         "fractile_percent": round(result["fractile"] * 100),
         "median": int(round(result["median"])),
+        "cost_share_percent": round(share * 100),
         "reason": (
-            f"Wasting one costs about {cost_of_over:.2f} in food. "
-            f"Missing a sale costs about {cost_of_under:.2f} in margin."
+            f"Wasting one costs about ${cost_of_over:,.2f} in food. "
+            f"Missing a sale costs about ${cost_of_under:,.2f} in margin."
         ),
         "levels": levels,
     }
@@ -661,7 +677,7 @@ def item_profile(conn: sqlite3.Connection, location_id: str, item_id: str, targe
         "seasonality": seasonality(history) if history else [],
         "hourly": hourly_shape(conn, location_id, item_id, target),
         "distribution": {key: value for key, value in distribution.items() if key != "values"},
-        "prep": prep_advice(distribution, price),
+        "prep": prep_advice(distribution, price, cost_share_for(conn, location_id, item_id)),
         "accuracy": item_accuracy(conn, location_id, item_id),
         "related": related_items(conn, location_id, item_id, history) if history else [],
         "unusual": unusual_days(history) if history else [],

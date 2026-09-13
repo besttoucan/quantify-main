@@ -25,6 +25,7 @@ Method, in order:
 from __future__ import annotations
 
 import math
+import json
 import sqlite3
 from collections import defaultdict
 from datetime import date, timedelta
@@ -594,6 +595,30 @@ def unusual_days(history: list[Any], limit: int = 3) -> list[dict[str, Any]]:
     return flagged[:limit]
 
 
+def _profile_call(conn: sqlite3.Connection, location_id: str, item_id: str,
+                  target: date, forecast: dict[str, Any]) -> dict[str, Any]:
+    """Read the same historical Expected as History, never the quantity to make."""
+    from .transactions import ensure_day_scored, last_closed_day, normalized_score
+    if target > last_closed_day(conn, location_id):
+        return {"expected": forecast["expected"], "source": "live", "label": "Expected", "recorded_at": None}
+    opening = conn.execute(
+        "SELECT expected,locked_at FROM forecast_calls WHERE location_id=? AND item_id=? AND date=?",
+        (location_id, item_id, target.isoformat()),
+    ).fetchone()
+    if opening:
+        return {"expected": int(round(float(opening["expected"]))), "source": "stored",
+                "label": "Recorded opening call", "recorded_at": opening["locked_at"]}
+    score = ensure_day_scored(conn, location_id, target)
+    if score:
+        entries = json.loads(normalized_score(score)["items_json"] or "[]")
+        saved = next((entry for entry in entries if entry.get("item_id") == item_id), None)
+        if saved is not None:
+            return {"expected": saved["predicted"], "source": "reconstructed",
+                    "label": "Reconstructed expectation", "recorded_at": score["scored_at"]}
+    return {"expected": forecast["expected"], "source": "reconstructed",
+            "label": "Reconstructed expectation", "recorded_at": None}
+
+
 def item_profile(conn: sqlite3.Connection, location_id: str, item_id: str, target: date) -> dict[str, Any]:
     """The full account of one item. Every figure carries what it rests on."""
     item = conn.execute(
@@ -605,6 +630,7 @@ def item_profile(conn: sqlite3.Connection, location_id: str, item_id: str, targe
     location = _load_location(conn, location_id)
     history, weather_map, events_map = _history_for_item(conn, location, item_id, target)
     forecast = forecast_item(conn, item, target)
+    call = _profile_call(conn, location_id, item_id, target, forecast)
     context = build_context(location, target, weather_map.get(target.isoformat()), events_map.get(target.isoformat(), []), weather_map)
 
     distribution = (
@@ -667,9 +693,14 @@ def item_profile(conn: sqlite3.Connection, location_id: str, item_id: str, targe
         "today": {
             "date": target.isoformat(),
             "weekday": WEEKDAYS[target.weekday()],
-            "expected": forecast["expected"],
+            "expected": call["expected"],
+            "model_expected": call["expected"],
+            "recomputed_expected": forecast["expected"],
+            "call_source": call["source"],
+            "call_label": call["label"],
+            "call_recorded_at": call["recorded_at"],
             "normal": forecast["baseline"],
-            "difference": forecast["vs_baseline_units"],
+            "difference": call["expected"] - forecast["baseline"],
             "low": forecast["lower"],
             "high": forecast["upper"],
             "make": forecast["make"],
@@ -677,7 +708,7 @@ def item_profile(conn: sqlite3.Connection, location_id: str, item_id: str, targe
             "normal_make": forecast.get("normal_make", forecast["baseline"]),
             "sell_out_percent": forecast.get("sell_out_percent"),
             "confidence": forecast["confidence"],
-            "revenue": round(forecast["expected"] * price, 2),
+            "revenue": round(call["expected"] * price, 2),
             "override": forecast["override"],
         },
         "standing": {

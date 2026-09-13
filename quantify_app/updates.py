@@ -223,7 +223,7 @@ def refresh(conn: sqlite3.Connection, location_id: str, *, force: bool = False,
             result = ai.generate(conn, "operating_updates", location_id,
                 {"instruction": "Rank these supplied observations for a counter assistant. Time-critical problems first. Return only their IDs; do not add claims.",
                  "observations": [{"id": str(i), **n} for i, n in enumerate(notes)]},
-                schema, lambda _: {"order": ids}, force=True)
+                schema, lambda _: {"order": ids}, force=True, location_id=location_id)
             order = list(dict.fromkeys([value for value in result.get("order", []) if value in ids] + ids))
             notes = [notes[int(value)] for value in order]
             review = "assisted" if result.get("_writer") != "local" else "record"

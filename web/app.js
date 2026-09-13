@@ -2764,22 +2764,25 @@
   function ordersSentBody() {
     const log = S.order.log;
     if (!log || log.for !== S.locationId) return `<p class="small muted">Loading</p>`;
+    if (log.error) return `<p class="small">Orders could not be loaded.</p><button type="button" class="btn sm" data-supply="orders-retry">Try again</button>`;
     if (!log.rows.length) return `<p class="small muted">Nothing sent yet. Orders you email or place show here.</p>`;
     return `<div class="srows">${log.rows.map(orderLogRow).join("")}</div>`;
   }
 
   async function loadOrderLog(force = false) {
     const loc = S.locationId;
-    if (!force && S.order.log && S.order.log.for === loc) return;
+    if (!force && S.order.log && S.order.log.for === loc && !S.order.log.error) return;
     if (S.order.logFor === loc && !force) return;
     S.order.logFor = loc;
     try {
       const r = await API.get(`/api/supply/orders?${locQ()}`);
+      if (S.locationId !== loc) return;
       S.order.log = { for: loc, rows: r.orders || [] };
     } catch (_) {
-      S.order.log = { for: loc, rows: [] };
+      if (S.locationId !== loc) return;
+      S.order.log = { for: loc, rows: [], error: true };
     } finally {
-      S.order.logFor = "";
+      if (S.order.logFor === loc) S.order.logFor = "";
     }
     const host = document.getElementById("orders-sent-body");
     if (host && S.locationId === loc) host.innerHTML = ordersSentBody();
@@ -3013,6 +3016,7 @@
     }
     if (kind === "order-site") return openOrderSheet(id, "site");
     if (kind === "order-view") return openOrderView(id);
+    if (kind === "orders-retry") return loadOrderLog(true);
     if (kind === "order-add") return openOrderAdd();
     if (kind === "order-reset") { S.order.edits = {}; return render(true); }
     if (kind === "order-drop") {
@@ -5240,11 +5244,16 @@
   }
 
   async function billingRedirect(path, plan) {
+    if (billingRedirect.pending) return;
+    billingRedirect.pending = true;
+    const controls = [...document.querySelectorAll('[data-do="billing-checkout"], [data-do="billing-portal"]')];
+    controls.forEach(node => { node.disabled = true; });
     try {
       const result = await API.send(path, "POST", { plan: plan || S.data?.billing?.plan?.code || "solo" });
       if (result.url) window.location.href = result.url;
       else toast(result.message || "Billing is not switched on for this account yet", "error");
     } catch (error) { toast(plainError(error), "error"); }
+    finally { billingRedirect.pending = false; controls.forEach(node => { if (node.isConnected) node.disabled = false; }); }
   }
 
   document.addEventListener("keydown", (event) => {

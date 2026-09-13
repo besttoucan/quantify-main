@@ -40,9 +40,10 @@ The previous commercial plan supplied a hypothetical steady-state cost of $19.60
 | Event/context data | $5.00 |
 | Payment processing allocation | $2.60 |
 | Routine support | $7.00 |
-| Total per location | $19.60 |
+| Model usage (subsequent planning assumption) | $3.00 |
+| Revised total per location | $22.60 |
 
-Holding those assumptions constant, $39 leaves $19.40 per location (49.7%) and a fully used $99 bundle leaves $40.20 (40.6%) before engineering, sales and other fixed costs. With variable costs 30% higher, contributions fall to $13.52 (34.7%) and $22.56 (22.8%). Support and commercial context costs are the largest uncertain allocations; this model is not proof of sustainability.
+Including the subsequently added $3 model allowance, $39 leaves $16.40 per location (42.1%) and a fully used $99 bundle leaves $31.20 (31.5%) before engineering, sales and other fixed costs. With variable costs 30% higher, contributions fall to $9.62 (24.7%) and $10.86 (11.0%). These margins require a paid-pilot cost review before broad rollout. Support and commercial context costs are uncertain allocations; this model is not proof of sustainability. The $3 model allowance is a token-usage scenario, not a measured production average.
 
 The initially considered $29 / $59-for-three option was rejected: three fully used locations leave only $0.20 before fixed costs under the same assumptions. No annual discount was added because it would reduce the unproven margin further.
 

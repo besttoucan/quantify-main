@@ -444,6 +444,7 @@ def _composition_for(conn: sqlite3.Connection, location_id: str, item_id: str, f
         schema=ai.COMPOSITION_SCHEMA,
         local_writer=local_composition,
         force=force,
+        location_id=location_id,
     )
     conn.execute(
         """INSERT INTO item_composition(menu_item_id,summary,confidence,verify_note,components_json,writer,updated_at)

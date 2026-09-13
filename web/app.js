@@ -195,6 +195,7 @@
       if (signedIn && (path === "/login" || path === "/signup")) return go(home(), true);
       if (path === "/signup") { leaveApp(); return renderCreateAccount(); }
       if (path === "/login") { leaveApp(); return renderSignIn(); }
+      if (path === "/reset") { leaveApp(); return renderReset(); }
       if (path === "/verify") {
         leaveApp();
         if (!signedIn) return go("/login", true);
@@ -205,8 +206,7 @@
       if (inApp) {
         if (!signedIn) return go("/login", true);
         if (S.auth.email_verification_required) return go("/verify", true);
-        if (S.auth.onboarding_required) { leaveAuth(); return await startOnboarding(); }
-        leaveAuth();
+        if (S.auth.onboarding_required) return await startOnboarding();
         return await loadWorkspace();
       }
 
@@ -248,28 +248,33 @@
   }
 
   /* ---------- landing ---------- */
-  // The example dashboard is the product running on the sample dataset, not a
-  // picture of it. Every figure comes from /api/showcase, which computes them
-  // with the same code the real screens use.
+  // The sample screen is the product running on the sample location, not a
+  // picture of it. /api/showcase computes the day, the order list and the
+  // closed days with the same code the signed-in screens use, and the frame
+  // below paints them with the app's own drawing functions, so the two cannot
+  // drift apart.
   const demoTabs = { tab: "today", day: null };
+
+  // A drawing function from another screen may be mid-change. If one throws,
+  // the frame shows the fallback instead of taking the page down.
+  const drawn = (fn, fallback = "") => { try { return fn(); } catch (_) { return fallback; } };
 
   async function renderLanding() {
     let show = { available: false };
     try { show = await API.get("/api/showcase"); } catch (_) { /* the page still works */ }
     S.show = show;
-    const f = show.forecast;
-    const accuracy = show.accuracy ? `${show.accuracy}%` : null;
+    const where = show.location || {};
+    const years = show.history_days >= 700 ? "two years" : noun(show.history_days || 0, "day");
+    const caption = where.name
+      ? `Running on ${e(where.name)}, a sample ${e(String(where.concept || "restaurant").toLowerCase())}, and its ${years} of sales.`
+      : "The sample location is still being set up.";
+    const monthly = money(show.pricing?.monthly || 79);
+    const yearly = money(show.pricing?.annual_monthly || 69);
 
     root.innerHTML = `<div class="site">
       <header class="site-nav">
         <div class="site-nav-inner">
-          <a href="/" data-link="/">${wordmark()}</a>
-          <nav class="site-links">
-            <a href="#try" data-scroll="try">See it working</a>
-            <a href="#how" data-scroll="how">How it works</a>
-            <a href="#proof" data-scroll="proof">Accuracy</a>
-            <a href="#pricing" data-scroll="pricing">Pricing</a>
-          </nav>
+          <a class="site-mark" href="/" data-link="/">${wordmark()}</a>
           <div class="site-cta">
             <a class="btn ghost" href="/login" data-link="/login">Sign in</a>
             <a class="btn accent" href="/signup" data-link="/signup">Create account</a>
@@ -277,396 +282,169 @@
         </div>
       </header>
 
-      <section class="hero">
-        <div class="hero-copy fade-up">
+      <main class="site-main">
+        <section class="hero">
           <h1>Know how much of each thing to make tomorrow.</h1>
           <p>Quantify reads what your register has already sold and works out how many of each item tomorrow needs. It gives you a number per item, what that number rests on, and how far off it has been before.</p>
-          <div class="hero-actions">
-            <a class="btn accent lg" href="/signup" data-link="/signup">Create account</a>
-            <a class="btn lg" href="#try" data-scroll="try">See it working first</a>
-          </div>
-        </div>
-        <div class="hero-panel fade-up" style="animation-delay:.1s">
-          <div class="auth-grid"></div>
-          <div class="demo-card">
-            <div class="demo-bar"><div class="dots"><i></i><i></i><i></i></div><span>${e(f?.location || "Juniper Bakehouse")}, ${e(f?.weekday || "today")}</span></div>
-            <div class="demo-body" id="demo-body"></div>
-          </div>
-          <div class="auth-shield"></div>
-        </div>
-      </section>
+        </section>
 
-      <section class="band" id="try">
-        <div class="band-head">
-          <span class="eyebrow">The dashboard</span>
-          <h2>Click through it.</h2>
-          <p>Running on a sample bakery's two years of sales.</p>
-        </div>
-        <div data-lift>${screenFrame(show)}</div>
-      </section>
+        <section class="sample" id="sample">
+          ${screenFrame(show)}
+          <p class="sample-caption">${caption}</p>
+        </section>
 
-      <section class="band tinted" id="how">
-        <div class="band-head">
-          <span class="eyebrow">How it works</span>
-          <h2>Three things, in order.</h2>
-        </div>
-        <div class="cards3">
-          ${[
-            ["01", "It reads what you already sell", "Connect the register and Quantify pulls up to three years of item-level orders, including the hour each landed in. It reads abbreviated till labels like DBL CHZ BRGR and works out what they are. Nothing to type."],
-            ["02", "It tests the world against your own numbers", "Weather, holidays, pay cycles, long weekends, what is on nearby. Each one is checked against your own sales, and ignored if it never moved them."],
-            ["03", "It tells you when it was wrong", "Every closed day is compared against what was forecast for it the day before. That score is on screen, per day and per item."],
-          ].map(([n, t, d], i) => `<article class="card"><div class="card-body">
-            <div class="stepnum">${n}</div><h3>${t}</h3><p>${d}</p></div></article>`).join("")}
-        </div>
-      </section>
+        <section class="prose" id="how">
+          <h2>How it works</h2>
+          <p>Quantify reads the register and learns what each item sells on each kind of day. Weather, holidays and what is on nearby are checked against your own sales, and dropped when they never moved them. Count what is in the walk-in and it says what to buy, from which supplier, and by when. Each closed day is scored, per item, against the number given the day before, and that score sits in History.</p>
+        </section>
 
-      <section class="band" id="proof">
-        <div class="band-head">
-          <span class="eyebrow">Accuracy</span>
-          <h2>${accuracy ? `${accuracy} right, item by item, over the last ${num(show.days_scored)} closed days.` : "Every forecast is scored against what actually sold."}</h2>
-          <p>Accuracy is counted item by item, not on the day's total, because two items that miss in opposite directions still leave you short on one and throwing away the other.</p>
-        </div>
-        <div class="card"><div class="card-body">
-          ${show.series && show.series.length ? `
-            ${sparkline(show.series)}
-            <div class="proof-stats">
-              <div><b>${accuracy}</b><span>Average accuracy, measured per item</span></div>
-              <div><b>${show.within_ten}%</b><span>Days landing inside 10%</span></div>
-              <div><b>${num(show.days_scored)}</b><span>Closed days replayed and scored</span></div>
-            </div>`
-          : `<p class="lede">Still scoring the sample days. The figures appear here shortly.</p>`}
-        </div></div>
-      </section>
-
-      <section class="band" id="pricing">
-        <div class="band-head">
-          <span class="eyebrow">Pricing</span>
-          <h2>${money(show.pricing?.monthly || 79)} per location, per month.</h2>
-          <p>${money(show.pricing?.annual_monthly || 69)} a month paid yearly. Cancel from the account page in two clicks, with no phone call.</p>
-        </div>
-        <div class="card" data-lift><div class="card-body pricing-body">
-          <div class="planlist">
-            ${["Register history and ongoing sync", "Fourteen days of item-level forecasting", "Weather, calendar, and nearby activity", "Order history and per-day accuracy", "What each item is made of", "The morning email", "Unlimited people on the account"]
-              .map((t) => `<div>${icon("check")}<span>${t}</span></div>`).join("")}
-          </div>
-          <div class="pricing-cta">
-            <a class="btn accent lg block" href="/signup" data-link="/signup">Create account</a>
-            <p class="small muted" style="margin-top:10px;text-align:center">No card needed to look around.</p>
-          </div>
-        </div></div>
-      </section>
+        <section class="prose" id="pricing">
+          <h2>Price</h2>
+          <p>${monthly} per location, per month. ${yearly} a month paid yearly. No card to look around. Cancel from the account page.</p>
+        </section>
+      </main>
 
       <footer class="site-foot">
         <div class="site-foot-inner">
           ${wordmark()}
-          <p>Built for kitchens that have to decide how much to make before anyone has ordered it.</p>
+          <a href="mailto:support@quantify.app">support@quantify.app</a>
         </div>
       </footer>
     </div>`;
-    runDemo();
-    watchScroll();
   }
 
-  // A working slice of the product, inside a browser frame.
+  // The four real destinations down the side, and the real screen for each.
+  // The main panel is inert: it is there to be read, not worked.
   function screenFrame(show) {
-    const f = show.forecast;
-    if (!f) return `<div class="card"><div class="empty">${icon("empty")}<b>Sample data is still building</b><span>Give it a moment and refresh.</span></div></div>`;
+    const where = show.location || {};
+    if (!show.brief) {
+      return `<div class="card">${emptyState("The sample is still being set up", "Give it a moment and refresh the page.")}</div>`;
+    }
     return `<div class="screen">
-      <div class="screen-bar">
-        <div class="dots"><i></i><i></i><i></i></div>
-        <span class="screen-url">${e(f.location.toLowerCase().replace(/[^a-z]+/g, ""))}.quantify.app</span>
+      <div class="screen-rail">
+        <div class="screen-rail-head">${wordmark()}</div>
+        <nav class="screen-nav-list">
+          ${NAV.map(([key, label, ico]) => `
+            <button class="screen-nav ${demoTabs.tab === key ? "on" : ""}" data-demo-tab="${key}">
+              <i>${icon(ico)}</i><span>${e(label)}</span></button>`).join("")}
+        </nav>
+        <div class="screen-rail-foot"><b>${e(where.name || "")}</b><span>${e([where.city, where.region].filter(Boolean).join(", "))}</span></div>
       </div>
-      <div class="screen-body">
-        <div class="screen-rail">
-          ${[["today", "Today"], ["forecast", "Forecast"], ["history", "History"], ["menu", "Menu"]].map(([k, l]) =>
-            `<button class="screen-nav ${demoTabs.tab === k ? "on" : ""}" data-demo-tab="${k}">${l}</button>`).join("")}
-          <div class="screen-rail-foot">
-            <b>${e(f.location)}</b><span>${e(f.city)}</span>
-          </div>
-        </div>
-        <div class="screen-main" id="screen-main">${screenPanel(show)}</div>
-      </div>
+      <div class="screen-main" id="screen-main" inert>${screenPanel(show)}</div>
     </div>`;
   }
 
   function screenPanel(show) {
-    const f = show.forecast;
-    if (demoTabs.tab === "today") {
-      const peak = Math.max(...f.hours.map((h) => h.share), 0.01);
-      return `<div class="screen-scroll fade-in">
-        <div class="screen-head">
-          <div><h4>${e(f.date_label)}</h4><p>${e(f.headline)}</p></div>
-          <span class="tag up dot">${f.confidence}% sure</span>
-        </div>
-        <div class="screen-tiles">
-          ${[
-            ["Expected sales", money(f.expected_sales), `${money(f.normal_sales)} on a normal ${f.weekday}`, `${f.difference_sales >= 0 ? "+" : "-"}${money(Math.abs(f.difference_sales))}`, f.difference_sales >= 0],
-            ["Units it will sell", num(f.expected_units), `${num(f.normal_units)} on a normal ${f.weekday}`, `${f.difference_units >= 0 ? "+" : ""}${num(f.difference_units)}`, f.difference_units >= 0],
-            ["Days of evidence", num(f.comparable_days), `comparable ${f.weekday}s in the record`, "", true],
-            ["Busiest hour", f.peak_hour || "Not set", `${num(f.peak_units)} items in that hour`, `${f.peak_share}% of the day`, true],
-          ].map(([label, value, versus, delta, up]) => `
-            <div class="screen-tile">
-              <span class="eyebrow">${label}</span><b>${e(value)}</b>
-              <small>${e(versus)}</small>
-              <em class="${up ? "up" : "down"}">${e(delta)}</em>
-            </div>`).join("")}
-        </div>
-        <div class="screen-split">
-          <div class="screen-block">
-            <div class="screen-block-head">What to do</div>
-            ${f.actions.map((a, i) => `<div class="screen-action">
-              <span class="mark">${i + 1}</span>
-              <div><b>${e(a.title)}</b><p>${e(a.detail)}</p></div>
-              <span class="metric">${e(a.metric)}</span></div>`).join("")}
-          </div>
-          <div class="screen-block">
-            <div class="screen-block-head">Why today looks this way</div>
-            ${f.reasons.map((r) => `<div class="screen-reason">
-              <div><b>${e(r.label)}</b><span class="effect-chip ${r.effect >= 0 ? "up" : "down"}">${pct(r.effect)} · ${r.units >= 0 ? "+" : ""}${num(r.units)} items</span></div>
-              <p>${e(r.detail)}</p>
-              <small>${e(r.based_on)}</small></div>`).join("")}
-          </div>
-        </div>
-        <div class="screen-block">
-          <div class="screen-block-head">Through the day</div>
-          <div class="screen-hours">${f.hours.map((h) => `
-            <div class="screen-hour" title="${e(h.label)}: ${money(h.revenue)}, ${num(h.units)} items">
-              <div class="bar"><i style="height:${Math.max(4, (h.share / peak) * 100)}%"></i></div>
-              <span>${e(h.label.replace(" ", ""))}</span>
-              <small>${num(h.units)}</small>
-            </div>`).join("")}</div>
-        </div>
-        <div class="screen-block">
-          <div class="screen-block-head">What to make</div>
-          <table class="screen-table"><thead><tr>
-            <th>Item</th><th class="right">Make</th><th class="right">Will sell</th><th class="right">Normal</th><th class="right">Likely range</th><th class="right">Sure</th></tr></thead><tbody>
-            ${f.items.map((it) => `<tr>
-              <td><b>${e(it.name)}</b></td>
-              <td class="right plan">${num(it.make ?? it.expected)}</td>
-              <td class="right">${num(it.expected)}</td>
-              <td class="right">${num(it.normal)} <em class="${it.difference >= 0 ? "up" : "down"}">${it.difference >= 0 ? "+" : ""}${num(it.difference)}</em></td>
-              <td class="right muted">${num(it.low)} to ${num(it.high)}</td>
-              <td class="right">${it.confidence}%</td></tr>`).join("")}
-          </tbody></table>
-        </div>
-      </div>`;
-    }
+    const where = show.location || {};
+    const b = show.brief;
+    if (!b) return "";
+    const top = (title, subtitle, tools = "") => `<div class="screen-top">
+      <div><h4>${title}</h4>${subtitle ? `<p>${subtitle}</p>` : ""}</div>${tools}</div>`;
 
-    if (demoTabs.tab === "forecast") {
-      const week = f.week.length ? f.week : [];
-      return `<div class="screen-scroll fade-in">
-        <div class="screen-head"><div><h4>The next days</h4></div></div>
-        <table class="screen-table"><thead><tr>
-          <th>Day</th><th class="right">Expected</th><th>Biggest line</th><th class="right">vs normal</th></tr></thead><tbody>
-          ${week.map((d) => `<tr>
-            <td><b>${e(dMed(d.date))}</b></td>
-            <td class="right plan">${money(d.sales)}</td>
-            <td class="muted">${e(d.top_item || "Core menu")}</td>
-            <td class="right ${d.change >= 0 ? "up" : "down"}">${pct(d.change)}</td></tr>`).join("")}
-        </tbody></table>
-        <p class="screen-note">Days further out are less certain, and the confidence figure reflects that.</p>
-      </div>`;
+    if (demoTabs.tab === "ordering") {
+      const o = show.order;
+      const window = o && o.start ? `${e(dMed(o.start))} through ${e(dMed(o.end))}` : "";
+      const group = o ? drawn(() => supplyGroup(
+        { supplier: o.supplier || null, lines: o.lines || [], extras: [] },
+        { counts_taken: o.counts_taken || 0 },
+        o.supplier ? [o.supplier] : [], true,
+      ), "") : "";
+      return `${top("Order", window)}
+        <div class="stack">${group || `<section class="card">${emptyState("Nothing to order yet", "Once the register has some history, this becomes the list of what to buy.")}</section>`}</div>`;
     }
 
     if (demoTabs.tab === "history") {
-      return `<div class="screen-scroll fade-in">
-        <div class="screen-head"><div><h4>Closed days</h4><p>What the register rang, next to what Quantify said the day before.</p></div></div>
-        <table class="screen-table"><thead><tr>
-          <th>Day</th><th class="right">Rang up</th><th class="right">Items</th><th class="right">Orders</th><th class="right">Forecast</th></tr></thead><tbody>
-          ${(show.days || []).map((d) => d.closed ? `<tr class="muted"><td><b>${e(dMed(d.date))}</b></td><td colspan="4">Closed. Nothing was recorded on this date.</td></tr>` : `<tr>
-            <td><b>${e(dMed(d.date))}</b></td>
-            <td class="right plan">${money(d.sales)}</td>
-            <td class="right">${num(d.units)}</td>
-            <td class="right">${num(d.orders)}</td>
-            <td class="right">${d.accuracy === null ? '<span class="muted">scoring</span>' :
-              `<b class="${d.accuracy >= 90 ? "up" : d.accuracy >= 80 ? "" : "down"}">${d.accuracy}%</b>
-               <em class="muted">called ${num(d.predicted_units)}</em>`}</td></tr>`).join("")}
-        </tbody></table>
-      </div>`;
+      const days = show.days || [];
+      const rows = days.map((day) => drawn(() => dayRow(day), "")).join("");
+      return `${top("History", "", `<div class="seg"><button class="on">Days</button><button>Track record</button></div>`)}
+        <div class="stack"><section class="card">
+          <div class="card-head"><div><h2>Days</h2></div></div>
+          <div class="dayrows">${rows || emptyState("No closed days yet", "Closed days appear here the morning after.")}</div>
+        </section></div>`;
     }
 
-    return `<div class="screen-scroll fade-in">
-      <div class="screen-head"><div><h4>What each item is made of</h4></div></div>
-      <table class="screen-table"><thead><tr>
-        <th>Item</th><th class="right">Making today</th><th>What goes into it</th></tr></thead><tbody>
-        ${f.items.map((it) => `<tr>
-          <td><b>${e(it.name)}</b></td>
-          <td class="right plan">${num(it.expected)}</td>
-          <td class="muted">${it.parts && it.parts.length ? e(it.parts.join(', ')) : 'No recipe on file yet'}</td></tr>`).join("")}
-      </tbody></table>
-      <p class="screen-note">Estimated from the till label until you confirm the recipe.</p>
+    if (demoTabs.tab === "settings") {
+      const rows = [
+        ["Name", where.name || ""],
+        ["What you serve", where.concept || ""],
+        ["City", [where.city, where.region].filter(Boolean).join(", ")],
+        ["Time zone", where.timezone_label || ""],
+        ["Hours", `${hourLabel(Number(where.open_hour ?? 7))} to ${hourLabel(Number(where.close_hour ?? 21))}`],
+        ["Morning email", `${clock(where.email_time || "05:30")} to the owner`],
+      ];
+      return `${top("Settings", "", `<div class="seg"><button class="on">Location</button><button>Menu</button><button>Costs</button><button>Account</button></div>`)}
+        <div class="stack"><section class="card">
+          <div class="card-head"><div><h2>Location</h2></div></div>
+          <table class="dt sample-list"><tbody>
+            ${rows.map(([k, v]) => `<tr><td class="name">${e(k)}</td><td>${e(v)}</td></tr>`).join("")}
+          </tbody></table>
+        </section></div>`;
+    }
+
+    return `${top(e(dLong(b.date)), e(where.name || ""))}${sampleToday(b)}`;
+  }
+
+  // Today as the app lays it out: the headline with its three figures, the
+  // running low card, then the panes card with the real make list.
+  function sampleToday(b) {
+    const s = b.summary;
+    const cmp = b.comparison;
+    const dir = Math.abs(s.revenue_change_percent) < 5 ? "plain" : s.revenue_change_percent >= 0 ? "up" : "down";
+    const make = drawn(() => makeTotal(b), (b.items || []).reduce((n, row) => n + (row.make ?? row.expected), 0));
+    const list = drawn(() => itemTable(b), "");
+    return `<div class="stack">
+      <section class="headline solo">
+        <div class="headline-main">
+          <div class="headline-meta"><span class="tag ${dir}">${e(s.demand_level)}</span></div>
+          <h2>${e(b.headline)}</h2>
+          <div class="sample-figures">
+            <div><b>${money(s.expected_revenue)} expected</b><small>${money(cmp.sales)} on ${e(cmp.label)}</small></div>
+            <div><b>${num(make)} to make</b><small>${num(s.expected_units)} expected to sell</small></div>
+            <div><b>busiest ${e(s.peak_hour || "not set")}</b><small>${s.peak_share_percent}% of the day</small></div>
+          </div>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-head"><div><h2>Running low</h2></div>
+          <div class="spacer"></div><button class="btn sm">Open the order</button></div>
+        <div class="card-body"><p class="lede">Nothing has been counted yet. Count what is in the walk-in on the Order page and this fills in.</p></div>
+      </section>
+      <section class="card">
+        <div class="card-head panehead">
+          <div class="seg panes">${PANES.map(([k, l]) => `<button class="${k === "make" ? "on" : ""}">${l}</button>`).join("")}</div>
+        </div>
+        <div class="tablewrap">${list}</div>
+      </section>
     </div>`;
   }
 
-  // Motion tied to scroll position rather than to a one-shot trigger, so
-  // scrolling back up genuinely runs it backwards. Only three things on the
-  // page move: the product panel, which lifts and settles as it comes up; the
-  // pricing card, which does the same at the end; and the section rules, which
-  // draw themselves across. Everything else stays still on purpose.
-  let scrollNodes = [];
-  let scrollFrame = 0;
-
-  function paintScroll() {
-    scrollFrame = 0;
-    const view = window.innerHeight || 800;
-    for (const node of scrollNodes) {
-      const box = node.getBoundingClientRect();
-      // 0 as the element's top enters from below, 1 once it has travelled a
-      // third of the viewport past centre. Clamped, so it holds at both ends.
-      const raw = (view - box.top) / (view * 0.62);
-      const p = raw < 0 ? 0 : raw > 1 ? 1 : raw;
-      const eased = p * p * (3 - 2 * p);
-      node.style.setProperty("--p", eased.toFixed(4));
-    }
-  }
-
-  function onScroll() {
-    if (scrollFrame) return;
-    scrollFrame = requestAnimationFrame(paintScroll);
-  }
-
-  function watchScroll() {
-    scrollNodes = Array.from(document.querySelectorAll("[data-lift]"));
-    window.removeEventListener("scroll", onScroll);
-    window.removeEventListener("resize", onScroll);
-    if (!scrollNodes.length) return;
-    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      scrollNodes.forEach((node) => node.style.setProperty("--p", "1"));
-      return;
-    }
-    window.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("resize", onScroll, { passive: true });
-    paintScroll();
-  }
-
-  function sparkline(series) {
-    const W = 900, H = 120, P = 8;
-    const lo = Math.max(60, Math.min(...series) - 4);
-    const hi = 100;
-    const x = (i) => P + (i * (W - P * 2)) / Math.max(1, series.length - 1);
-    const y = (v) => H - P - ((v - lo) / (hi - lo)) * (H - P * 2);
-    const line = series.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
-    const area = `${line} L${x(series.length - 1).toFixed(1)} ${H - P} L${P} ${H - P} Z`;
-    return `<div class="spark"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Daily forecast accuracy">
-      <path d="${area}" fill="var(--accent-soft)"/>
-      <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>
-      <line x1="${P}" y1="${y(90)}" x2="${W - P}" y2="${y(90)}" stroke="var(--line-2)" stroke-dasharray="4 4"/>
-    </svg><div class="spark-key"><span>Oldest of ${series.length} scored days</span><span>The dashed line is 90%</span><span>Most recent</span></div></div>`;
-  }
-
   /* ---------- auth panel ---------- */
-  // The panel on the right runs once, settles, and stays put. It is decoration
-  // with a job: it shows what the product does before anyone has an account.
-  // It never loops, never restarts when the form beside it changes, and cannot
-  // be selected or clicked.
-  // Every figure in the panel comes from the live showcase payload, so the
-  // title bar and the body can never disagree about what day it is.
-  const demo = { step: 0, done: false, timer: null, mounted: false };
-
-  function demoSteps() {
-    const f = (S.show || {}).forecast;
-    if (!f || !f.steps) return [];
-    return f.steps.map((row) => ({ txt: row.text, num: row.value }));
-  }
-
+  // One column, the form and nothing beside it.
   function authFrame(inner) {
-    // The shell is mounted once. Every later screen swaps only the form, so the
-    // panel on the right is never torn down and rebuilt.
     const slot = document.getElementById("auth-slot");
-    if (slot) { slot.innerHTML = inner; return; }
-    root.innerHTML = `<main class="auth">
-      <section class="auth-left">
-        <a href="/" data-link="/">${wordmark()}</a>
-        <div class="auth-form" id="auth-slot">${inner}</div>
-      </section>
-      <section class="auth-right" aria-hidden="true">
-        <div class="auth-grid"></div>
-        <div class="auth-stage">
-          <div class="demo-card">
-            <div class="demo-bar"><div class="dots"><i></i><i></i><i></i></div><span id="demo-title"></span></div>
-            <div class="demo-body" id="demo-body"></div>
-          </div>
-        </div>
-        <div class="auth-shield"></div>
-      </section>
-    </main>`;
-    runDemo();
-  }
-
-  function leaveAuth() {
-    clearInterval(demo.timer);
-    demo.timer = null;
-  }
-
-  // Rows are added to the DOM once and never touched again. Rebuilding the
-  // panel on every tick is what made it look like it was reloading itself.
-  function demoRow(step, index) {
-    const node = document.createElement("div");
-    node.className = "demo-step done enter";
-    node.innerHTML = `<span class="k">${icon("check")}</span>
-      <span class="txt">${e(step.txt)}</span><span class="num">${e(step.num)}</span>`;
-    node.style.setProperty("--i", String(index));
-    return node;
-  }
-
-  function demoSummary() {
-    const f = (S.show || {}).forecast;
-    if (!f) return null;
-    const node = document.createElement("div");
-    node.className = "demo-out enter";
-    const peak = (f.hours || []).reduce((best, row) => (row.share > (best ? best.share : 0) ? row : best), null);
-    node.innerHTML = `
-      <div class="line"><span>Expected sales</span><b>${money(f.expected_sales)}</b></div>
-      <div class="line"><span>Against a normal ${e(f.weekday)}</span><b>${money(f.normal_sales)}</b></div>
-      <div class="line"><span>Difference</span><b>${f.difference_sales >= 0 ? "+" : ""}${money(f.difference_sales)}, about ${Math.abs(f.difference_units)} ${Math.abs(f.difference_units) === 1 ? "item" : "items"}</b></div>
-      <div class="line"><span>Busiest hour</span><b>${e(f.peak_hour)}, ${f.peak_share}% of the day</b></div>
-      <div class="demo-hours">${(f.hours || []).map((row) => {
-        const height = Math.max(6, Math.round((row.share / Math.max(0.01, peak ? peak.share : 1)) * 100));
-        return `<i class="${peak && row.label === peak.label ? "peak" : ""}" style="height:${height}%"></i>`;
-      }).join("")}</div>`;
-    return node;
-  }
-
-  function runDemo() {
-    const host = document.getElementById("demo-body");
-    const title = document.getElementById("demo-title");
-    const f = (S.show || {}).forecast;
-    if (title && f) title.textContent = `${f.location}, ${f.weekday}`;
-    if (!host) return;
-    const steps = demoSteps();
-    if (!steps.length) return;
-    // Already played. Leave every node exactly where it is.
-    if (demo.mounted && host.childElementCount) return;
-    host.innerHTML = "";
-    demo.step = 0;
-    demo.mounted = true;
-    if (demo.timer) { clearInterval(demo.timer); demo.timer = null; }
-    const advance = () => {
-      if (demo.step >= steps.length) {
-        clearInterval(demo.timer);
-        demo.timer = null;
-        const summary = demoSummary();
-        if (summary) host.appendChild(summary);
-        demo.done = true;
-        return;
-      }
-      host.appendChild(demoRow(steps[demo.step], demo.step));
-      demo.step += 1;
-    };
-    advance();
-    demo.timer = setInterval(advance, 900);
+    if (slot) slot.innerHTML = inner;
+    else {
+      root.innerHTML = `<main class="auth">
+        <section class="auth-left">
+          <a class="auth-mark" href="/" data-link="/">${wordmark()}</a>
+          <div class="auth-form" id="auth-slot">${inner}</div>
+        </section>
+      </main>`;
+    }
+    const first = root.querySelector("#auth-slot [autofocus], #auth-slot input:not([type=hidden])");
+    if (first) { try { first.focus({ preventScroll: true }); } catch (_) { /* nothing to focus */ } }
   }
 
   function renderCreateAccount() {
     authFrame(`
       <h1>Create your account</h1>
-      <p>Takes a minute. You will see real forecasts on sample data straight away, before connecting anything.</p>
+      <p>Takes a minute. The sample location is ready the moment you are in, before anything is connected.</p>
       <form id="f-create">
         <label class="field"><span>Your name</span><input name="display_name" autocomplete="name" required minlength="2" placeholder="Jordan Lee"></label>
         <label class="field"><span>Work email</span><input name="email" type="email" autocomplete="email" required placeholder="you@yourrestaurant.com">
-          <small>We send a six-digit code here to confirm it is yours.</small></label>
+          <small>A six-digit code goes here to confirm it.</small></label>
         <label class="field"><span>Password</span><input name="password" type="password" autocomplete="new-password" required minlength="12" placeholder="At least 12 characters">
-          <small>Twelve characters or more, mixing letters, a number, and a symbol.</small></label>
+          <small>Twelve characters or more, with at least three of: capital letters, small letters, numbers, symbols.</small></label>
         <button class="btn accent lg block" type="submit">Create account</button>
       </form>
       <p class="auth-alt">Already have an account? <a href="/login" data-link="/login">Sign in</a></p>`);
@@ -675,12 +453,12 @@
   function renderSignIn() {
     authFrame(`
       <h1>Sign in</h1>
-      <p>Welcome back.</p>
       <form id="f-signin">
         <label class="field"><span>Email</span><input name="email" type="email" autocomplete="username" required></label>
         <label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label>
-        <button class="btn accent lg block" type="submit">Continue</button>
+        <button class="btn accent lg block" type="submit">Sign in</button>
       </form>
+      <p class="auth-alt"><a href="/reset" data-link="/reset">Forgot your password?</a></p>
       <p class="auth-alt">No account yet? <a href="/signup" data-link="/signup">Create one</a></p>`);
   }
 
@@ -699,14 +477,8 @@
     const v = info || S.verification || {};
     authFrame(`
       <h1>Confirm your email</h1>
-      <p>We sent a six-digit code to <b>${e(v.sent_to || S.auth?.user?.email || "your inbox")}</b>. Type it below.</p>
-      ${v.preview_code ? `
-        <div class="notice" style="margin-top:18px">
-          <div class="eyebrow">Not sending real email yet</div>
-          <p>${e(v.preview_note || "")}</p>
-          <div class="keybox" style="margin-top:10px"><code style="font-size:19px;letter-spacing:.28em">${e(v.preview_code)}</code>
-            <button class="icon-btn" type="button" data-do="copy" data-copy="${e(v.preview_code)}" title="Copy code">${icon("copy")}</button></div>
-        </div>` : ""}
+      <p>A six-digit code went to <b>${e(v.sent_to || S.auth?.user?.email || "your inbox")}</b>. Type it below.</p>
+      ${v.preview_code ? `<p class="form-note" style="margin-top:12px">${e(v.preview_note || "")} It is already filled in below.</p>` : ""}
       <form id="f-confirm-email">
         <label class="field"><span>Six-digit code</span>
           <input class="code-input" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required autofocus
@@ -716,11 +488,78 @@
       <p class="auth-alt">Nothing came through? <button type="button" data-do="resend-code">Send it again</button></p>`);
   }
 
+  // Forgotten password: the email first, then the code with the new password.
+  // The server answers the same way whether or not the address has an account.
+  function renderReset() {
+    S.reset = S.reset || { stage: "start", email: "", preview_code: "", preview_note: "" };
+    const r = S.reset;
+    if (r.stage === "code") {
+      authFrame(`
+        <h1>Set a new password</h1>
+        <p>A six-digit code went to <b>${e(r.email)}</b>. Type it with the new password.</p>
+        ${r.preview_code ? `<p class="form-note" style="margin-top:12px">${e(r.preview_note || "")} It is already filled in below.</p>` : ""}
+        <form id="f-reset-complete">
+          <label class="field"><span>Six-digit code</span>
+            <input class="code-input" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required autofocus value="${e(r.preview_code || "")}"></label>
+          <label class="field"><span>New password</span><input name="new_password" type="password" autocomplete="new-password" required minlength="12" placeholder="At least 12 characters">
+            <small>Twelve characters or more, with at least three of: capital letters, small letters, numbers, symbols.</small></label>
+          <button class="btn accent lg block" type="submit">Set the new password</button>
+        </form>
+        <p class="auth-alt">Nothing came through? <button type="button" data-reset="again">Send it again</button></p>
+        <p class="auth-alt"><button type="button" data-reset="start">Use a different email</button></p>`);
+      return;
+    }
+    authFrame(`
+      <h1>Reset your password</h1>
+      <p>Type the email you sign in with and a six-digit code goes there.</p>
+      <form id="f-reset-start">
+        <label class="field"><span>Email</span><input name="email" type="email" autocomplete="username" required value="${e(r.email || "")}" autofocus></label>
+        <button class="btn accent lg block" type="submit">Send a code</button>
+      </form>
+      <p class="auth-alt"><a href="/login" data-link="/login">Back to sign in</a></p>`);
+  }
+
+  async function startReset(email) {
+    const result = await API.send("/api/auth/password/reset/start", "POST", { email });
+    S.reset = { stage: "code", email, preview_code: result.preview_code || "", preview_note: result.preview_note || "" };
+    renderReset();
+    toast(result.preview_code ? "Code below" : "Code sent");
+  }
+
+  document.addEventListener("click", async (event) => {
+    const target = event.target.closest("[data-reset]");
+    if (!target || !S.reset) return;
+    if (target.dataset.reset === "start") { S.reset.stage = "start"; return renderReset(); }
+    target.disabled = true;
+    try { await startReset(S.reset.email); }
+    catch (error) { toast(plainError(error), "error"); }
+    finally { target.disabled = false; }
+  });
   /* ---------- onboarding ---------- */
   const ONB_STEPS = ["Business", "Where", "How you work", "Ready"];
 
+  // Typed answers survive a reload. They live in sessionStorage, which is per
+  // tab and gone when the tab closes, so nothing about the business lingers on
+  // a shared counter machine.
+  const ONB_KEY = "quantify.onb";
+  const session = {
+    get: (key) => { try { return sessionStorage.getItem(key); } catch (_) { return null; } },
+    set: (key, value) => { try { sessionStorage.setItem(key, value); } catch (_) { /* private mode */ } },
+    remove: (key) => { try { sessionStorage.removeItem(key); } catch (_) { /* private mode */ } },
+  };
+
+  function saveOnboarding() {
+    if (!S.onboarding || !S.onboarding.values) return;
+    session.set(ONB_KEY, JSON.stringify({ step: S.onboarding.step, values: S.onboarding.values, tz: S.onboarding.tz }));
+  }
+
+  function savedOnboarding() {
+    try { return JSON.parse(session.get(ONB_KEY) || "null") || null; } catch (_) { return null; }
+  }
+
   async function startOnboarding() {
     const info = await API.get("/api/onboarding");
+    const kept = savedOnboarding();
     S.onboarding = {
       step: 0,
       values: {
@@ -729,7 +568,7 @@
         concept: "",
         location_count: "1",
         goals: [],
-        pos: "Square",
+        pos: "Not sure yet",
         place: "",
         open_hour: 7,
         close_hour: 21,
@@ -739,6 +578,11 @@
       sample: info.sample_locations || [],
       owner: info.owner,
     };
+    if (kept && kept.values) {
+      Object.assign(S.onboarding.values, kept.values);
+      S.onboarding.step = Math.min(ONB_STEPS.length - 1, Math.max(0, Number(kept.step) || 0));
+      S.onboarding.tz = kept.tz || null;
+    }
     renderOnboarding();
   }
 
@@ -749,13 +593,8 @@
     "Something else",
   ];
 
-  const GOALS = [
-    ["Cut waste", "Stop prepping what goes in the bin at close."],
-    ["Stop selling out", "Make enough of the good stuff to last the day."],
-    ["Staff the right hours", "See which hours actually need another pair of hands."],
-    ["Plan orders", "Buy to what will sell instead of to last week."],
-    ["Understand the swings", "Work out why some days are nothing like the others."],
-  ];
+  const GOALS = ["Cut waste", "Stop selling out", "Staff the right hours", "Plan orders", "Understand the swings"];
+  const REGISTERS = ["Not sure yet", "Square", "Toast", "Clover", "Lightspeed", "SpotOn", "Revel", "Shopify POS", "Something else"];
 
   function hourLabel(hour) {
     const h = ((hour % 24) + 24) % 24;
@@ -775,11 +614,12 @@
   function renderOnboarding() {
     const { step, values, tz, suggestions } = S.onboarding;
     const progress = ((step + 1) / ONB_STEPS.length) * 100;
+    saveOnboarding();
     let body = "";
 
     if (step === 0) {
       body = `<h1>What is the business called?</h1>
-        <p>This is the name on your morning email and on anything you export.</p>
+        <p>This is the name on your morning email.</p>
         <form id="f-onb">
           <label class="field"><span>Business name</span>
             <input name="company" required minlength="2" value="${e(values.company || "")}" placeholder="Juniper Bakehouse" autofocus autocomplete="organization"></label>
@@ -787,16 +627,16 @@
             <select name="concept">
               ${CONCEPTS.map((v) => `<option ${values.concept === v ? "selected" : ""}>${v}</option>`).join("")}
             </select></label>
-          <label class="field"><span>How many locations?</span>
+          <div class="field"><span>How many locations?</span>
             <div class="chipset">
               ${["1", "2 to 5", "6 to 20", "More than 20"].map((v) => `
                 <button type="button" class="chip ${values.location_count === v ? "on" : ""}" data-pick="location_count" data-value="${v}">${v}</button>`).join("")}
-            </div></label>
+            </div></div>
           <div class="onb-actions"><span class="spacer"></span><button class="btn accent lg" type="submit">Continue</button></div>
         </form>`;
     } else if (step === 1) {
       body = `<h1>Where is it?</h1>
-        <p>Quantify needs this to pull the right weather and the right local calendar, and to send your morning email at your local time. A city, a state, or a ZIP code is enough.</p>
+        <p>This sets the weather, the local calendar, and the time your morning email goes out. A city, a state, or a ZIP code is enough.</p>
         <form id="f-onb" autocomplete="off">
           <label class="field"><span>City, state, or ZIP</span>
             <div class="typeahead">
@@ -816,16 +656,13 @@
         </form>`;
     } else if (step === 2) {
       const goals = values.goals || [];
-      body = `<h1>What do you want out of it?</h1>
-        <p>Pick as many as apply. This only changes what Quantify puts first; everything is there either way.</p>
+      body = `<h1>How do you work?</h1>
+        <p>Pick what matters most, then set your opening hours.</p>
         <form id="f-onb">
-          <div class="field">
-            <div class="optionlist">
-              ${GOALS.map(([label, detail]) => `
-                <button type="button" class="option ${goals.includes(label) ? "on" : ""}" data-toggle-goal="${e(label)}">
-                  <span class="box">${icon("check")}</span>
-                  <span><b>${label}</b><small>${detail}</small></span>
-                </button>`).join("")}
+          <div class="field"><span>What do you want out of it?</span>
+            <div class="chipset">
+              ${GOALS.map((label) => `
+                <button type="button" class="chip ${goals.includes(label) ? "on" : ""}" data-toggle-goal="${e(label)}">${label}</button>`).join("")}
             </div>
           </div>
           <div class="field pair">
@@ -834,37 +671,37 @@
             <label><span>What time do you close?</span>
               <select name="close_hour">${hourOptions(values.close_hour ?? 21, 14, 28)}</select></label>
           </div>
-          <p class="field-note">Quantify only forecasts the hours you are open, so an hour either side matters. You can change this later in Settings.</p>
+          <p class="field-note">Only open hours are planned, so an hour either side matters. This can change later in Settings.</p>
           <label class="field"><span>What register do you run?</span>
             <select name="pos">
-              ${["Square", "Toast", "Clover", "Lightspeed", "SpotOn", "Revel", "Shopify POS", "Something else", "Not sure yet"]
-                .map((v) => `<option ${values.pos === v ? "selected" : ""}>${v}</option>`).join("")}
+              ${REGISTERS.map((v) => `<option ${values.pos === v ? "selected" : ""}>${v}</option>`).join("")}
             </select>
-            <small>Square connects today. Until yours is plugged in, Quantify runs on sample data so you can see how it behaves.</small></label>
+            <small>Square connects today. Until yours is plugged in, Quantify runs on sample data.</small></label>
           <div class="onb-actions">
             <button class="btn" type="button" data-do="onb-back">Back</button>
             <span class="spacer"></span><button class="btn accent lg" type="submit">Continue</button></div>
         </form>`;
     } else {
       const where = tz?.matched && tz.confident ? tz.matched : (values.place || "not set");
-      body = `<h1>That is everything</h1>
-        <p>Quantify is ready. Here is what it has, and where to look first.</p>
+      const rows = [
+        ["Business", values.company || "Your company"],
+        ["Serves", values.concept || "Not set"],
+        ["Where", where],
+        ["Open", `${hourLabel(Number(values.open_hour ?? 7))} to ${hourLabel(Number(values.close_hour ?? 21))}`],
+      ];
+      if (values.pos && values.pos !== "Not sure yet") rows.push(["Register", values.pos]);
+      if ((values.goals || []).length) rows.push(["Focus", values.goals.join(", ")]);
+      body = `<h1>Ready</h1>
+        <p>Check these, then open it.</p>
         <div class="summary">
-          ${[
-            ["Business", values.company || "Your company"],
-            ["Serves", values.concept || "Not set"],
-            ["Where", where],
-            ["Open", `${hourLabel(Number(values.open_hour ?? 7))} to ${hourLabel(Number(values.close_hour ?? 21))}`],
-            ["Register", values.pos || "Not set"],
-            ["Focus", (values.goals || []).join(", ") || "Everything"],
-          ].map(([k, v]) => `<div><span>${k}</span><b>${e(v)}</b></div>`).join("")}
+          ${rows.map(([k, v]) => `<div><span>${k}</span><b>${e(v)}</b></div>`).join("")}
         </div>
         <div class="onb-next">
           ${[
             ["Today", "What to make, why, and the next two weeks."],
-            ["Order", "What to buy, from whom, and what is running low."],
-            ["History", "Every closed day, and how close each call was."],
-            ["Settings", "Your menu, recipes, suppliers, and costs."],
+            ["Order", "What to buy, and from whom."],
+            ["History", "Closed days, and how close each call was."],
+            ["Settings", "Your menu, recipes, and costs."],
           ].map(([t, d]) => `<div class="onb-next-item"><b>${t}</b><span>${d}</span></div>`).join("")}
         </div>
         <div class="onb-actions">
@@ -879,7 +716,7 @@
         <div class="onb-progress"><span>Step ${step + 1} of ${ONB_STEPS.length}</span>
           <div class="track"><i style="width:${progress}%"></i></div></div>
       </div>
-      <div class="onb-body"><div class="onb-card fade-up">${body}</div></div>
+      <div class="onb-body"><div class="onb-card">${body}</div></div>
     </div>`;
 
     const input = document.getElementById("place-input");
@@ -888,6 +725,19 @@
       input.setSelectionRange?.(cursor, cursor);
     }
   }
+
+  // Anything typed or picked on a step is kept as it changes, so a reload
+  // halfway through a step loses nothing.
+  document.addEventListener("input", (event) => {
+    const field = event.target.closest("#f-onb [name]");
+    if (!field || !S.onboarding || !S.onboarding.values) return;
+    S.onboarding.values[field.name] = field.value;
+    saveOnboarding();
+  });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest("[data-pick], [data-toggle-goal]")) return;
+    setTimeout(saveOnboarding, 0);
+  });
 
   // Painted in place rather than through a re-render, so the caret never jumps
   // while somebody is typing. `holder` is whichever .typeahead the input lives
@@ -906,7 +756,7 @@
 
   // A field with data-typeahead offers places as you type. Delegated from the
   // document, so it keeps working through every re-render and on every screen
-  // that wants it, rather than being bound once to one element.
+  // that wants it.
   let placeTimer = 0;
   function askPlaces(input) {
     clearTimeout(placeTimer);
@@ -924,11 +774,14 @@
         const result = await API.get(`/api/timezone?q=${encodeURIComponent(value)}`);
         // Somebody may have typed on since this request went out.
         if (input.value.trim() !== value) return;
-        paintSuggestions(holder, result.suggestions || []);
-        if (hint) hint.innerHTML = tzHint(result.match);
+        const rows = result.suggestions || [];
+        paintSuggestions(holder, rows);
+        // A list to pick from is the answer; the hint only speaks when there is none.
+        if (hint) hint.innerHTML = rows.length && !result.match?.confident ? `<span class="tz-hint">Pick one below.</span>` : tzHint(result.match);
         if (input.id === "place-input") {
           S.onboarding.tz = result.match;
-          S.onboarding.suggestions = result.suggestions || [];
+          S.onboarding.suggestions = rows;
+          saveOnboarding();
         }
       } catch (_) { /* still typing */ }
     }, 200);
@@ -950,15 +803,13 @@
   function tzHint(tz) {
     if (!tz) return "";
     if (!tz.confident) {
-      return `<span class="tz-hint unknown">${icon("info")} We could not place that yet. Keep typing, or use a city or ZIP code.</span>`;
+      return `<span class="tz-hint unknown">${icon("info")} That place is not recognised yet. Keep typing, or use a city or ZIP code.</span>`;
     }
-    const label = tz.label.toLowerCase();
     if (tz.matched === "time zone name" || tz.matched === "time zone") {
-      return `<span class="tz-hint">${icon("check")} Running on ${e(label)}.</span>`;
+      return `<span class="tz-hint">${icon("check")} Running on ${e(tz.label)}.</span>`;
     }
-    return `<span class="tz-hint">${icon("check")} Read as ${e(tz.matched)}, so ${e(label)}.</span>`;
+    return `<span class="tz-hint">${icon("check")} Read as ${e(tz.matched)}, so ${e(tz.label)}.</span>`;
   }
-
   /* ---------- shell ---------- */
   // Three places to work and one place to set things up. What to make today,
   // what to buy, and what happened. The next two weeks are a panel inside
@@ -1057,6 +908,7 @@
   // before paints from memory at once and refreshes underneath; only a first
   // open with nothing on screen shows a placeholder.
   async function loadView(silent = false) {
+    clearTimeout(menuPollTimer);
     const first = !root.querySelector(".app");
     const cached = S.cache[viewKey()];
     if (first) root.innerHTML = shell(viewTitle(), "", "", skeleton());
@@ -1094,8 +946,16 @@
           if (token !== loadView._seq) return;
           S.data = { setup, billing, location_id: S.locationId };
         }
-        if (S.settingsTab === "menu" && !S.menu) S.menu = await API.get(`/api/menu?${q}`);
-        if (S.settingsTab === "costs" && !S.costs) S.costs = await API.get(`/api/costs?${q}`);
+        if (S.settingsTab === "menu" && !S.menu) {
+          const menu = await API.get(`/api/menu?${q}`);
+          if (token !== loadView._seq) return;
+          S.menu = menu;
+        }
+        if (S.settingsTab === "costs" && !S.costs) {
+          const costs = await API.get(`/api/costs?${q}`);
+          if (token !== loadView._seq) return;
+          S.costs = costs;
+        }
         if (token !== loadView._seq) return;
       }
       remember();
@@ -1104,6 +964,7 @@
       if (!(silent && (isTyping() || layer.innerHTML))) render(silent);
       if (S.view === "today") maybeFetchNarrative();
       if (S.view === "today" && S.todayPane === "ahead") loadOutlook();
+      if (S.view === "settings" && S.settingsTab === "menu") scheduleMenuPoll();
     } catch (error) {
       if (token !== loadView._seq) return;
       if (error.status === 403) return boot();
@@ -1799,75 +1660,140 @@
   }
 
   /* ---------- menu and recipes, under Settings ---------- */
+  let menuPollTimer;
+  function scheduleMenuPoll() {
+    clearTimeout(menuPollTimer);
+    if (!(S.menu?.pending_compositions > 0) || S.view !== "settings" || S.settingsTab !== "menu") return;
+    const locationId = S.locationId;
+    menuPollTimer = setTimeout(async () => {
+      const current = () => S.locationId === locationId && S.view === "settings" && S.settingsTab === "menu";
+      if (!current()) return;
+      if (isTyping() || layer.innerHTML) return scheduleMenuPoll();
+      try {
+        const menu = await API.get(`/api/menu?location_id=${encodeURIComponent(locationId)}`);
+        if (!current()) return;
+        if (!isTyping() && !layer.innerHTML) { S.menu = menu; render(true); }
+      } catch (_) { /* Keep the usable menu and retry while this tab is open. */ }
+      if (current()) scheduleMenuPoll();
+    }, 2500);
+  }
+  // Confirmed means somebody at this location saved the recipe; anything else
+  // was read from the till label and is an estimate until then.
+  const recipeConfirmed = (item) => !!(item && item.composition && item.composition.writer === "owner");
+
+  function menuAddCard() {
+    return `<section class="card" id="menu-add">
+      <div class="card-head"><div><h2>Add items by hand</h2>
+        <p>One item per line: name, category, price. Items that come from the register are left as they are.</p></div></div>
+      <div class="card-body">
+        <textarea id="menu-text" aria-label="Items to add, one item per line" rows="5" placeholder="Double cheeseburger, Burgers, 15.50&#10;Pep slice, Slices, 4.25&#10;Iced latte, Drinks, 6.00"></textarea>
+        <div class="btn-row" style="margin-top:12px">
+          <button class="btn" type="button" data-do="menu-preview">Preview</button>
+          <button class="btn accent" type="button" data-do="menu-import">Add items</button>
+        </div>
+        <div id="menu-preview-out"></div>
+      </div>
+    </section>`;
+  }
+
   function settingsMenu() {
     const d = S.menu;
     if (!d) return `<section class="card"><div class="card-body">${skeleton()}</div></section>`;
-    const sum = d.summary;
-    const parts = d.items.reduce((n, row) => n + (row.composition?.components?.length || 0), 0);
+    if (!d.items.length) {
+      return `<div class="stack-tight">
+        <section class="card">${emptyState("Nothing on the menu yet", "Connect the register and the menu fills in on its own, or add items below.",
+          `<div class="btn-row" style="justify-content:center">
+            <button class="btn" type="button" data-stab="location">Connect the register</button>
+            <a class="btn" href="#menu-add" data-scroll="menu-add">Add items</a>
+          </div>`)}</section>
+        ${menuAddCard()}
+      </div>`;
+    }
+    const confirmed = d.items.filter(recipeConfirmed).length;
     return `<div class="stack-tight">
       <section class="card">
         <div class="card-head">
-          <div><h2>What each item is made of</h2>
-            <p>${noun(sum.total, "item")} from the register, ${noun(parts, "part")} read from the till labels.${sum.review_optional ? ` ${noun(sum.review_optional, "label")} worth a second look.` : ""} Open one to see what it takes to make, and correct anything that is wrong.</p></div>
+          <div><h2>Recipes</h2>
+            <p>${noun(d.items.length, "item")} on the menu, ${confirmed ? `${num(confirmed)} confirmed` : "none confirmed yet"}. Open one to see what goes into it. Confirmed recipes drive the order list.</p></div>
         </div>
         <div id="menulist">${d.items.map(menuRow).join("")}</div>
-        <div class="card-foot">Estimated from the till label until a recipe is confirmed. A confirmed recipe is what the order list is built on.</div>
       </section>
-
-      <section class="card">
-        <div class="card-head"><div><h2>Add items by hand</h2>
-          <p>For anything the register does not carry. One item per line, price at the end.</p></div></div>
-        <div class="card-body">
-          <textarea id="menu-text" rows="5" placeholder="Double cheeseburger, Burgers, 15.50&#10;Pep slice, Slices, 4.25&#10;Iced lat lg, Drinks, 6.00"></textarea>
-          <div class="btn-row" style="margin-top:12px">
-            <button class="btn" data-do="menu-preview">Show me what it reads</button>
-            <button class="btn accent" data-do="menu-import">Add these items</button>
-          </div>
-          <div id="menu-preview-out"></div>
-        </div>
-      </section>
+      ${menuAddCard()}
     </div>`;
   }
+
   function menuRow(item) {
     const open = S.open.has(item.id);
     const comp = item.composition;
-    const low = Number(item.confidence) < 0.68;
+    const confirmed = recipeConfirmed(item);
+    const hasCost = item.food_cost !== undefined && item.food_cost !== null;
+    const food = hasCost ? Math.round(Number(item.food_cost) * 10) / 10 : 0;
+    const foodText = hasCost ? `${money(food, true)} (${item.cost_share_percent}%)` : "";
     return `<div class="exp ${open ? "open" : ""}">
-      <button class="exp-head" data-expand="${e(item.id)}">
+      <button class="exp-head menu-head" type="button" data-expand="${e(item.id)}" aria-expanded="${open ? "true" : "false"}">
         <span class="chev">${icon("chevR")}</span>
-        <span><b>${e(item.normalized_name)}</b><small>${e(item.category)}${item.raw_name !== item.normalized_name ? ` · rings up as "${e(item.raw_name)}"` : ""}</small></span>
-        <span class="small muted">${comp ? `${noun(comp.components.length, "ingredient")}` : "not read yet"}</span>
-        <span class="menu-money">
-          <b class="tnum">${money(item.price, true)}</b><small>sells for</small>
-        </span>
-        <span class="menu-money">${item.food_cost !== undefined
-          ? `<b class="tnum">${money(item.food_cost, true)}</b><small>food, ${item.cost_share_percent}%</small>`
-          : `<b class="tnum muted">not set</b><small>food cost</small>`}</span>
+        <span class="menu-name"><b>${e(item.normalized_name)}</b><small>${e(item.category)}</small>
+          <small class="menu-line">Sells for ${money(item.price, true)}${hasCost ? ` · Food about ${foodText}` : ""}</small></span>
+        <span class="tag plain">${confirmed ? "Confirmed" : "Estimated"}</span>
+        <span class="menu-money"><small>Sells for</small><b>${money(item.price, true)}</b></span>
+        <span class="menu-money">${hasCost
+          ? `<small>Food about</small><b>${foodText}</b>`
+          : `<small>Food cost</small><b class="muted">Not set</b>`}</span>
       </button>
       ${open ? `<div class="exp-body">
         ${comp ? `
           <p class="lede" style="margin-top:12px">${e(comp.summary)}</p>
-          <table class="dt parts"><thead><tr>
-            <th>Part</th><th>Role</th><th class="num right">Per ${e(item.production_unit || "unit")}</th>
-            <th class="num right">Share of food cost</th><th class="num right">How sure</th></tr></thead><tbody>
+          <table class="dt parts recipe"><thead><tr>
+            <th>Part</th><th class="num right">Each</th><th class="num right">Share of food cost</th></tr></thead><tbody>
             ${(() => { const top = Math.max(...comp.components.map((c) => Number(c.share) || 0), 1);
               return comp.components.map((c) => `<tr>
-              <td class="name"><b>${e(c.name)}</b></td>
-              <td><span class="rolechip"><i class="${roleClass(c.role)}"></i>${e(c.role)}</span></td>
+              <td class="name"><b>${e(c.name)}</b>${c.confidence === "low" ? ` <span class="check-this">check this</span>` : ""}</td>
               <td class="num right">${e(c.quantity || "not stated")}</td>
               <td class="num right">${shareCell(c.share, top)}</td>
-              <td class="num right ${c.confidence === "low" ? "down" : ""}">${e(c.confidence)}</td>
             </tr>`).join(""); })()}
           </tbody></table>
-          <p class="form-note" style="margin-top:10px">${e(comp.verify_note)}</p>
           <div class="btn-row" style="margin-top:12px">
-            <button class="btn sm accent" data-item-sheet="${e(item.id)}">See how it sells</button>
-            <button class="btn sm" data-do="recompose" data-item="${e(item.id)}">Read it again</button>
-            <button class="btn sm ghost" data-do="edit-composition" data-item="${e(item.id)}">Correct it</button>
+            <button class="btn sm" type="button" data-do="edit-composition" data-item="${e(item.id)}">Edit recipe</button>
+            <button class="btn sm ghost" type="button" data-item-sheet="${e(item.id)}">See how it sells</button>
+            <details class="recipe-more"><summary class="btn sm ghost">More</summary>
+              <button class="btn sm ghost" type="button" data-do="recompose" data-item="${e(item.id)}">Re-read from the till label</button>
+            </details>
           </div>`
-        : `<div style="padding:14px 0"><p class="lede">Still reading this one. Check back in a moment.</p></div>`}
+        : `<p class="lede" style="padding:14px 0">Working this one out. Check back in a moment.</p>`}
       </div>` : ""}
     </div>`;
+  }
+
+  // One editable line of a recipe: what the part is, what kind of thing it
+  // is, how much goes into one item, and its share of the food cost.
+  const RECIPE_ROLES = ["protein", "bread", "dairy", "produce", "sauce", "base", "sweetener", "beverage", "packaging", "other"];
+  function recipeRow(c = {}) {
+    const role = String(c.role || "other").toLowerCase();
+    return `<div class="recipe-row">
+      <label class="recipe-field recipe-name"><span>Part</span><input class="rr-name" placeholder="Beef patty" value="${e(c.name || "")}"></label>
+      <label class="recipe-field"><span>Role</span><select class="rr-role">${RECIPE_ROLES.map((r) =>
+        `<option value="${r}" ${role === r ? "selected" : ""}>${r}</option>`).join("")}</select></label>
+      <label class="recipe-field"><span>Each</span><input class="rr-qty" placeholder="1 patty" value="${e(c.quantity || "")}"></label>
+      <label class="recipe-field"><span>Share of food cost</span><span class="unitwrap"><input class="rr-share" type="number" min="0" max="100" step="1" inputmode="numeric" value="${c.share === undefined || c.share === "" ? "" : e(c.share)}"><i class="unit">%</i></span></label>
+      <button class="icon-btn" type="button" data-settings="recipe-drop" aria-label="Remove this part">${icon("close")}</button>
+    </div>`;
+  }
+
+  // What the recipe editor currently holds, as the payload the API takes.
+  function recipeRowsRead() {
+    return Array.from(document.querySelectorAll("#recipe-rows .recipe-row")).map((node) => ({
+      name: node.querySelector(".rr-name").value.trim(),
+      role: node.querySelector(".rr-role").value,
+      quantity: node.querySelector(".rr-qty").value.trim(),
+      share: Number(node.querySelector(".rr-share").value) || 0,
+      confidence: "high",
+    })).filter((row) => row.name || row.share);
+  }
+
+  function recipeTotalPaint() {
+    const total = recipeRowsRead().reduce((n, row) => n + row.share, 0);
+    const node = document.getElementById("recipe-total");
+    if (node) node.textContent = `Shares add up to ${Math.round(total)}%`;
   }
 
   /* ---------- ordering ---------- */
@@ -2923,20 +2849,19 @@
   });
 
   /* ---------- settings ---------- */
+  // Four tabs. The morning email and the connections live inside Location,
+  // suppliers live on Order. Which tab is open is kept in the store.
   const SETTINGS_TABS = [
     ["location", "Location"],
-    ["menu", "Menu & recipes"],
-    ["costs", "What things cost"],
-    ["suppliers", "Suppliers"],
-    ["connections", "Data connections"],
-    ["email", "Daily email"],
-    ["account", "Account & security"],
+    ["menu", "Menu"],
+    ["costs", "Costs"],
+    ["account", "Account"],
   ];
 
   function renderSettings() {
     const body = `<div class="settings">
-      <nav class="settings-nav">${SETTINGS_TABS.map(([k, l]) =>
-        `<button class="${S.settingsTab === k ? "on" : ""}" data-stab="${k}">${l}</button>`).join("")}</nav>
+      <nav class="settings-nav" aria-label="Settings">${SETTINGS_TABS.map(([k, l]) =>
+        `<button class="${S.settingsTab === k ? "on" : ""}" type="button" data-stab="${k}">${l}</button>`).join("")}</nav>
       <div class="settings-body">${settingsPanel()}</div>
     </div>`;
     root.innerHTML = shell("Settings", "", "", body);
@@ -2946,20 +2871,35 @@
     const { setup, billing } = S.data;
     if (S.settingsTab === "menu") return settingsMenu();
     if (S.settingsTab === "costs") return settingsCosts();
-    if (S.settingsTab === "suppliers") return settingsSuppliers();
-    if (S.settingsTab === "location") return settingsLocation(setup);
-    if (S.settingsTab === "connections") return settingsConnections(setup);
-    if (S.settingsTab === "email") return settingsEmail(setup);
-    return settingsAccount(setup, billing);
+    if (S.settingsTab === "account") return settingsAccount(setup, billing);
+    return settingsLocation(setup);
+  }
+
+  // A plain word for how a connection stands. Never green: connected is not
+  // "more than normal", it is just connected.
+  function connTag(row, connected) {
+    if (connected) return `<span class="connection-state">Connected</span>`;
+    if (row && row.mode === "demo") return `<span class="connection-state">Sample data</span>`;
+    return `<span class="connection-state">Not connected</span>`;
   }
 
   function settingsLocation(setup) {
     const l = setup.location;
-    const tz = setup.timezone;
-    return `<section class="card">
-      <div class="card-head"><div><h2>${e(l.name)}</h2><p>The time zone sets when the morning email lands.</p></div></div>
-      <div class="card-body">
-        <form id="f-location" class="form-grid">
+    const tz = setup.timezone || {};
+    const p = setup.email || {};
+    const mail = !!p.provider_connected;
+    const byProvider = Object.fromEntries((setup.integrations || []).map((row) => [row.provider, row]));
+    const reg = setup.register || {};
+    const registerOn = reg.connected !== undefined
+      ? !!reg.connected
+      : !!(byProvider.pos && byProvider.pos.status === "connected" && byProvider.pos.mode !== "demo");
+    const weather = byProvider.weather || {};
+    const events = byProvider.events || {};
+    const synced = (row) => (row && row.last_sync ? `<div class="why">Last updated ${e(dMed(row.last_sync))}</div>` : "");
+    return `<form id="f-location" class="stack-tight" autocomplete="off">
+      <section class="card">
+        <div class="card-head"><div><h2>Location</h2><p>Name, hours and where it is. The morning email runs on this time zone.</p></div></div>
+        <div class="card-body form-grid">
           <div class="form-grid two">
             <label class="field"><span>Name</span><input name="name" value="${e(l.name)}" required></label>
             <label class="field"><span>What you serve</span><input name="concept" value="${e(l.concept)}"></label>
@@ -2975,23 +2915,95 @@
           </div>
           <label class="field"><span>Time zone</span>
             <div class="typeahead">
-              <input type="text" name="timezone" id="tz-input" data-typeahead value="${e(l.timezone)}"
-                     placeholder="White Plains, California, 10583, or Eastern" autocomplete="off">
+              <input type="text" name="timezone_text" id="tz-input" data-typeahead value="${e(tz.label || l.timezone)}"
+                     placeholder="Eastern, Chicago, or a ZIP code" autocomplete="off">
             </div>
-            <div id="tz-hint" data-tz-hint>${tzHint(tz)}</div>
+            <input type="hidden" name="timezone" value="${e(l.timezone)}">
+            <div id="tz-hint" data-tz-hint></div>
             <small>A town, a state, a ZIP code, or a time zone.</small></label>
           <div class="form-grid two">
             <label class="field"><span>Opens</span><select name="open_hour">${hourOptions(l.open_hour, 0, 14)}</select></label>
-            <label class="field"><span>Closes</span><select name="close_hour">${hourOptions(l.close_hour, 14, 28)}</select>
-              <small>Past midnight is fine. A bar open 11 AM to 2 AM is a fifteen hour day.</small></label>
+            <label class="field"><span>Closes</span><select name="close_hour">${hourOptions(l.close_hour, 14, 28)}</select></label>
           </div>
-          <div class="btn-row"><button class="btn accent" type="submit">Save</button></div>
+          <p class="form-note">Past midnight is fine. A bar open 11 AM to 2 AM is a fifteen hour day.</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h2>Morning email</h2><p>What to make, why, and the six days ahead. Sent before you open.</p></div></div>
+        <div class="card-body form-grid">
+          <div class="form-grid two">
+            <label class="field"><span>Send to</span>
+              <input name="owner_email" type="email" value="${e(p.owner_email || "")}" placeholder="${e(S.boot.user.email || "")}"></label>
+            <label class="field"><span>Send at</span>
+              <input name="send_time" type="time" value="${e(p.send_time || "05:30")}">
+              <small>${e(tz.label || l.timezone)}</small></label>
+          </div>
+          <label class="check"><input name="enabled" type="checkbox" ${p.enabled ? "checked" : ""}>
+            <span><b>Send it every day</b><small>Goes out at the time above, on this location's clock.</small></span></label>
+          <div class="btn-row">
+            <button class="btn" type="button" data-do="preview-email">Preview</button>
+            <button class="btn" type="button" data-do="send-test" ${mail ? "" : "disabled"}>Send a test</button>
+          </div>
+          ${mail ? "" : `<p class="form-note">Email is not connected on this account yet.</p>`}
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h2>Where the numbers come from</h2></div></div>
+        <div class="conn">
+          <div><b>Register ${connTag(byProvider.pos, registerOn)}</b>
+            ${synced(byProvider.pos)}</div>
+          ${registerOn
+            ? `<button class="btn sm" type="button" data-sync="pos">Sync now</button>`
+            : `<button class="btn sm" type="button" data-settings="pos-connect">Connect Square</button>`}
+        </div>
+        <div class="conn">
+          <div><b>Weather ${connTag(weather, weather.status === "connected" && weather.mode !== "demo")}</b>
+            ${synced(weather)}</div>
+          <button class="btn sm" type="button" data-sync="weather">Refresh</button>
+        </div>
+        <div class="conn">
+          <div><b>Nearby ${connTag(events, events.status === "connected" && events.mode !== "demo")}</b>
+            ${synced(events)}</div>
+          <button class="btn sm" type="button" data-sync="events">Refresh</button>
+        </div>
+      </section>
+
+      <div class="savebar"><button class="btn accent" type="submit">Save</button></div>
+    </form>`;
+  }
+
+  function openSquareConnect() {
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true" aria-label="Connect Square">
+        <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
+        <div class="modal-head"><h2>Connect Square</h2>
+          <p>Quantify reads your items and completed tickets from Square, up to three years back.</p></div>
+        <form id="f-square" class="modal-body" autocomplete="off">
+          <label class="field"><span>Access token</span>
+            <input name="access_token" type="password" autocomplete="off" required></label>
+          <label class="field"><span>Location ID</span>
+            <input name="location_id" required></label>
+          <p class="form-note">Both are on your Square application page. <a href="https://developer.squareup.com/apps" target="_blank" rel="noopener">Where to find these</a></p>
+          <p class="form-error" id="square-error"></p>
+          <div class="modal-foot" style="margin:6px -22px -20px">
+            <button class="btn ghost" type="button" data-do="close-layer">Not now</button>
+            <button class="btn accent" type="submit">Connect</button>
+          </div>
         </form>
-      </div>
-    </section>`;
+      </div></div>`);
   }
 
   const PERIODS = [["day", "every day"], ["week", "every week"], ["month", "every month"]];
+
+  // A number field with its unit printed inside the box, so nobody has to
+  // guess whether 18 is dollars, percent or people.
+  function unitField(label, name, value, unit, attrs = "", note = "") {
+    return `<label class="field"><span>${label}</span>
+      <span class="unitwrap"><input name="${name}" type="number" inputmode="decimal" value="${e(value)}" ${attrs}>${unit ? `<i class="unit">${unit}</i>` : ""}</span>
+      ${note ? `<small>${note}</small>` : ""}</label>`;
+  }
 
   function settingsCosts() {
     const c = S.costs;
@@ -2999,66 +3011,53 @@
     const s = c.settings;
     const w = c.wage;
     const ex = c.example;
-    return `<div class="stack-tight">
+    const wage = s.hourly_wage || w.state_minimum;
+    return `<form id="f-costs" class="stack-tight" autocomplete="off">
       <section class="card">
         <div class="card-head"><div><h2>What an hour of work costs</h2>
           <p>${e(w.detail)}</p></div></div>
-        <div class="card-body">
-          <form id="f-costs" class="form-grid">
-            <div class="form-grid two">
-              <label class="field"><span>What you pay an hour</span>
-                <input name="hourly_wage" type="number" step="0.25" min="0" value="${s.hourly_wage || w.state_minimum}">
-                <small>Leave it at the local minimum if you want, but most kitchens pay above it.</small></label>
-              <label class="field"><span>Payroll on top</span>
-                <input name="payroll_load_percent" type="number" step="0.5" min="0" max="60" value="${s.payroll_load_percent}">
-                <small>Payroll tax, unemployment, workers' comp. 18% is typical. At ${money(s.hourly_wage || w.state_minimum, true)} an hour that makes an hour cost ${money(w.loaded, true)}.</small></label>
-            </div>
-            <div class="form-grid two">
-              <label class="field"><span>Orders one person handles an hour</span>
-                <input name="orders_per_person_per_hour" type="number" step="0.5" min="1" max="40" value="${s.orders_per_person_per_hour}">
-                <small>Counter, kitchen, expo and clean down together. Six is normal for table service, higher for a coffee counter.</small></label>
-              <label class="field"><span>Fewest people on at once</span>
-                <input name="min_staff" type="number" step="1" min="1" max="30" value="${s.min_staff}">
-                <small>Charged for every hour you are open, even the quiet ones.</small></label>
-            </div>
-            <div class="form-grid two">
-              <label class="field"><span>Hours of prep before you open</span>
-                <input name="prep_hours" type="number" step="0.5" min="0" max="12" value="${s.prep_hours}"></label>
-              <label class="field"><span>Hours of clean down after you close</span>
-                <input name="close_hours" type="number" step="0.5" min="0" max="12" value="${s.close_hours}"></label>
-            </div>
-            <label class="field"><span>What food costs, as a share of the price</span>
-              <input name="default_cost_share" type="number" step="1" min="1" max="95" value="${Math.round(s.default_cost_share * 100)}">
-              <small>Used for anything not given its own figure below.</small></label>
-            <div class="btn-row"><button class="btn accent" type="submit">Save</button></div>
-          </form>
+        <div class="card-body form-grid">
+          <div class="form-grid two">
+            ${unitField("What you pay an hour", "hourly_wage", wage, "$ / hour", 'step="0.25" min="0"', `Starts at the local minimum, ${money(w.state_minimum, true)}.`)}
+            ${unitField("Payroll on top", "payroll_load_percent", s.payroll_load_percent, "%", 'step="0.5" min="0" max="60"', `Tax and insurance. 18% is typical, so an hour costs ${money(w.loaded, true)}.`)}
+          </div>
+          <div class="form-grid two">
+            ${unitField("Tickets one person handles an hour", "orders_per_person_per_hour", s.orders_per_person_per_hour, "tickets", 'step="0.5" min="1" max="40"', "Six is typical for table service.")}
+            ${unitField("Fewest people on at once", "min_staff", s.min_staff, "people", 'step="1" min="1" max="30"', "Counted for every open hour.")}
+          </div>
+          <div class="form-grid two">
+            ${unitField("Prep before you open", "prep_hours", s.prep_hours, "hours", 'step="0.5" min="0" max="12"')}
+            ${unitField("Clean down after you close", "close_hours", s.close_hours, "hours", 'step="0.5" min="0" max="12"')}
+          </div>
         </div>
       </section>
 
       <section class="card">
-        <div class="card-head"><div><h2>What food costs by category</h2>
+        <div class="card-head"><div><h2>Food cost by category</h2>
           <p>Change any of these and the profit on every day follows.</p></div></div>
-        <div class="tablewrap"><table class="dt"><thead><tr>
-          <th>Category</th><th class="num right">Items</th><th class="num right">Share of price</th><th class="num right">On a typical one</th></tr></thead><tbody>
+        <div class="card-body">
+          <div class="form-grid two">
+            ${unitField("Anything without its own figure", "default_cost_share", Math.round(s.default_cost_share * 100), "% of price", 'step="1" min="1" max="95"')}
+          </div>
+        </div>
+        <table class="dt costs-table"><thead><tr>
+          <th>Category</th><th class="num right">Share of price</th><th class="num right">On a typical item</th></tr></thead><tbody>
           ${c.categories.map((row) => `<tr>
-            <td class="name"><b>${e(row.category)}</b><small>${row.set_by_owner ? "your figure" : `estimated from what these items are, across ${num(row.items)} of them`}</small></td>
-            <td class="num right">${num(row.items)}</td>
-            <td class="num right"><input class="mini" data-cost-category="${e(row.category)}" type="number" step="1" min="1" max="95" value="${row.percent}"></td>
+            <td class="name"><b>${e(row.category)}</b><small>${row.set_by_owner ? "your figure" : "estimate"}, ${noun(row.items, "item")}</small></td>
+            <td class="num right"><span class="unitwrap mini"><input class="mini" data-cost-category="${e(row.category)}" type="number" inputmode="numeric" step="1" min="1" max="95" value="${row.percent}" aria-label="Share of price for ${e(row.category)}"><i class="unit">%</i></span></td>
             <td class="num right">${money(row.average_price * row.percent / 100, true)}</td>
           </tr>`).join("")}
-        </tbody></table></div>
-        <div class="card-foot">Change a figure and press save below. This changes profit, not the forecast.</div>
+        </tbody></table>
       </section>
 
       <section class="card">
         <div class="card-head"><div><h2>Everything else you pay for</h2>
-          <p>Rent, insurance, the card machine, the linen service, the thing only you pay for.</p></div></div>
+          <p>Rent, insurance, the card machine, the linen service.</p></div></div>
         <div class="card-body">
           <div id="cost-lines">${(c.recurring.length ? c.recurring : [{ name: "", amount: "", period: "month" }])
             .map(costLine).join("")}</div>
           <div class="btn-row" style="margin-top:12px">
-            <button class="btn sm" data-do="add-cost-line">Add another</button>
-            <button class="btn accent" data-do="save-costs">Save everything on this page</button>
+            <button class="btn sm" type="button" data-do="add-cost-line">Add another</button>
           </div>
           ${c.recurring_daily ? `<p class="small muted" style="margin-top:12px">That comes to <b>${money(c.recurring_daily)}</b> a day, charged whether you trade or not.</p>` : ""}
         </div>
@@ -3067,162 +3066,111 @@
       ${ex ? `<section class="card">
         <div class="card-head"><div><h2>What this does to a real day</h2>
           <p>${e(dMed(ex.date))}, worked through with the numbers above.</p></div></div>
-        <div class="tablewrap"><table class="dt"><tbody>
-          <tr><td class="name"><b>Rang up</b></td><td class="num right"><b>${money(ex.revenue)}</b></td></tr>
-          <tr><td class="name"><b>Food and packaging</b><small>${ex.cogs_percent}% of what was rung</small></td><td class="num right">${money(-ex.cogs)}</td></tr>
-          <tr><td class="name"><b>Wages</b><small>${ex.staff_hours} staff hours at ${money(ex.loaded_wage, true)}, peak of ${ex.busiest_staff} people</small></td><td class="num right">${money(-ex.labour)}</td></tr>
-          ${ex.other ? `<tr><td class="name"><b>Everything else</b><small>one day's share of what you listed</small></td><td class="num right">${money(-ex.other)}</td></tr>` : ""}
-        </tbody><tfoot><tr><td><b>Kept</b><small>about ${ex.margin_percent}% of what was rung</small></td>
-          <td class="num right"><b>${money(ex.left_after_costs)}</b></td></tr></tfoot></table></div>
-        <div class="card-foot">Built from the settings on this page, not from your books.</div>
+        <div class="card-body"><div class="ledger">
+          <div><b>Sold</b></div><div class="num"><b>${money(ex.revenue)}</b></div>
+          <div><b>Food and packaging</b><small>${ex.cogs_percent}% of sales</small></div><div class="num">${money(-ex.cogs)}</div>
+          <div><b>Wages</b><small>${ex.staff_hours} staff hours at ${money(ex.loaded_wage, true)}, peak of ${noun(ex.busiest_staff, "person", "people")}</small></div><div class="num">${money(-ex.labour)}</div>
+          ${ex.other ? `<div><b>Everything else</b><small>one day's share of what you listed</small></div><div class="num">${money(-ex.other)}</div>` : ""}
+          <div class="total"><b>Kept</b><small>about ${ex.margin_percent}% of sales</small></div><div class="num total"><b>${money(ex.left_after_costs)}</b></div>
+        </div></div>
       </section>` : ""}
-    </div>`;
+
+      <div class="savebar"><span class="form-error" id="costs-error"></span><button class="btn accent" type="submit">Save costs</button></div>
+    </form>`;
   }
 
   function costLine(row) {
     return `<div class="costline">
-      <input class="cl-name" placeholder="What it is" value="${e(row.name || "")}">
-      <input class="cl-amount" type="number" step="1" min="0" placeholder="0" value="${row.amount || ""}">
-      <select class="cl-period">${PERIODS.map(([k, l]) =>
+      <input class="cl-name" placeholder="What it is" value="${e(row.name || "")}" aria-label="What it is">
+      <span class="unitwrap"><input class="cl-amount" type="number" inputmode="decimal" step="1" min="0" placeholder="Amount" value="${row.amount || ""}" aria-label="Amount"><i class="unit">$</i></span>
+      <select class="cl-period" aria-label="How often">${PERIODS.map(([k, l]) =>
         `<option value="${k}" ${row.period === k ? "selected" : ""}>${l}</option>`).join("")}</select>
-      <button class="icon-btn" type="button" data-do="drop-cost-line">${icon("close")}</button>
+      <button class="icon-btn" type="button" data-do="drop-cost-line" aria-label="Remove this line">${icon("close")}</button>
     </div>`;
   }
-
 
   async function saveCosts() {
     const form = document.getElementById("f-costs");
     const body = form ? Object.fromEntries(new FormData(form).entries()) : {};
     body.categories = Array.from(document.querySelectorAll("[data-cost-category]")).map((node) => ({
-      category: node.dataset.costCategory, percent: Number(node.value),
+      category: node.dataset.costCategory, percent: node.value === "" ? null : Number(node.value),
     }));
     body.recurring = Array.from(document.querySelectorAll(".costline")).map((node) => ({
       name: node.querySelector(".cl-name").value.trim(),
       amount: Number(node.querySelector(".cl-amount").value),
       period: node.querySelector(".cl-period").value,
-    })).filter((row) => row.name && row.amount > 0);
+    })).filter((row) => row.name);
+    const errorNode = document.getElementById("costs-error");
+    if (errorNode) errorNode.textContent = "";
     try {
-      S.costs = await API.send(`/api/costs?location_id=${encodeURIComponent(S.locationId)}`, "PUT", body);
-      toast("Saved");
-      render();
-    } catch (error) { toast(error.message, "error"); }
+      const saved = await API.send(`/api/costs?location_id=${encodeURIComponent(S.locationId)}`, "PUT", body);
+      S.costs = saved;
+      const skipped = Array.isArray(saved.skipped) ? saved.skipped : [];
+      toast(skipped.length ? `Saved, skipped ${skipped.join(", ")}` : "Saved");
+      render(true);
+    } catch (error) {
+      const text = plainError(error);
+      if (errorNode) errorNode.textContent = text;
+      else toast(text, "error");
+    }
   }
 
-  function settingsConnections(setup) {
-    const byProvider = Object.fromEntries(setup.integrations.map((row) => [row.provider, row]));
-    const posProvider = setup.providers.find((p) => p.provider.toLowerCase() === "square");
-    return `<div class="stack-tight">
-      <section class="card">
-        <div class="card-head"><div><h2>Where the numbers come from</h2>
-          <p>Up to three years of history on connect, then it keeps up as orders come in.</p></div></div>
-        <div class="conn">
-          <span class="badge ${byProvider.pos?.status === "connected" ? "on" : ""}">POS</span>
-          <div><b>${e(posProvider?.provider || "Square")} ${byProvider.pos?.mode === "demo" ? `<span class="tag plain">sample data</span>` : `<span class="tag up dot">connected</span>`}</b>
-            <p>Item catalogue and every completed order, including which hour each one landed in. This is the only connection that really matters.</p>
-            <div class="why">${e(posProvider?.history || "")}</div></div>
-          <button class="btn sm" data-sync="pos">Sync now</button>
-        </div>
-        <div class="conn">
-          <span class="badge on">WX</span>
-          <div><b>Weather <span class="tag ${byProvider.weather?.mode === "demo" ? "plain" : "up"} dot">${e(byProvider.weather?.mode === "demo" ? "sample data" : byProvider.weather?.status || "not set up")}</span></b>
-            <p>Past and forecast temperature, rain, snow, and sun for this address.</p></div>
-          <button class="btn sm" data-sync="weather">Refresh</button>
-        </div>
-        <div class="conn">
-          <span class="badge on">EV</span>
-          <div><b>What is on nearby <span class="tag ${byProvider.events?.mode === "demo" ? "plain" : "up"} dot">${e(byProvider.events?.mode === "demo" ? "sample data" : byProvider.events?.status || "not set up")}</span></b>
-            <p>Concerts, games, conferences, festivals, and public holidays inside a trade area that adjusts to how far your customers actually travel. Each one is ranked by size, distance, timing, and how this location has responded before.</p>
-            </div>
-          <button class="btn sm" data-sync="events">Refresh</button>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-head"><div><h2>Writing</h2><p>Quantify computes every number itself. A language model is used only to put those numbers into sentences.</p></div></div>
-        <div class="card-body">
-          <div style="display:flex;gap:10px;align-items:flex-start">
-            ${icon(setup.writer.state === "connected" ? "check" : "info")}
-            <div><b style="font-size:13.5px">${e(setup.writer.state === "connected" ? `Connected to ${setup.writer.model}` : "Running on the built-in writer")}</b>
-              <p class="small muted" style="margin-top:4px;line-height:1.6">${e(setup.writer.detail)}</p></div>
-          </div>
-          <div class="card" style="margin-top:14px;box-shadow:none;background:var(--surface-2)"><div class="card-body">
-            <div class="eyebrow">Skills loaded per task</div>
-            <div style="display:grid;gap:8px;margin-top:10px">
-              ${Object.entries(setup.writer.skills || {}).map(([task, skills]) => `
-                <div style="display:flex;gap:10px;align-items:baseline;font-size:12.5px">
-                  <b style="min-width:150px">${e(task.replace(/_/g, " "))}</b>
-                  <span class="muted">${skills.map((s) => e(s)).join(", ")}</span></div>`).join("")}
-            </div>
-          </div></div>
-        </div>
-        <div class="card-foot">Set ANTHROPIC_API_KEY and run pip install anthropic to switch the writing on. Nothing about the forecast changes, only how it is explained.</div>
-      </section>
-    </div>`;
-  }
-
-  function settingsEmail(setup) {
-    const p = setup.email;
-    return `<section class="card">
-      <div class="card-head"><div><h2>Morning email</h2><p>The whole brief in one message, before anyone opens the door.</p></div></div>
-      <div class="card-body">
-        <form id="f-email" class="form-grid">
-          <div class="form-grid two">
-            <label class="field"><span>Send to</span><input name="owner_email" type="email" value="${e(p.owner_email)}" required></label>
-            <label class="field"><span>Local time</span><input name="send_time" type="time" value="${e(p.send_time)}" required></label>
-          </div>
-          <label class="field"><span>Time zone</span><input name="timezone" value="${e(p.timezone)}" placeholder="New York, Texas, 90210, or Pacific"></label>
-          <label class="check"><input name="enabled" type="checkbox" ${p.enabled ? "checked" : ""}>
-            <span><b>Send it every day</b><small>Today's plan, what to make, the reasons, the honest range, and the next six days.</small></span></label>
-          <div class="btn-row">
-            <button class="btn accent" type="submit">Save</button>
-            <button class="btn" type="button" data-do="preview-email">Preview</button>
-            <button class="btn" type="button" data-do="send-test">Send me a test</button>
-          </div>
-        </form>
-      </div>
-      <div class="card-foot">Without mail credentials a test writes a complete message into data/outbox so you can open it. Live sending uses the same message through Postmark or your own SMTP server.</div>
-    </section>`;
+  // What the plan card says about where the account stands, with the date.
+  function planState(billing) {
+    const status = billing.status;
+    const trial = billing.trial_end ? dShort(billing.trial_end) : "";
+    const period = billing.current_period_end ? dShort(billing.current_period_end) : "";
+    if (status === "trial_ended") return `Your free two weeks ended ${trial || "already"}. Add a card to keep it running.`;
+    if (status === "trialing") return `Free until ${trial}.${billing.payment_method ? "" : " Add a card before then to keep it running."}`;
+    if (status === "past_due") return "The last payment did not go through. Update the card to keep it running.";
+    if (status === "canceled") return "This plan has ended.";
+    if (billing.cancel_at_period_end && period) return `Ends ${period}.`;
+    if (period) return `Next charge ${period}.`;
+    return "";
   }
 
   function settingsAccount(setup, billing) {
     const plan = billing.plan;
-    const cancelling = billing.cancel_at_period_end;
+    const connected = !!(billing.provider && billing.provider.connected);
+    const cancelling = !!billing.cancel_at_period_end;
+    const mfa = !!setup.security.mfa_enabled;
+    const codes = Number(setup.security.recovery_codes_remaining || 0);
+    const state = planState(billing);
     return `<div class="stack-tight">
       <section class="card">
         <div class="card-head"><div><h2>Your account</h2></div></div>
         <div class="card-body" style="display:grid;gap:14px">
-          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px">
-            <div><div class="eyebrow">Signed in as</div><div style="margin-top:5px;font-weight:600">${e(S.boot.user.name)}</div><div class="small muted">${e(S.boot.user.email)}</div></div>
-            <div><div class="eyebrow">Two-step sign in</div><div style="margin-top:5px;font-weight:600" class="${setup.security.mfa_enabled ? "up" : "muted"}">${setup.security.mfa_enabled ? "On" : "Off"}</div><div class="small muted">${setup.security.mfa_enabled ? "Authenticator app" : "Optional, set it up below"}</div></div>
-            <div><div class="eyebrow">This session ends</div><div style="margin-top:5px;font-weight:600">${e(new Date(setup.security.session_expires_at).toLocaleString())}</div><div class="small muted">Sign in again after that</div></div>
+          <div id="account-name">
+            <div class="eyebrow">Name</div>
+            <div class="account-line"><b>${e(S.boot.user.name)}</b>
+              <button class="btn sm ghost" type="button" data-settings="name-edit">Edit name</button></div>
           </div>
-          <div class="btn-row"><button class="btn" data-do="signout">Sign out</button></div>
+          <div><div class="eyebrow">Email</div><div class="account-line"><span>${e(S.boot.user.email)}</span></div></div>
+          <div class="btn-row">
+            <button class="btn" type="button" data-settings="password">Change password</button>
+            <button class="btn ghost" type="button" data-do="signout">Sign out</button>
+          </div>
         </div>
       </section>
 
       <section class="card">
-        <div class="card-head">
-          <div><h2>Two-step sign in</h2>
-            <p>${setup.security.mfa_enabled
-              ? "On. Signing in asks for a code from your authenticator app as well as your password."
-              : "Off. Your password alone gets you in. Turning this on takes about thirty seconds and is the single best thing you can do for this account."}</p></div>
-          <div class="spacer"></div>
-          <span class="tag ${setup.security.mfa_enabled ? "up" : "plain"} dot">${setup.security.mfa_enabled ? "On" : "Off"}</span>
+        <div class="card-head"><div><h2>Two-step sign in</h2>
+          <p>${mfa
+            ? "On. Signing in asks for a code from your authenticator app as well as your password."
+            : "Off. Signing in asks only for your password."}</p></div></div>
+        <div class="card-body">
+          <div class="btn-row">${mfa
+            ? `<button class="btn" type="button" data-do="mfa-off">Turn it off</button>`
+            : `<button class="btn accent" type="button" data-do="mfa-on">Turn on two-step sign in</button>`}</div>
+          <p class="form-error" id="mfa-error"></p>
         </div>
-        <div class="card-body"><div class="btn-row">
-          ${setup.security.mfa_enabled
-            ? `<button class="btn" data-do="mfa-off">Turn it off</button>`
-            : `<button class="btn accent" data-do="mfa-on">Turn on two-step sign in</button>`}
-        </div></div>
       </section>
 
-      ${setup.security.mfa_enabled ? `<section class="card">
+      ${mfa ? `<section class="card">
         <div class="card-head"><div><h2>Backup codes</h2>
-          <p>Ten single-use codes that get you in if your phone is lost. Optional, and most people never need them.</p></div>
-          <div class="spacer"></div>
-          <span class="tag plain">${setup.security.recovery_codes_remaining} unused</span></div>
+          <p>Ten single-use codes that get you in if your phone is lost. ${codes ? `${num(codes)} unused.` : "None left."}</p></div></div>
         <div class="card-body"><div class="btn-row">
-          <button class="btn" data-do="new-codes">${setup.security.recovery_codes_remaining ? "Replace my codes" : "Create backup codes"}</button>
+          <button class="btn" type="button" data-do="new-codes">${codes ? "Replace my codes" : "Create backup codes"}</button>
         </div></div>
       </section>` : ""}
 
@@ -3230,52 +3178,76 @@
         <div class="card-head"><div><h2>Plan</h2><p>${e(plan.blurb)}</p></div></div>
         <div class="plancard">
           <div>
-            <div class="price">$${plan.monthly}<span> per location, per month</span></div>
-            <div class="small muted" style="margin-top:5px">$${plan.annual_monthly} a month if you pay for the year. ${billing.status === "trialing" ? `Free until ${e((billing.trial_end || "").slice(0, 10))}.` : ""}</div>
-            <div class="planlist">
-              ${["Register history and ongoing sync", "Fourteen days of item-level forecasting", "Weather, calendar, and nearby activity", "The morning email", "A scored accuracy record you can check"]
-                .map((f) => `<div>${icon("check")}<span>${f}</span></div>`).join("")}
-            </div>
+            <div class="price">${money(plan.monthly)}<span> per location, per month</span></div>
+            <div class="small muted" style="margin-top:5px">${money(plan.annual_monthly)} a month if you pay for the year.</div>
+            ${connected && state ? `<p class="plan-state">${e(state)}</p>` : ""}
           </div>
-          <div style="display:grid;gap:8px;min-width:190px">
+          ${connected ? `<div class="plan-side">
             ${billing.payment_method
-              ? `<div class="card" style="box-shadow:none;background:var(--surface-2)"><div class="card-body" style="padding:12px 14px">
+              ? `<div class="plan-cardbox">
                    <div class="eyebrow">Card on file</div>
                    <div style="margin-top:4px;font-weight:600">${e(billing.payment_method.brand || "Card")} ending ${e(billing.payment_method.last4)}</div>
-                   <div class="small muted">Expires ${e(billing.payment_method.expires || "")}</div></div></div>`
-              : `<div class="small muted">${billing.provider.connected ? "No card on file yet." : "No payment processor connected yet."}</div>`}
-            <button class="btn ${billing.payment_method ? "" : "accent"}" data-do="billing-portal">${billing.payment_method ? "Update payment method" : "Add a payment method"}</button>
-            ${billing.provider.connected && !billing.payment_method ? `<button class="btn" data-do="billing-checkout">Start the plan</button>` : ""}
-          </div>
+                   <div class="small muted">Expires ${e(billing.payment_method.expires || "")}</div></div>`
+              : `<div class="small muted">No card on file yet.</div>`}
+            <button class="btn ${billing.payment_method ? "" : "accent"}" type="button" data-do="billing-portal">${billing.payment_method ? "Update card" : "Add a card"}</button>
+            ${!billing.payment_method && !cancelling ? `<button class="btn" type="button" data-do="billing-checkout">Start the plan</button>` : ""}
+          </div>` : ""}
         </div>
-        ${billing.invoices.length ? `<div style="border-top:1px solid var(--line)">
+        ${billing.invoices && billing.invoices.length ? `<div style="border-top:1px solid var(--line)">
           ${billing.invoices.map((inv) => `<div class="invoice">
-            <span class="muted">${e(inv.date)}</span><span>${e(inv.number || "Invoice")}</span>
+            <span class="muted">${e(dShort(inv.date) || inv.date)}</span><span>${e(inv.number || "Invoice")}</span>
             <span class="amt">${money(inv.amount, true)}</span>
             <span>${inv.url ? `<a class="btn sm" href="${e(inv.url)}" target="_blank" rel="noopener">Receipt ${icon("external")}</a>` : `<span class="tag plain">${e(inv.status)}</span>`}</span>
           </div>`).join("")}</div>` : ""}
-        <div class="card-foot">${e(billing.provider.detail)}</div>
+        ${connected ? "" : `<div class="card-foot">Billing is not switched on for this account yet.</div>`}
       </section>
 
-      ${cancelling ? `<section class="card">
-        <div class="card-head"><div><h2>Your plan is set to end</h2>
-          <p>Everything keeps working until ${e((billing.current_period_end || "").slice(0, 10))}. You can turn it back on before then and nothing is interrupted.</p></div></div>
-        <div class="card-body"><div class="btn-row"><button class="btn accent" data-do="billing-resume">Keep my plan</button></div></div>
-      </section>` : `
-      <section class="card danger-zone">
-        <div class="card-head"><div><h2>Cancel your plan</h2></div></div>
-        <div class="card-body">
-          <p class="small muted" style="line-height:1.65;max-width:70ch">Cancelling stops the next charge. You keep full access until the end of the period you have already paid for, and your history stays exported-ready the whole time.</p>
-          <div class="btn-row" style="margin-top:14px"><button class="btn danger" data-do="cancel-start">Cancel my plan</button></div>
-        </div>
+      ${!connected ? "" : cancelling ? `<section class="card">
+        <div class="card-head"><div><h2>Your plan ends ${e(dMed(billing.current_period_end))}</h2>
+          <p>Everything keeps working until then. Turn it back on before that and nothing is interrupted.</p></div></div>
+        <div class="card-body"><div class="btn-row"><button class="btn accent" type="button" data-do="billing-resume">Keep plan</button></div></div>
+      </section>` : `<section class="card">
+        <div class="card-head"><div><h2>Cancel plan</h2>
+          <p>Cancelling stops the next charge. You keep access until the end of the period you paid for.</p></div></div>
+        <div class="card-body"><div class="btn-row"><button class="btn" type="button" data-do="cancel-start">Cancel plan</button></div></div>
       </section>`}
+
+      <section class="card">
+        <div class="card-head"><div><h2>Show me around</h2><p>A short walk through Today, Order, History and an item, using this location's own numbers.</p></div></div>
+        <div class="card-body"><div class="btn-row"><button class="btn" type="button" data-do="tour-start">Start the tour</button></div></div>
+      </section>
     </div>`;
   }
 
+  function openPasswordChange() {
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true" aria-label="Change password">
+        <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
+        <div class="modal-head"><h2>Change password</h2>
+          <p>Every other device is signed out once it changes.</p></div>
+        <form id="f-password" class="modal-body">
+          <label class="field"><span>Current password</span>
+            <input name="current_password" type="password" autocomplete="current-password" required></label>
+          <label class="field"><span>New password</span>
+            <input name="new_password" type="password" autocomplete="new-password" minlength="12" required>
+            <small>Twelve characters or more, with at least three of: capital letters, small letters, numbers, symbols.</small></label>
+          <label class="field"><span>Repeat the new password</span>
+            <input name="repeat_password" type="password" autocomplete="new-password" minlength="12" required></label>
+          <p class="form-error" id="password-error"></p>
+          <div class="modal-foot" style="margin:6px -22px -20px">
+            <button class="btn ghost" type="button" data-do="close-layer">Cancel</button>
+            <button class="btn accent" type="submit">Change password</button>
+          </div>
+        </form>
+      </div></div>`);
+  }
+
   /* ---------- cancellation flow ---------- */
+  // Two clicks: the button on the plan card, then this one modal. The reason
+  // is optional and nothing is booked or promised on the way out.
   async function cancelStart() {
     const billing = S.data?.billing || await API.get("/api/billing");
-    S.cancelFlow = { stage: "reason", reason: "", detail: "", reasons: billing.cancellation_reasons, support: billing.support_email };
+    S.cancelFlow = { stage: "ask", reason: "", detail: "", reasons: billing.cancellation_reasons || [], message: "" };
     renderCancelModal();
   }
 
@@ -3284,54 +3256,145 @@
     if (!f) return closeLayer();
     let body = "";
     let foot = "";
-
-    if (f.stage === "reason") {
-      const chosen = f.reasons.find((r) => r.code === f.reason);
-      body = `<div class="modal-head">
-          <h2>Before you go, what went wrong?</h2>
-          <p>One answer. It goes to the people who build this, not to a marketing list.</p></div>
+    if (f.stage === "done") {
+      body = `<div class="modal-head"><h2>Your plan is cancelled</h2><p>${e(f.message)}</p></div>
+        <div class="modal-body"><p class="small muted">Change your mind before then and the Account tab has a button that turns it straight back on.</p></div>`;
+      foot = `<button class="btn primary" type="button" data-do="close-layer">Done</button>`;
+    } else {
+      body = `<div class="modal-head"><h2>Cancel your plan?</h2>
+          <p>The next charge stops. Everything keeps working until the end of the period you paid for.</p></div>
         <div class="modal-body">
+          ${f.reasons.length ? `<p class="small muted">If something went wrong, say which. Optional.</p>
           <div style="display:grid;gap:8px">
             ${f.reasons.map((r) => `
               <button type="button" class="choice ${f.reason === r.code ? "on" : ""}" data-cancel-reason="${e(r.code)}">
                 <span class="radio"></span><div><b>${e(r.label)}</b></div></button>`).join("")}
-          </div>
-          ${chosen ? `<label class="field"><span>${e(chosen.follow_up)}</span>
-            <textarea id="cancel-detail" rows="3" placeholder="Optional, but it is the part we actually read.">${e(f.detail)}</textarea></label>` : ""}
+          </div>` : ""}
+          <label class="field"><span>Anything else</span>
+            <textarea id="cancel-detail" rows="2" placeholder="Optional">${e(f.detail)}</textarea></label>
         </div>`;
-      foot = `<button class="btn ghost" data-do="close-layer">Never mind, keep my plan</button>
-        <button class="btn primary" data-do="cancel-next" ${f.reason ? "" : "disabled"}>Continue</button>`;
-    } else if (f.stage === "offer") {
-      body = `<div class="modal-head">
-          <h2>Give us fifteen minutes first?</h2>
-          <p>Fifteen minutes on a call with someone from the team, at a time you pick.</p></div>
-        <div class="modal-body">
-          <div class="offer-lead">
-            <b>If the price is wrong for how much you use it, we will change the price.</b>
-            <span>Tell us on the call what it is worth to you and we set it there.</span>
-          </div>
-          <div class="planlist" style="margin-top:14px">
-            ${[["We go through your own accuracy record with you, day by day, and show you what it caught and what it missed.",
-                "If it is not doing what you need, we say so."],
-               ["If something is broken or missing, we fix it while you are on the call where we can.", ""],
-               ["If it still is not worth it at the end, we cancel it for you there and then.", ""]]
-              .map(([line, sub]) => `<div>${icon("check")}<span>${line}${sub ? ` <em class="muted">${sub}</em>` : ""}</span></div>`).join("")}
-          </div>
-        </div>`;
-      foot = `<button class="btn danger" data-do="cancel-confirm">No, cancel my plan</button>
-        <button class="btn accent" data-do="cancel-talk">Set up a call</button>`;
-    } else {
-      body = `<div class="modal-head"><h2>Your plan is cancelled</h2><p>${e(f.message)}</p></div>
-        <div class="modal-body"><p class="small muted">If you change your mind before then, there is a button in Account and security that turns it straight back on.</p></div>`;
-      foot = `<button class="btn primary" data-do="close-layer">Done</button>`;
+      foot = `<button class="btn ghost" type="button" data-do="close-layer">Keep plan</button>
+        <button class="btn danger" type="button" data-do="cancel-confirm">Cancel plan</button>`;
     }
-
-    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-      <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true">
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true" aria-label="Cancel your plan">
         <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
         ${body}<div class="modal-foot">${foot}</div>
-      </div></div>`;
+      </div></div>`);
   }
+
+  // Region-local actions for Settings: the small things that do not need a
+  // place in the shared click switch.
+  document.addEventListener("click", async (event) => {
+    const target = event.target.closest("[data-settings]");
+    if (!target) return;
+    const action = target.dataset.settings;
+    if (action === "pos-connect") return openSquareConnect();
+    if (action === "password") return openPasswordChange();
+    if (action === "name-edit") {
+      const host = document.getElementById("account-name");
+      if (!host) return;
+      host.innerHTML = `<div class="eyebrow">Name</div>
+        <form id="f-name" class="account-edit" autocomplete="off">
+          <input name="display_name" value="${e(S.boot.user.name || "")}" minlength="2" maxlength="80" required aria-label="Name">
+          <button class="btn sm" type="submit">Save name</button>
+          <button class="btn sm ghost" type="button" data-settings="name-cancel">Cancel</button>
+        </form>`;
+      const field = host.querySelector("input");
+      if (field) { field.focus(); field.select(); }
+      return;
+    }
+    if (action === "name-cancel") return render(true);
+    if (action === "recipe-add") {
+      const host = document.getElementById("recipe-rows");
+      if (!host) return;
+      host.insertAdjacentHTML("beforeend", recipeRow({}));
+      const last = host.lastElementChild && host.lastElementChild.querySelector(".rr-name");
+      if (last) last.focus();
+      return;
+    }
+    if (action === "recipe-drop") {
+      const row = target.closest(".recipe-row");
+      const host = document.getElementById("recipe-rows");
+      if (row && host && host.children.length > 1) row.remove();
+      else if (row) row.querySelectorAll("input").forEach((node) => { node.value = ""; });
+      recipeTotalPaint();
+      return;
+    }
+    if (action === "recompose-force") {
+      closeLayer();
+      return composeItem(target.dataset.item, true, true);
+    }
+  });
+
+  document.addEventListener("input", (event) => {
+    if (event.target.closest("#recipe-rows")) recipeTotalPaint();
+  });
+
+  // When a city is picked on the Location form, the time zone follows it.
+  document.addEventListener("click", (event) => {
+    const pick = event.target.closest("#f-location [data-place]");
+    if (!pick) return;
+    const holder = pick.closest(".typeahead");
+    const field = holder && holder.querySelector("[data-typeahead]");
+    if (!field || field.name !== "city") return;
+    API.get(`/api/timezone?q=${encodeURIComponent(pick.dataset.place)}`).then((r) => {
+      if (!r.match || !r.match.confident) return;
+      const text = document.getElementById("tz-input");
+      const hidden = document.querySelector("#f-location input[name=timezone]");
+      if (text) text.value = r.match.label || r.match.timezone;
+      if (hidden) hidden.value = r.match.timezone;
+      const hint = document.getElementById("tz-hint");
+      if (hint) hint.innerHTML = "";
+    }).catch(() => {});
+  });
+
+  // The forms that belong to Settings modals and inline edits. The shared
+  // submit handler already stops the page reload and re-enables the button.
+  document.addEventListener("submit", async (event) => {
+    const form = event.target;
+    if (!["f-name", "f-password", "f-square"].includes(form.id)) return;
+    event.preventDefault();
+    if (form.dataset.saving) return;
+    form.dataset.saving = "true";
+    const button = form.querySelector("button[type=submit]");
+    if (button) button.disabled = true;
+    const data = Object.fromEntries(new FormData(form).entries());
+    const say = (id, text) => { const node = document.getElementById(id); if (node) node.textContent = text; };
+    try {
+      if (form.id === "f-name") {
+        const result = await API.send("/api/auth/profile", "POST", { display_name: data.display_name });
+        if (S.boot && S.boot.user) S.boot.user.name = result.display_name || data.display_name;
+        toast("Name saved");
+        return render(true);
+      }
+      if (form.id === "f-password") {
+        say("password-error", "");
+        if (data.new_password !== data.repeat_password) return say("password-error", "The two new passwords do not match.");
+        await API.send("/api/auth/password/change", "POST",
+          { current_password: data.current_password, new_password: data.new_password });
+        closeLayer();
+        return toast("Password changed");
+      }
+      if (form.id === "f-square") {
+        say("square-error", "");
+        await API.send(`/api/integrations/pos/credentials?location_id=${encodeURIComponent(S.locationId)}`, "POST",
+          { access_token: data.access_token, location_id: data.location_id, environment: "production" });
+        closeLayer();
+        toast("Square connected");
+        S.data = null;
+        return loadView(true);
+      }
+    } catch (error) {
+      const text = plainError(error);
+      if (form.id === "f-password") return say("password-error", text);
+      if (form.id === "f-square") return say("square-error", text);
+      toast(text, "error");
+    } finally {
+      delete form.dataset.saving;
+      if (button) button.disabled = false;
+    }
+  });
 
   /* ---------- one item, in full ---------- */
   // Any item, however quiet. The point of the product is that the crème brûlée
@@ -3571,110 +3634,118 @@
   }
 
   /* ---------- first run tutorial ---------- */
-  // Six stops. Each one lands on a real part of the real product with the
+  // Five stops. Each one lands on a real part of the real product with the
   // operator's own numbers already in it, because a tour of empty boxes teaches
   // nothing. Advancing switches the screen, scrolls the thing into view, and
-  // lifts it clear of the blur so it is the one sharp thing on the page.
+  // rings it; the card sits beside it, never on top of it.
+  // `target` is a list of selectors, first match wins, so a stop survives a
+  // screen being reworked around it.
   const TOUR = [
     {
       view: "today",
-      target: "#daytiles",
-      title: "What today is worth",
-      body: "What you will ring, how many to make, and the hour to have the line ready. All three move as the day does.",
+      target: [".headline", "#daytiles"],
+      title: "Today's three numbers",
+      body: "What is expected to sell, how many to make, and the busiest hour. Each one sits next to a normal day of the same name.",
       place: "bottom",
     },
     {
       view: "today",
       pane: "make",
-      target: "#daypanes",
+      target: ["#daypanes .card-head", "#daypanes"],
       title: "How many to make",
-      body: "A number for every item, not just the big ones. Make sits above what will sell, because running out costs more than throwing away.",
-      place: "top",
-    },
-    {
-      view: "today",
-      pane: "why",
-      target: "#daypanes",
-      title: "Why it says that",
-      body: "Every reason is tested against your own sales before it is shown. If nothing is really moving today, it says that instead of inventing something.",
-      place: "top",
-    },
-    {
-      view: "today",
-      target: "[data-view='ordering']",
-      title: "What to buy",
-      body: "The forecast turned into a shopping list, by supplier. Count what is in the walk-in and it tells you what runs out when, and who to order it from.",
+      body: "A number for every item. Make sits above what is expected to sell, because running out costs more than throwing away. Adjust any line and say why.",
       place: "bottom",
+    },
+    {
+      view: "today",
+      target: ["[data-view='ordering']"],
+      title: "What to buy",
+      body: "The day turned into a shopping list, by supplier. Count what is in the walk-in and it says what runs out when, and who to order it from.",
+      place: "right",
     },
     {
       view: "history",
-      target: "#dayrows",
-      title: "We mark our own work",
-      body: "Every closed day, what it rang, what it kept, and how close the call was. The score is always against what was said before service, never a number we revised later.",
-      place: "top",
-    },
-    {
-      view: "settings",
-      tab: "menu",
-      target: "#menulist",
-      title: "Down to the ingredient",
-      body: "What each item is made of, so a busy Saturday turns into how much beef and how many buns. Correct anything we read wrong and it stays corrected.",
-      place: "top",
+      target: ["#dayrows .dayrow:not(.head)", "#dayrows", ".dayrows"],
+      title: "How close past calls were",
+      body: "Each closed day: what it sold, what it kept, and how close the morning number was. The score is always against what was said before service.",
+      place: "bottom",
     },
     {
       view: "today",
       pane: "make",
-      target: "#daypanes .dt tbody tr",
-      title: "Open anything",
-      body: "Tap any item name anywhere in Quantify for its whole record: which days it belongs to, what actually moves it, and how well we have called it before.",
-      place: "center",
+      target: ["#daypanes .dt tbody tr", "#daypanes"],
+      title: "Any item, in full",
+      body: "Tap any item name for its whole record: which days it belongs to, what changes it, and how close past calls were.",
+      place: "bottom",
     },
   ];
+
   function tourEligible() {
     if (store.get("quantify.tour") === "done") return false;
-    return S.view === "today" && !!S.data;
+    return S.view === "today" && !!S.data && !!document.getElementById("daypanes");
   }
 
-  function startTour(fromStart = true) {
+  // Works from any screen: the first stop is on Today, so Today is opened
+  // first. Replayed from Settings > Account through data-do="tour-start".
+  async function startTour(fromStart = true) {
     if (fromStart) S.tour = { step: 0 };
+    if (!S.tour) return;
+    if (S.view !== "today") {
+      S.view = "today"; S.todayPane = "make"; store.set("quantify.view", S.view);
+      window.scrollTo(0, 0);
+      await loadView();
+    }
     document.body.classList.add("tour-on");
-    paintTour();
+    return paintTour();
   }
 
-  function endTour(finished) {
+  // Every way out lands back on Today, at the top, with the tour marked done.
+  // closeLayer hands the tour here, so Escape and the scrim end it too.
+  function endTour() {
+    const wasElsewhere = S.view !== "today";
     document.body.classList.remove("tour-on");
-    layer.innerHTML = "";
     S.tour = null;
     store.set("quantify.tour", "done");
-    if (finished) tourFinale();
+    closeLayer();
+    if (wasElsewhere) {
+      S.view = "today"; S.todayPane = "make"; store.set("quantify.view", S.view);
+      loadView();
+    }
+    window.scrollTo(0, 0);
   }
 
   function tourFrame(box, pad) {
-    if (!box) return `<div class="tour-veil"></div>`;
+    if (!box) return `<div class="tour-veil" data-do="tour-end" style="inset:0"></div>`;
     const top = Math.max(0, box.top - pad);
     const bottom = Math.min(window.innerHeight, box.bottom + pad);
     const left = Math.max(0, box.left - pad);
     const right = Math.min(window.innerWidth, box.right + pad);
     const band = `top:${top}px;height:${Math.max(0, bottom - top)}px`;
     return `
-      <div class="tour-veil" style="top:0;left:0;right:0;height:${top}px"></div>
-      <div class="tour-veil" style="top:${bottom}px;left:0;right:0;bottom:0"></div>
-      <div class="tour-veil" style="${band};left:0;width:${left}px"></div>
-      <div class="tour-veil" style="${band};left:${right}px;right:0"></div>
+      <div class="tour-veil" data-do="tour-end" style="top:0;left:0;right:0;height:${top}px"></div>
+      <div class="tour-veil" data-do="tour-end" style="top:${bottom}px;left:0;right:0;bottom:0"></div>
+      <div class="tour-veil" data-do="tour-end" style="${band};left:0;width:${left}px"></div>
+      <div class="tour-veil" data-do="tour-end" style="${band};left:${right}px;right:0"></div>
       <div class="tour-ring" style="top:${top}px;left:${left}px;width:${Math.max(0, right - left)}px;height:${Math.max(0, bottom - top)}px"></div>`;
   }
 
+  const tourTarget = (stop) => (stop.target || []).map((sel) => document.querySelector(sel)).find(Boolean) || null;
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
   async function paintTour() {
+    if (!S.tour) return;
+    const tour = S.tour;
+    const sequence = paintTour._sequence = (paintTour._sequence || 0) + 1;
+    const current = () => S.tour === tour && sequence === paintTour._sequence;
     const stop = TOUR[S.tour.step];
-    if (!stop) return endTour(true);
+    if (!stop) return endTour();
 
     const needsView = stop.view && S.view !== stop.view;
-    const needsTab = stop.tab && S.settingsTab !== stop.tab;
-    if (needsView || needsTab) {
+    if (needsView) {
       S.view = stop.view;
-      if (stop.tab) S.settingsTab = stop.tab;
       store.set("quantify.view", S.view);
       await loadView();
+      if (!current()) return;
       // loadView repaints the whole screen, so the tour card has to go back on.
       document.body.classList.add("tour-on");
     }
@@ -3683,23 +3754,23 @@
       render();
     }
 
-    const node = stop.target ? document.querySelector(stop.target) : null;
+    const node = tourTarget(stop);
     if (node) {
       // A card taller than half the screen is scrolled to its top, so its
       // heading and first rows stay in sight with the tour card below them.
       const tall = node.getBoundingClientRect().height > window.innerHeight * 0.55;
       node.scrollIntoView({ behavior: "smooth", block: tall ? "start" : "center" });
-      await new Promise((resolve) => setTimeout(resolve, 420));
-      if (tall) window.scrollBy({ top: -80, behavior: "smooth" });
-      await new Promise((resolve) => setTimeout(resolve, tall ? 260 : 0));
+      await wait(420);
+      if (tall) { window.scrollBy({ top: -80, behavior: "smooth" }); await wait(260); }
     } else {
       window.scrollTo({ top: 0, behavior: "smooth" });
-      await new Promise((resolve) => setTimeout(resolve, 260));
+      await wait(260);
     }
+    if (!current()) return;
     const box = node ? node.getBoundingClientRect() : null;
     const last = S.tour.step === TOUR.length - 1;
-    layer.innerHTML = `${tourFrame(box, 8)}
-      <div class="tour-card ${stop.place || "center"}" role="dialog" aria-modal="true" aria-label="${e(stop.title)}">
+    openLayer(`${tourFrame(box, 8)}
+      <div class="tour-card" role="dialog" aria-modal="true" aria-label="${e(stop.title)}">
         <div class="tour-top">
           <span class="tour-count">${S.tour.step + 1} of ${TOUR.length}</span>
           <button class="tour-skip" data-do="tour-end">Skip</button>
@@ -3712,42 +3783,52 @@
           </button>
           <div class="tour-dots">${TOUR.map((_, i) =>
             `<i class="${i === S.tour.step ? "on" : ""}${i < S.tour.step ? " seen" : ""}"></i>`).join("")}</div>
-          <button class="btn accent" data-do="tour-next">${last ? "Finish" : "Next"}</button>
+          <button class="btn accent" data-do="tour-next" autofocus>${last ? "Finish" : "Next"}</button>
         </div>
-      </div>`;
-    placeTourCard(node, stop.place);
+      </div>`);
+    placeTourCard(node, stop.place, box);
   }
 
-  function placeTourCard(node, place) {
+  // The card goes beside the ring, never over it. On a phone it docks to the
+  // bottom edge (or the top edge when the ring is in the lower half), and the
+  // ring is cut short so it ends above the card.
+  function placeTourCard(node, place, box) {
     const card = layer.querySelector(".tour-card");
     if (!card) return;
-    if (!node || place === "center") return;  // the class already centres it
-    const box = node.getBoundingClientRect();
-    const size = card.getBoundingClientRect();
     const pad = 18;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
+    if (!node || !box) {
+      card.style.top = "50%"; card.style.left = "50%"; card.style.transform = "translate(-50%, -50%)";
+      return;
+    }
+    const size = card.getBoundingClientRect();
+
+    if (vw < 620) {
+      const lowerHalf = box.top + box.height / 2 > vh / 2;
+      card.style.left = "8px"; card.style.right = "8px"; card.style.transform = "none";
+      if (lowerHalf) { card.style.top = "8px"; card.style.bottom = "auto"; }
+      else { card.style.top = "auto"; card.style.bottom = "calc(8px + env(safe-area-inset-bottom))"; }
+      clampRing(box, card.getBoundingClientRect());
+      return;
+    }
 
     const fitsAbove = box.top - size.height - pad >= pad;
     const fitsBelow = box.bottom + size.height + pad <= vh - pad;
+    const fitsRight = vw - box.right >= size.width + pad * 2;
     let top;
     let left = box.left + box.width / 2 - size.width / 2;
 
-    if (place === "top" && fitsAbove) top = box.top - size.height - pad;
+    if (place === "right" && fitsRight) { left = box.right + pad; top = Math.max(pad, Math.min(box.top, vh - size.height - pad)); }
+    else if (place === "top" && fitsAbove) top = box.top - size.height - pad;
     else if (place === "bottom" && fitsBelow) top = box.bottom + pad;
-    else if (fitsAbove) top = box.top - size.height - pad;
     else if (fitsBelow) top = box.bottom + pad;
-    else if (vw - box.right >= size.width + pad * 2) {
-      // Room beside it. Better than on top of it.
-      left = box.right + pad;
-      top = Math.max(pad, Math.min(box.top, vh - size.height - pad));
-    } else if (box.left >= size.width + pad * 2) {
-      left = box.left - size.width - pad;
-      top = Math.max(pad, Math.min(box.top, vh - size.height - pad));
-    } else {
-      // A target that fills the screen. Nothing avoids covering some of it, so
-      // the card takes the bottom corner, where it hides the tail rather than
-      // the heading and the first rows.
+    else if (fitsAbove) top = box.top - size.height - pad;
+    else if (fitsRight) { left = box.right + pad; top = Math.max(pad, Math.min(box.top, vh - size.height - pad)); }
+    else if (box.left >= size.width + pad * 2) { left = box.left - size.width - pad; top = Math.max(pad, Math.min(box.top, vh - size.height - pad)); }
+    else {
+      // A target that fills the screen. The card takes the bottom corner and
+      // the ring is cut short above it, so what is ringed stays in view.
       left = vw - size.width - pad;
       top = vh - size.height - pad;
     }
@@ -3755,25 +3836,20 @@
     card.style.top = Math.max(pad, Math.min(top, vh - size.height - pad)) + "px";
     card.style.left = Math.max(pad, Math.min(left, vw - size.width - pad)) + "px";
     card.style.transform = "none";
+    clampRing(box, card.getBoundingClientRect());
   }
 
-  // The sign off. It holds long enough to read, then hands the app over.
-  function tourFinale() {
-    const node = document.createElement("div");
-    node.className = "finale";
-    node.innerHTML = `<div class="finale-in">
-      <div class="finale-tick">${icon("check")}</div>
-      <b>You are set up</b>
-      <span class="finale-mark">Quantify</span>
-    </div>`;
-    document.body.appendChild(node);
-    requestAnimationFrame(() => node.classList.add("run"));
-    setTimeout(() => {
-      node.classList.add("out");
-      setTimeout(() => node.remove(), 700);
-    }, 2400);
+  // Redraws the veil so the ring stops short of the card when the two overlap.
+  function clampRing(box, card) {
+    const overlaps = box.bottom > card.top && box.top < card.bottom && box.right > card.left && box.left < card.right;
+    if (!overlaps) return;
+    const cut = { top: box.top, bottom: box.bottom, left: box.left, right: box.right };
+    if (card.top > box.top + 40) cut.bottom = Math.min(box.bottom, card.top - 12);
+    else if (card.bottom < box.bottom - 40) cut.top = Math.max(box.top, card.bottom + 12);
+    else return;
+    layer.querySelectorAll(".tour-veil, .tour-ring").forEach((n) => n.remove());
+    layer.insertAdjacentHTML("afterbegin", tourFrame(cut, 8));
   }
-
   /* ---------- sheets ---------- */
   async function openDaySheet(dateISO) {
     layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
@@ -4116,7 +4192,6 @@
         S.onboarding.step = Math.max(0, S.onboarding.step - 1);
         return renderOnboarding();
       case "onb-finish": return finishOnboarding();
-      case "save-costs": return saveCosts();
       case "add-cost-line": {
         const host = document.getElementById("cost-lines");
         if (host) host.insertAdjacentHTML("beforeend", costLine({ name: "", amount: "", period: "month" }));
@@ -4152,12 +4227,10 @@
       case "more-days": return moreDays();
       case "more-orders": return moreOrders();
       case "cancel-start": return cancelStart();
-      case "cancel-next": return cancelNext();
       case "cancel-confirm": return cancelConfirm();
-      case "cancel-talk": return cancelTalk();
       case "close-toast": toastNode.className = "toast"; return;
-      case "tour-next": S.tour.step += 1; return paintTour();
-      case "tour-back": S.tour.step = Math.max(0, S.tour.step - 1); return paintTour();
+      case "tour-next": if (!S.tour) return; target.disabled = true; S.tour.step += 1; return paintTour();
+      case "tour-back": if (!S.tour) return; target.disabled = true; S.tour.step = Math.max(0, S.tour.step - 1); return paintTour();
       case "tour-end": return endTour(false);
       case "tour-start":
         // Replayed from Settings > Account: the tour begins on Today.
@@ -4187,6 +4260,9 @@
     event.preventDefault();
     const form = event.target;
     if (String(form.id || "").startsWith("f-supply-")) return;
+    if (["f-name", "f-password", "f-square"].includes(form.id)) return;
+    if (form.dataset.saving) return;
+    form.dataset.saving = "1";
     const data = Object.fromEntries(new FormData(form).entries());
     const button = form.querySelector("button[type=submit]");
     if (button) button.disabled = true;
@@ -4209,13 +4285,27 @@
         const result = await API.send("/api/auth/login", "POST", data);
         if (result.mfa_required) { S.challenge = result.challenge; return renderSignInCode(); }
         API.setCsrf(result.csrf_token);
+        // Signing in always lands on Today, whatever screen was open last time.
+        S.view = "today"; store.set("quantify.view", "today");
         return go("/app", true);
       }
       if (form.id === "f-code") {
         const result = await API.send("/api/auth/verify", "POST", { challenge: S.challenge, code: data.code });
         API.setCsrf(result.csrf_token);
         S.challenge = "";
+        S.view = "today"; store.set("quantify.view", "today");
         return go("/app", true);
+      }
+      if (form.id === "f-reset-start") {
+        await startReset(String(data.email || "").trim());
+        return;
+      }
+      if (form.id === "f-reset-complete") {
+        await API.send("/api/auth/password/reset/complete", "POST",
+          { email: (S.reset || {}).email || "", code: data.code, new_password: data.new_password });
+        S.reset = null;
+        toast("Password changed");
+        return go("/login", true);
       }
       if (form.id === "f-enable") {
         await API.send("/api/auth/totp/enable", "POST", { code: data.code });
@@ -4237,30 +4327,40 @@
         return renderOnboarding();
       }
       if (form.id === "f-location") {
-        await API.send(`/api/location?location_id=${encodeURIComponent(S.locationId)}`, "POST", data);
-        toast("Saved");
+        // One Save for the whole tab: the location, then the morning email.
+        // The time zone box shows a readable label; the id behind it is only
+        // replaced when somebody typed something else.
+        const setup = (S.data && S.data.setup) || {};
+        const shownLabel = (setup.timezone && setup.timezone.label) || (setup.location && setup.location.timezone) || "";
+        const typed = String(data.timezone_text || "").trim();
+        const place = { name: data.name, concept: data.concept, city: data.city, region: data.region,
+          open_hour: data.open_hour, close_hour: data.close_hour,
+          timezone: typed && typed !== shownLabel ? typed : data.timezone };
+        const saved = await API.send(`/api/location?location_id=${encodeURIComponent(S.locationId)}`, "POST", place);
+        const enabled = !!(form.elements.enabled && form.elements.enabled.checked);
+        const address = String(data.owner_email || "").trim();
+        await API.send(`/api/email/preferences?location_id=${encodeURIComponent(S.locationId)}`, "POST",
+          { owner_email: address, send_time: data.send_time || "05:30", enabled, include_week_ahead: true });
+        if (saved && saved.timezone && saved.timezone.confident === false && typed && typed !== shownLabel) {
+          toast("Saved, but that time zone was not recognised. Try a city or ZIP code.", "error");
+        } else toast("Saved");
         S.boot = await API.get("/api/bootstrap");
         S.data = null;
         return loadView(true);
       }
-      if (form.id === "f-email") {
-        await API.send(`/api/email/preferences?location_id=${encodeURIComponent(S.locationId)}`, "POST",
-          { ...data, enabled: form.elements.enabled.checked, include_week_ahead: true });
-        toast("Saved");
-        S.data = null;
-        return loadView(true);
-      }
       if (form.id === "f-composition") {
-        const components = String(data.parts || "").split(NEWLINE).map((line) => line.split("|").map((v) => v.trim()))
-          .filter((parts) => parts[0])
-          .map((parts) => ({
-            name: parts[0], role: (parts[1] || "other").toLowerCase(),
-            quantity: parts[2] || "", share: Number(parts[3] || 0) || 0, confidence: "high",
-          }));
+        const say = (text) => { const node = document.getElementById("recipe-error"); if (node) node.textContent = text; };
+        say("");
+        const components = recipeRowsRead();
+        if (!components.length || components.some((row) => !row.name || !(row.share > 0))) {
+          return say("Each part needs a name and a share of the food cost above zero.");
+        }
+        const total = components.reduce((n, row) => n + row.share, 0);
+        if (total < 95 || total > 105) return say(`The shares add up to ${Math.round(total)}%. Use between 95% and 105%.`);
         await API.send(`/api/menu/composition?location_id=${encodeURIComponent(S.locationId)}`, "PUT",
           { item_id: data.item_id, summary: data.summary, components });
         closeLayer();
-        toast("Saved");
+        toast("Recipe saved");
         S.menu = null;
         return loadView(true);
       }
@@ -4280,22 +4380,35 @@
     } catch (error) {
       toast(plainError(error), "error");
     } finally {
+      delete form.dataset.saving;
       if (button && document.contains(button)) button.disabled = false;
     }
   });
 
   /* ---------- actions ---------- */
+  // The sample location takes the owner's name, concept, city and time zone,
+  // so the first screen is theirs and not a stranger's restaurant.
   async function finishOnboarding() {
+    const button = document.querySelector("[data-do='onb-finish']");
+    if (button) button.disabled = true;
     try {
       const v = S.onboarding.values;
+      const tz = S.onboarding.tz && S.onboarding.tz.confident ? S.onboarding.tz : null;
+      const matched = tz && /,/.test(tz.matched || "") ? tz.matched.split(",").map((part) => part.trim()) : [];
       await API.send("/api/onboarding", "POST", {
         company: v.company, concept: v.concept, location_count: v.location_count,
         goal: (v.goals || []).join(", "), pos: v.pos, place: v.place,
+        city: matched[0] || v.place || "", region: matched[1] || "",
+        timezone: tz ? tz.timezone : "",
         open_hour: Number(v.open_hour ?? 7), close_hour: Number(v.close_hour ?? 21),
       });
-      toast("Welcome to Quantify");
+      session.remove(ONB_KEY);
+      S.view = "today"; store.set("quantify.view", "today");
       return go("/app", true);
-    } catch (error) { toast(error.message, "error"); }
+    } catch (error) {
+      toast(plainError(error), "error");
+      if (button && document.contains(button)) button.disabled = false;
+    }
   }
 
   async function runSync(target) {
@@ -4307,35 +4420,40 @@
       await API.send(`/api/integrations/${provider}/sync?location_id=${encodeURIComponent(S.locationId)}`, "POST",
         { days: provider === "pos" ? 1095 : provider === "events" ? 90 : 16, backfill_days: 1095 });
       toast("Synced");
-      await loadView();
+      // The connection rows carry the sync time, so setup is read again.
+      S.data = null;
+      await loadView(true);
     } catch (error) {
-      toast(error.message, "error");
+      toast(plainError(error), "error");
       target.disabled = false;
       target.textContent = label;
     }
   }
 
   async function previewEmail() {
-    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-      <div class="modal-wrap"><div class="modal wide"><div class="modal-head"><h2>Morning email</h2></div>
-      <div class="modal-body"><div class="skel" style="height:60vh;border-radius:10px"></div></div></div></div>`;
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal wide" role="dialog" aria-modal="true" aria-label="Morning email">
+        <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
+        <div class="modal-head"><h2>Morning email</h2></div>
+        <div class="modal-body"><div class="skel" style="height:60vh;border-radius:10px"></div></div></div></div>`);
     try {
       const result = await API.get(`/api/email/preview?location_id=${encodeURIComponent(S.locationId)}&date=${S.date}`);
-      layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-        <div class="modal-wrap"><div class="modal wide">
-          <button class="modal-close" data-do="close-layer">${icon("close")}</button>
-          <div class="modal-head"><h2>${e(result.subject)}</h2><p>Exactly what lands in the inbox.</p></div>
+      if (!layer.innerHTML) return;
+      openLayer(`<div class="scrim" data-do="close-layer"></div>
+        <div class="modal-wrap"><div class="modal wide" role="dialog" aria-modal="true" aria-label="Morning email">
+          <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
+          <div class="modal-head"><h2>${e(result.subject)}</h2></div>
           <div class="modal-body"><iframe class="emailframe" title="Email preview"></iframe></div>
-        </div></div>`;
+        </div></div>`);
       layer.querySelector("iframe").srcdoc = result.html;
-    } catch (error) { closeLayer(); toast(error.message, "error"); }
+    } catch (error) { closeLayer(); toast(plainError(error), "error"); }
   }
 
   async function sendTest() {
     try {
       const result = await API.send(`/api/email/send-test?location_id=${encodeURIComponent(S.locationId)}`, "POST", { date: S.date });
-      toast(result.status === "outbox" ? "Written to data/outbox so you can open it" : "Test sent");
-    } catch (error) { toast(error.message, "error"); }
+      toast(result.status === "outbox" ? "Saved, not sent" : "Test sent");
+    } catch (error) { toast(plainError(error), "error"); }
   }
 
   function openAdjust(target) {
@@ -4368,58 +4486,95 @@
     } catch (error) { toast(error.message, "error"); }
   }
 
-  async function composeItem(itemId, force) {
-    toast("Reading the item");
+  // Re-reads what an item is made of from its till label. A recipe somebody
+  // confirmed is only replaced after they say so.
+  async function composeItem(itemId, force, confirmed) {
+    const item = (S.menu?.items || []).find((row) => row.id === itemId);
+    if (force && !confirmed && recipeConfirmed(item)) {
+      openLayer(`<div class="scrim" data-do="close-layer"></div>
+        <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true" aria-label="Replace this recipe">
+          <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
+          <div class="modal-head"><h2>Replace your recipe?</h2>
+            <p>This recipe was confirmed here. Re-reading the till label replaces it with an estimate.</p></div>
+          <div class="modal-foot">
+            <button class="btn ghost" type="button" data-do="close-layer">Keep mine</button>
+            <button class="btn danger" type="button" data-settings="recompose-force" data-item="${e(itemId)}">Replace it</button>
+          </div>
+        </div></div>`);
+      return;
+    }
     try {
       const result = force
         ? await API.send(`/api/menu/composition?location_id=${encodeURIComponent(S.locationId)}`, "POST", { item_id: itemId })
         : await API.get(`/api/menu/composition?location_id=${encodeURIComponent(S.locationId)}&item_id=${encodeURIComponent(itemId)}`);
-      const item = (S.menu?.items || []).find((row) => row.id === itemId);
       if (item) item.composition = result;
       S.open.add(itemId);
       render(true);
-    } catch (error) { toast(error.message, "error"); }
+    } catch (error) { toast(plainError(error), "error"); }
   }
 
   function editComposition(itemId) {
     const item = (S.menu?.items || []).find((row) => row.id === itemId);
     const comp = item?.composition;
-    if (!comp) return toast("Nothing read for that item yet", "error");
-    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-      <div class="modal-wrap"><div class="modal wide">
-        <button class="modal-close" data-do="close-layer">${icon("close")}</button>
-        <div class="modal-head"><h2>Correct ${e(item.normalized_name)}</h2>
-          <p>Read from the till label. If you know the recipe, put it right.</p></div>
-        <form id="f-composition" class="modal-body">
+    if (!comp) return toast("Nothing to edit yet", "error");
+    const rows = comp.components && comp.components.length ? comp.components : [{}];
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal wide" role="dialog" aria-modal="true" aria-label="Edit recipe">
+        <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
+        <div class="modal-head"><h2>${e(item.normalized_name)}</h2>
+          <p>What goes into one ${e(item.production_unit || "item")}. Shares are of the food cost and should add up to about 100.</p></div>
+        <form id="f-composition" class="modal-body" autocomplete="off">
           <input type="hidden" name="item_id" value="${e(itemId)}">
-          <label class="field"><span>What this item is</span>
-            <input name="summary" value="${e(comp.summary)}" required></label>
-          <label class="field"><span>Parts, one per line</span>
-            <textarea name="parts" rows="8" required>${comp.components.map((c) => `${c.name} | ${c.role} | ${c.quantity || ""} | ${c.share}`).join(String.fromCharCode(10))}</textarea>
-            <small>Name, role, amount per unit, share of cost. Separate with a vertical bar.</small></label>
+          <label class="field"><span>In a sentence</span>
+            <input name="summary" value="${e(comp.summary || "")}" maxlength="400" required></label>
+          <div class="recipe-head"><span>Part</span><span>Role</span><span>Each</span><span>Share</span><span></span></div>
+          <div id="recipe-rows">${rows.map(recipeRow).join("")}</div>
+          <div class="btn-row" style="align-items:center">
+            <button class="btn sm" type="button" data-settings="recipe-add">Add a part</button>
+            <span class="small muted" id="recipe-total">Shares add up to ${Math.round(rows.reduce((n, c) => n + (Number(c.share) || 0), 0))}%</span>
+          </div>
+          <p class="form-error" id="recipe-error"></p>
           <div class="modal-foot" style="margin:6px -22px -20px">
             <button class="btn ghost" type="button" data-do="close-layer">Cancel</button>
-            <button class="btn accent" type="submit">Save as confirmed</button>
+            <button class="btn accent" type="submit">Save recipe</button>
           </div>
         </form>
-      </div></div>`;
+      </div></div>`);
   }
 
+  // Lines with no price come back flagged and are skipped when added. The
+  // flag is read from whichever field the server sends, or worked out here.
+  const importLineSkipped = (row) => row.ok === false || row.skipped === true || !(Number(row.price) > 0);
+
   async function menuImport(commit) {
-    const text = document.getElementById("menu-text")?.value || "";
-    if (!text.trim()) return toast("Paste some menu text first", "error");
+    if (menuImport._busy) return;
+    const box = document.getElementById("menu-text");
+    const text = box?.value || "";
+    if (!text.trim()) return toast("Type an item first", "error");
+    const out = document.getElementById("menu-preview-out");
+    menuImport._busy = true;
+    const buttons = [...root.querySelectorAll('[data-do="menu-preview"], [data-do="menu-import"]')];
+    buttons.forEach((button) => { button.disabled = true; });
     try {
       const result = await API.send(`/api/menu/import?location_id=${encodeURIComponent(S.locationId)}`, "POST", { text, commit });
-      if (commit) { toast(`${result.created} added, ${result.updated} updated`); return loadView(); }
-      document.getElementById("menu-preview-out").innerHTML = `
-        <div class="card" style="margin-top:14px;box-shadow:none;background:var(--surface-2)"><div class="card-body" style="display:grid;gap:8px">
-          <div class="eyebrow">Read as</div>
-          ${result.preview.map((row) => `<div style="display:flex;gap:10px;font-size:12.5px;align-items:baseline">
-            <b style="min-width:170px">${e(row.name)}</b>
-            <span class="muted">${e(row.interpretation.normalized_name)} · ${e(row.interpretation.item_family.replaceAll("-", " "))} · ${Math.round(row.interpretation.confidence * 100)}% sure</span>
-          </div>`).join("")}
-        </div></div>`;
-    } catch (error) { toast(error.message, "error"); }
+      if (commit) {
+        const skipped = Number(result.skipped || 0);
+        toast(`${num(result.created || 0)} added${result.updated ? `, ${num(result.updated)} updated` : ""}${skipped ? `, ${num(skipped)} skipped` : ""}`);
+        if (box) box.value = "";
+        if (out) out.innerHTML = "";
+        S.menu = null;
+        return loadView(true);
+      }
+      const rows = result.preview || [];
+      if (!out) return;
+      out.innerHTML = `<div class="menu-preview">
+        ${rows.length ? rows.map((row) => importLineSkipped(row)
+          ? `<div class="menu-preview-row warn"><b>${e(row.name)}</b><span>${e(row.reason || "No price found, so this line will be skipped")}</span></div>`
+          : `<div class="menu-preview-row"><b>${e(row.name)}</b><span>${e(row.category)} · ${money(row.price, true)}</span></div>`).join("")
+        : `<div class="menu-preview-row warn"><span>Nothing here reads as an item. Try one per line, like Pep slice, Slices, 4.25</span></div>`}
+      </div>`;
+    } catch (error) { toast(plainError(error), "error"); }
+    finally { menuImport._busy = false; buttons.forEach((button) => { button.disabled = false; }); }
   }
 
   function openLocationPicker() {
@@ -4459,11 +4614,13 @@
   }
 
   async function openTwoStep() {
+    const errorNode = document.getElementById("mfa-error");
+    if (errorNode) errorNode.textContent = "";
     try {
       const setup = await API.get("/api/auth/mfa/setup");
-      layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-        <div class="modal-wrap"><div class="modal wide">
-          <button class="modal-close" data-do="close-layer">${icon("close")}</button>
+      openLayer(`<div class="scrim" data-do="close-layer"></div>
+        <div class="modal-wrap"><div class="modal wide" role="dialog" aria-modal="true" aria-label="Turn on two-step sign in">
+          <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
           <div class="modal-head"><h2>Turn on two-step sign in</h2>
             <p>Scan the square with any authenticator app. After this, signing in asks for a six-digit code as well as your password.</p></div>
           <div class="modal-body">
@@ -4477,7 +4634,7 @@
                 </ol>
                 <div class="keybox" style="margin-top:14px">
                   <code>${e(setup.secret_grouped || "")}</code>
-                  <button class="icon-btn" type="button" data-do="copy" data-copy="${e(setup.secret || "")}" title="Copy key">${icon("copy")}</button>
+                  <button class="icon-btn" type="button" data-do="copy" data-copy="${e(setup.secret || "")}" aria-label="Copy key">${icon("copy")}</button>
                 </div>
               </div>
             </div>
@@ -4490,84 +4647,74 @@
               </div>
             </form>
           </div>
-        </div></div>`;
-    } catch (error) { toast(error.message, "error"); }
+        </div></div>`);
+    } catch (error) {
+      if (errorNode) errorNode.textContent = plainError(error);
+      else toast(plainError(error), "error");
+    }
   }
 
   function openTwoStepOff() {
-    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-      <div class="modal-wrap"><div class="modal">
-        <button class="modal-close" data-do="close-layer">${icon("close")}</button>
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true" aria-label="Turn off two-step sign in">
+        <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
         <div class="modal-head"><h2>Turn off two-step sign in</h2>
           <p>Your password alone will get into this account again. Enter it to confirm this is you.</p></div>
         <form id="f-disable-mfa" class="modal-body">
           <label class="field"><span>Your password</span><input name="password" type="password" autocomplete="current-password" required autofocus></label>
-          <p class="form-note">Any unused backup codes are destroyed, and the entry in your authenticator app stops working.</p>
+          <p class="form-note">Any unused backup codes stop working, and so does the entry in your authenticator app.</p>
           <div class="modal-foot" style="margin:6px -22px -20px">
             <button class="btn ghost" type="button" data-do="close-layer">Keep it on</button>
             <button class="btn danger" type="submit">Turn it off</button>
           </div>
         </form>
-      </div></div>`;
+      </div></div>`);
   }
 
   async function newRecoveryCodes() {
     try {
       const result = await API.send("/api/auth/recovery-codes", "POST", {});
-      layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-        <div class="modal-wrap"><div class="modal">
-          <button class="modal-close" data-do="close-layer">${icon("close")}</button>
+      openLayer(`<div class="scrim" data-do="close-layer"></div>
+        <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true" aria-label="Your backup codes">
+          <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
           <div class="modal-head"><h2>Your backup codes</h2>
-            <p>Each one works once. Put them somewhere that is not your phone. This is the only time they are shown.</p></div>
+            <p>Each one works once. Keep them somewhere that is not your phone. They are shown this once.</p></div>
           <div class="modal-body"><div class="codegrid">${result.codes.map((c) => `<code>${e(c)}</code>`).join("")}</div></div>
           <div class="modal-foot">
-            <button class="btn" data-do="copy" data-copy="${e(result.codes.join("\n"))}">Copy all</button>
-            <button class="btn primary" data-do="close-layer">Saved them</button></div>
-        </div></div>`;
+            <button class="btn" type="button" data-do="copy" data-copy="${e(result.codes.join("\n"))}">Copy all</button>
+            <button class="btn primary" type="button" data-do="close-layer">Saved them</button></div>
+        </div></div>`);
+      S.data = null;
       await loadView(true);
-    } catch (error) { toast(error.message, "error"); }
-  }
-
-  async function cancelNext() {
-    const f = S.cancelFlow;
-    f.detail = document.getElementById("cancel-detail")?.value || "";
-    try {
-      const result = await API.send("/api/billing/cancel/reason", "POST",
-        { reason: f.reason, detail: f.detail, wants_contact: false });
-      f.offer = result.offer;
-      f.stage = "offer";
-      renderCancelModal();
-    } catch (error) { toast(error.message, "error"); }
-  }
-
-  async function cancelTalk() {
-    const f = S.cancelFlow;
-    try {
-      await API.send("/api/billing/cancel/reason", "POST", { reason: f.reason, detail: f.detail, wants_contact: true });
-      closeLayer();
-      toast(
-        "Booked. Someone from the team will call you within one business day on the number "
-        + "on your account. Nothing has changed on your plan in the meantime.",
-        "ok", true,
-      );
-    } catch (error) { toast(error.message, "error"); }
+    } catch (error) { toast(plainError(error), "error"); }
   }
 
   async function cancelConfirm() {
+    const f = S.cancelFlow;
+    if (!f) return;
+    f.detail = document.getElementById("cancel-detail")?.value || "";
     try {
+      if (f.reason) {
+        // The reason is kept for whoever reads it; a failure to record it
+        // must not stop the cancellation itself.
+        try { await API.send("/api/billing/cancel/reason", "POST", { reason: f.reason, detail: f.detail, wants_contact: false }); }
+        catch (_) { /* the plan still ends */ }
+      }
       const result = await API.send("/api/billing/cancel", "POST", { immediate: false });
-      S.cancelFlow.stage = "done";
-      S.cancelFlow.message = result.message;
+      f.stage = "done";
+      f.message = result.message || "";
       renderCancelModal();
+      S.data = null;
       await loadView(true);
-    } catch (error) { toast(error.message, "error"); }
+    } catch (error) { toast(plainError(error), "error"); }
   }
 
   async function billingRedirect(path) {
     try {
       const result = await API.send(path, "POST", { plan: "standard" });
       if (result.url) window.location.href = result.url;
-    } catch (error) { toast(error.message, "error"); }
+      else toast(result.message || "Billing is not switched on for this account yet", "error");
+    } catch (error) { toast(plainError(error), "error"); }
   }
 
   document.addEventListener("keydown", (event) => {

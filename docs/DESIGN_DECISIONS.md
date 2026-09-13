@@ -1,64 +1,41 @@
-# Interface Design Decisions
+﻿# Interface design decisions
 
-## One product, not a page per feature
+## Five destinations
 
-The user asked for an AI-powered operating tool, not an application that exposes every brainstorm as a new dashboard. Quantify therefore has three work views and one setup area:
+| Destination | Purpose |
+|---|---|
+| Today | Make quantities, reasons, hourly demand, and the next two weeks |
+| Order | Counts, supplier assignments, prepared orders, and records of orders placed |
+| History | Closed days and expected-versus-sold accuracy |
+| Updates | Current operating observations and recent earlier updates |
+| Settings | Location, menu, costs, and account |
 
-- Brief
-- Outlook
-- Results
-- Setup
+The user explicitly requested Updates as a separate destination. It supplements the daily plan with persistent, dated observations. A person can request a new check with **Update me** without navigating through every other screen.
 
-Weather, events, menu interpretation, service timing, item movement, and email are features inside those workflows.
+## Today puts the work within reach
 
-## Editorial hierarchy
+The headline and three figures establish the day. A short stock strip and a small set of actions follow. One tabbed panel contains the make list, reasons, hourly demand, and two-week outlook. Item and day sheets expose details when requested. The default panel is the make list.
 
-The Brief reads like an operating memo:
+## Stable dimensions and visible data
 
-1. Headline
-2. Four decisive measures
-3. Ranked priorities
-4. Service curve
-5. Dense demand ledger
-6. Supporting context
-7. Menu-mix pressure
-8. Week ahead
+Content is bounded on a wide display. Headline typography does not scale with viewport width. The header and content share alignment; sticky navigation uses `overflow-x: clip` so an ancestor does not become an unintended scroll container. At 900px and below, five labeled buttons form a bottom navigation with a safe-area inset and matching reserved page space. Touch controls receive at least 44px height. Sheets fit the viewport and preserve close controls and keyboard focus.
 
-This order puts decisions before charts.
+Charts use blue expected values, dark actual values, and a green current/peak value. Line charts combine solid/dashed strokes with written keys, quantities, units, and periods. Color is never the only distinction. Necessary chart labels use readable text rather than low-contrast border colors.
 
-## No “AI app” visual clichés
+## Updates stay relevant
 
-The interface intentionally avoids:
+Important, unseen, unexpired conditions can appear in a bottom-right notice on opening or returning. Repeated item/time patterns may notify during a visible session near their window; opening the app does not replay them. These patterns describe aggregate sales, not an identified customer's expected return.
 
-- Gradient hero panels
-- Dozens of rounded statistic cards
-- Sparkle icons
-- Chatbot-first interaction
-- Floating glass panels
-- Decorative 3D illustrations
-- Repeated generic badges
-- Huge empty margins around little information
-- A separate dashboard for every data source
+Read and seen state persist per person. Expired or resolved observations move to recent history and lose their action buttons. An optional model can rank supplied observations; it cannot invent numerical claims or customer identities. The feed still works when a model is not configured.
 
-Cards are used only for coherent operating units. Ledgers and compact rows are used for comparable information.
+## Supplier handoff is explicit
 
-## Explainability without clutter
+Known supplier choices prefill website shortcuts. Other suppliers can use the same saved website, email, and representative details. Opening a supplier site or copying a prepared list does not place an order. The user confirms an order placed outside Quantify; configured email records success only after the mail provider accepts it. Failed or local-outbox mail keeps the prepared lines available. Connection help opens a draft in the user's mail app.
 
-The main screen shows only the most important reason. Deeper model information is available by opening an item. This is progressive disclosure: operators see the decision immediately, while skeptical owners can inspect analog days, component predictions, confidence, and overrides.
+## Location and cost claims are inspectable
 
-## Honest uncertainty
+Use matched geographic context for the selected location. Unknown geography must not borrow another city's weather or events. Statutory wage references include jurisdiction, effective date, and official source. Employer-specific payroll additions require real inputs. Missing costs stay unknown throughout the interface rather than appearing as zero.
 
-Quantify uses ranges and confidence. It does not replace uncertainty with false decimal precision. Low-confidence high-value items become explicit watch items.
+## Verification
 
-## Responsive behavior
-
-Desktop uses a fixed left navigation and dense operating canvas. iPad/mobile uses a bottom navigation while preserving the same hierarchy. No separate mobile product is required.
-
-## Accessibility
-
-- Native buttons, forms, tables/ledgers, and headings
-- Visible focus states
-- Meaningful text labels
-- Sufficient contrast
-- No information communicated by color alone
-- Screen-reader live regions for loading/errors/toasts
+Use isolated copied databases for browser review. Check navigation, saves, timing, expiry, failed requests, keyboard use, and narrow/wide layouts. Viewport screenshots are required for touch emulation with the installed Chromium; full-page screenshots disable its coarse-pointer mode. Automated geometry checks identify review candidates and do not establish accessibility conformance.

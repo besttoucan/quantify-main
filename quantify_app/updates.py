@@ -124,7 +124,8 @@ def time_patterns(conn: sqlite3.Connection, location_id: str, now: datetime) -> 
             f"{entry['name']} often sells at {window}",
             f"About {average} sell in this window, {round(share * 100)}% of this item's sales on those days. "
             "Check what is ready before that time.", evidence, now,
-            action={"view": "today", "item_id": item_id, "label": "See item"}, expires=end))
+            action={"view": "today", "item_id": item_id, "label": "See item"},
+            starts=end - timedelta(hours=2, minutes=30), expires=end))
     return sorted(candidates, key=lambda row: row["expires_at"])[:3]
 
 
@@ -248,10 +249,12 @@ def feed(conn: sqlite3.Connection, location_id: str, user_id: str,
         (active if note["state"] in {"active", "scheduled"} else earlier).append(note)
     active.sort(key=lambda n: (n["severity"] != "important", n["rank"]))
     alerts = [n for n in active if n["state"] == "active" and n["severity"] == "important" and not n["seen_at"] and n["unread"]]
+    timely = [n for n in active if n["state"] == "active" and n["kind"] == "pattern" and n["severity"] == "notice" and not n["seen_at"] and n["unread"]]
     check = conn.execute("SELECT checked_at FROM operating_update_checks WHERE location_id=?", (location_id,)).fetchone()
     return {"location_id": location_id, "checked_at": check["checked_at"] if check else None,
             "notes": active, "earlier": earlier[:20], "unread_count": sum(n["unread"] for n in active),
-            "notification": alerts[0] if alerts else None}
+            "notification": alerts[0] if alerts else None,
+            "timely_notification": timely[0] if timely else None}
 
 
 def acknowledge(conn: sqlite3.Connection, location_id: str, user_id: str,

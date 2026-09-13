@@ -1,68 +1,33 @@
-# Brand
+﻿# Quantify brand and interface
 
-## The name is the mark
+The word Quantify is the interface mark, set with wide letter spacing. Use the existing `.wordmark` and `.wordmark.lg` classes. The app does not place an illustrated mascot or an extra glyph beside the name.
 
-There is no illustrated logo. The word **QUANTIFY** set in uppercase with wide
-letter-spacing is the mark, next to a small dark square holding three stacked
-rules that get brighter toward the bottom: a reading, taken.
+## Color has a job
 
-A picture of a thing is weaker than the thing. An operator scanning a tablet at
-six in the morning needs to know where they are in one glance, and a word does
-that better than a symbol they have to learn.
-
-```html
-<span class="wordmark"><span class="glyph"></span>Quantify</span>
-```
-
-`.wordmark` and `.wordmark.lg` are the only two sizes. The glyph is drawn in CSS,
-so it never loads late and never pixelates. `web/assets/favicon.svg` is the same
-idea at 64 pixels.
-
-## Palette
-
-One neutral family, one accent. Colour carries meaning or it is not used.
-
-| Token | Value | Where |
+| Token | Value | Use |
 |---|---|---|
-| `--bg` | `#f7f7f5` | The page |
+| `--bg` | `#f7f7f5` | Page background |
 | `--surface` | `#ffffff` | Cards and rows |
-| `--rail` | `#f4f4f1` | Sidebar, a tint of the page rather than a slab of something else |
-| `--ink` | `#15171a` | Primary text |
-| `--ink-3` | `#797f88` | Secondary text |
-| `--line` | `#e7e6e2` | Hairline borders, the main structural device |
-| `--accent` | `#14634f` | Active state, positive change, the trust meter |
-| `--down` | `#a4402c` | Negative change only |
-| `--warn` | `#8a5a12` | Needs a look, never used for negative change |
+| `--rail` | `#f4f4f1` | Navigation background |
+| `--ink` | `#15171a` | Main text and actual sales series |
+| `--ink-2` | `#4b5058` | Necessary secondary text |
+| `--line` | `#e7e6e2` | Decorative card boundaries |
+| `--accent` | `#14634f` | Primary actions, selection, current/peak chart value |
+| `--series-1` | `#2f6f8f` | Expected sales series |
+| `--down` | `#a4402c` | Lower than comparison, with a signed number |
+| `--up` | `#17694f` | Higher than comparison, with a signed number |
+| `--warn` | `#8a5a12` | A condition that needs attention |
 
-Green never means "good". It means "more than normal". More is not always good,
-and the copy beside it always says which.
+Expected and sold lines also differ by dash pattern. Every series has a written key. Hourly bars use solid blue for expected demand and green for the peak; actual sales use dark ink. Pale border tokens are for decoration, never the only visible data mark. More sales is not automatically good: describe the change.
 
-## Type
+## Readable at the counter
 
-The system sans, tuned rather than replaced. No web fonts: the interface runs
-under a strict content security policy with no external origins, and a font that
-arrives late is worse than one that was always there.
+Use the system sans font. Financial and operating figures use tabular numbers. Keep necessary captions at least 12px, normal app text at 13px or above, and touch input text at 16px. Small decorative labels are not a substitute for readable explanations. Avoid growing the headline merely because the screen is wide: the operating table should remain easy to reach.
 
-- Display sizes carry tight tracking (`-.02em` to `-.03em`).
-- Micro labels are 10.5px uppercase at `.09em`, in `--ink-4`.
-- **Every number is tabular.** Columns must not shift when a figure updates
-  underneath the reader, and this interface updates itself.
-
-## Shape
-
-Radii climb with the size of the thing: 7px on chips, 10px on inputs and buttons,
-13px on cards, 18px on modals. Elevation is a hairline border plus a shadow of
-almost nothing. Nothing floats without a reason.
+Radii follow the existing 7/10/13/18px scale. Borders and restrained shadows separate related work. Use the established CSS regions when changing a component.
 
 ## Writing
 
-The rules live in `quantify_app/skills/plain-language.md` and are applied to both
-writers, so the product reads the same whether or not a model is connected.
+Use the business's name, location, actual records, and local time. Say when an input is a sample, an estimate, stale, or unknown. Cite a dated source for local wage references; employer-specific costs require that employer's figures.
 
-- Never an em dash.
-- Never a number without something to compare it against.
-- No marketing language. No dramatised shifts. It is a busy hour, not a battle.
-- Say the size of the change and the size of the doubt in the same breath.
-
-A test in `tests/test_quantify.py` fails the build if an em dash or a marketing
-word reaches anything an operator reads.
+State the practical action first, then the evidence. Give quantities their units and comparisons their reference period. Explain uncertainty without promising a sale, a customer's return, delivery, or a completed payment. The model-assisted writer follows `quantify_app/skills/plain-language.md`.

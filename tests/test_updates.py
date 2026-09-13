@@ -54,6 +54,20 @@ class OperatingUpdatesTests(unittest.TestCase):
             updates.acknowledge(conn, "one", "sam", [note_id], read=True, now=self.now)
             self.assertEqual(updates.feed(conn, "one", "sam", self.now)["unread_count"], 0)
 
+    def test_pattern_is_timely_only_within_its_window_and_never_an_opening_alert(self):
+        note = updates._note("pattern", "pattern", "notice", "Coffee window", "Check coffee.",
+                             "Four Sundays.", self.now, starts=self.now + timedelta(minutes=30),
+                             expires=self.now + timedelta(hours=2))
+        with connect(self.db) as conn:
+            updates.save_observations(conn, "one", [note], self.now)
+            early = updates.feed(conn, "one", "sam", self.now)
+            self.assertIsNone(early["timely_notification"])
+            current = updates.feed(conn, "one", "sam", self.now + timedelta(hours=1))
+            self.assertIsNone(current["notification"])
+            self.assertEqual(current["timely_notification"]["kind"], "pattern")
+            late = updates.feed(conn, "one", "sam", self.now + timedelta(days=2))
+            self.assertIsNone(late["timely_notification"])
+
     def test_refresh_preserves_receipt_and_resolves_removed_conditions(self):
         with connect(self.db) as conn:
             updates.save_observations(conn, "one", [self.note()], self.now)

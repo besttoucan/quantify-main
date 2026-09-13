@@ -2485,10 +2485,20 @@
 
   // After an order goes out: its typed numbers and added lines are done with,
   // and the list is read again so the lines show what is on order.
-  function afterOrder(g) {
-    const id = g.supplier ? g.supplier.id : "";
-    g.lines.forEach((line) => { delete S.order.edits[lineKey(line)]; });
-    S.order.extras = S.order.extras.filter((row) => (row.supplier_id || "") !== id);
+  function orderSnapshot(g) {
+    return { location: S.locationId, date: S.date, days: S.order.days,
+      edits: S.order.edits, quantities: Object.fromEntries(g.lines.map(line => [lineKey(line), S.order.edits[lineKey(line)]])),
+      extras: new Set(g.extras) };
+  }
+
+  function afterOrder(sent) {
+    if (S.locationId !== sent.location) return;
+    if (S.order.edits === sent.edits && S.date === sent.date && S.order.days === sent.days) {
+      Object.entries(sent.quantities).forEach(([key, value]) => {
+        if (S.order.edits[key] === value) delete S.order.edits[key];
+      });
+    }
+    S.order.extras = S.order.extras.filter(row => !sent.extras.has(row));
     saveExtras();
     S.order.log = null;
     return loadView(true);
@@ -2509,6 +2519,7 @@
       window.location.href = `mailto:${encodeURIComponent(s.order_email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
       return openOrderSheet(id, "mail");
     }
+    const sent = orderSnapshot(g);
     try {
       const r = await logOrder(id, "email", g);
       if (S.locationId !== loc || S.view !== "ordering") return;
@@ -2518,7 +2529,7 @@
         return toast(r.message || "The order was not sent. Try again.", "error", true);
       }
       toast("Sent");
-      return afterOrder(g);
+      return afterOrder(sent);
     } catch (error) { return toast(error.message, "error"); }
   }
 
@@ -2526,13 +2537,14 @@
     const loc = S.locationId;
     const g = findGroup(id);
     if (!g || !g.supplier) return;
+    const sent = orderSnapshot(g), sheetToken = openLayer._seq;
     try {
       const r = await logOrder(id, channel, g, channel === "mail-app" ? { confirmed: true } : {});
       if (S.locationId !== loc || S.view !== "ordering") return;
-      closeLayer();
+      if (sheetToken === openLayer._seq) closeLayer();
       const lands = r.order && r.order.expected_on ? whenLabel(r.order.expected_on) : "";
       toast(lands ? `Noted, lands ${lands}` : "Noted");
-      return afterOrder(g);
+      return afterOrder(sent);
     } catch (error) { return toast(error.message, "error"); }
   }
 
@@ -2836,14 +2848,14 @@
     countChain = countChain.then(async () => {
       try {
         const r = await API.send(`/api/supply/count?${query}`, "POST", body);
-        if (S.view !== "ordering" || S.locationId !== loc) return;
+        if (S.view !== "ordering" || S.locationId !== loc || S.date !== start || S.order.days !== days) return;
         const saved = (r && r.saved && r.saved[0]) || r || {};
         let line = saved.line && saved.line.suggested ? saved.line : (saved.suggested ? saved : null);
         if (!line) {
           // Until the count route answers with the line, the list is read
           // again and just this row is taken from it.
           const plan = await API.get(`/api/ordering?${query}&start=${start}&days=${days}`);
-          if (S.view !== "ordering" || S.locationId !== loc) return;
+          if (S.view !== "ordering" || S.locationId !== loc || S.date !== start || S.order.days !== days) return;
           line = (plan.lines || []).find((row) => lineKey(row) === key) || null;
           if (S.data && plan.ready) { S.data.counts_taken = plan.counts_taken; S.data.last_counted_at = plan.last_counted_at; }
         }
@@ -3314,7 +3326,9 @@
   }
 
   async function saveCosts() {
+    const location = S.locationId;
     const form = document.getElementById("f-costs");
+    if (!form) return;
     const body = form ? Object.fromEntries(new FormData(form).entries()) : {};
     body.categories = Array.from(document.querySelectorAll("[data-cost-category]")).map((node) => ({
       category: node.dataset.costCategory, percent: node.value === "" ? null : Number(node.value),
@@ -3327,12 +3341,14 @@
     const errorNode = document.getElementById("costs-error");
     if (errorNode) errorNode.textContent = "";
     try {
-      const saved = await API.send(`/api/costs?location_id=${encodeURIComponent(S.locationId)}`, "PUT", body);
+      const saved = await API.send(`/api/costs?location_id=${encodeURIComponent(location)}`, "PUT", body);
+      if (location !== S.locationId || !form.isConnected) return;
       S.costs = saved;
       const skipped = Array.isArray(saved.skipped) ? saved.skipped : [];
       toast(skipped.length ? `Saved, skipped ${skipped.join(", ")}` : "Saved");
       render(true);
     } catch (error) {
+      if (location !== S.locationId || !form.isConnected) return;
       const text = plainError(error);
       if (errorNode) errorNode.textContent = text;
       else toast(text, "error");
@@ -4548,6 +4564,7 @@
     if (target.dataset.htab) { S.historyTab = target.dataset.htab; return loadView(); }
     if (target.dataset.owin) { S.order.days = Number(target.dataset.owin); S.order.edits = {}; return loadView(); }
     if (target.dataset.stab) {
+      if (layer.contains(target)) closeLayer();
       // The tab paints from what is already in memory; only what it lacks is
       // fetched afterwards.
       const have = S.view === "settings" && S.data && S.data.setup && S.data.billing;
@@ -4797,6 +4814,7 @@
         return renderOnboarding();
       }
       if (form.id === "f-location") {
+        const location = S.locationId;
         // One Save for the whole tab: the location, then the morning email.
         // The time zone box shows a readable label; the id behind it is only
         // replaced when somebody typed something else.
@@ -4806,15 +4824,18 @@
         const place = { name: data.name, concept: data.concept, city: data.city, region: data.region,
           open_hour: data.open_hour, close_hour: data.close_hour,
           timezone: typed && typed !== shownLabel ? typed : data.timezone };
-        const saved = await API.send(`/api/location?location_id=${encodeURIComponent(S.locationId)}`, "POST", place);
+        const saved = await API.send(`/api/location?location_id=${encodeURIComponent(location)}`, "POST", place);
         const enabled = !!(form.elements.enabled && form.elements.enabled.checked);
         const address = String(data.owner_email || "").trim();
-        await API.send(`/api/email/preferences?location_id=${encodeURIComponent(S.locationId)}`, "POST",
+        await API.send(`/api/email/preferences?location_id=${encodeURIComponent(location)}`, "POST",
           { owner_email: address, send_time: data.send_time || "05:30", enabled, include_week_ahead: true });
+        if (location !== S.locationId || !form.isConnected) return;
         if (saved && saved.timezone && saved.timezone.confident === false && typed && typed !== shownLabel) {
           toast("Saved, but that time zone was not recognised. Try a city or ZIP code.", "error");
         } else toast("Saved");
-        S.boot = await API.get("/api/bootstrap");
+        const bootstrap = await API.get(`/api/bootstrap?location_id=${encodeURIComponent(location)}`);
+        if (location !== S.locationId || !form.isConnected) return;
+        S.boot = bootstrap;
         S.data = null;
         return loadView(true);
       }

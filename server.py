@@ -326,7 +326,8 @@ def _showcase(conn: sqlite3.Connection) -> dict[str, Any]:
            ORDER BY COALESCE(a.n, 0) DESC, l.name LIMIT 1"""
     ).fetchone()
     if location is None:
-        _SHOWCASE.update({"at": time.time(), "value": {"available": False}})
+        _SHOWCASE.update({"at": time.time(), "value": {"available": False,
+            "pricing": {"monthly": billing.PLANS["solo"]["monthly"], "plans": billing.public_catalog(), "trial_days": 14}}})
         return _SHOWCASE["value"]
 
     location_id = location["id"]
@@ -394,7 +395,7 @@ def _showcase(conn: sqlite3.Connection) -> dict[str, Any]:
         "brief": brief,
         "order": order,
         "days": transactions.day_list(conn, location_id, limit=6)["days"],
-        "pricing": {"monthly": billing.PLANS["standard"]["monthly"], "annual_monthly": billing.PLANS["standard"]["annual_monthly"]},
+        "pricing": {"monthly": billing.PLANS["solo"]["monthly"], "plans": billing.public_catalog(), "trial_days": 14},
     }
     _SHOWCASE.update({"at": time.time(), "value": value})
     return value
@@ -713,6 +714,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
 
         if path == "/api/webhooks/stripe" and method == "POST":
             raw = self._read_raw()
+            billing.verify_webhook_signature(raw, self.headers.get("Stripe-Signature"))
             with connect(DB_PATH) as conn:
                 self.json_response(billing.apply_stripe_event(conn, json.loads(raw.decode("utf-8") or "{}")))
             return
@@ -952,6 +954,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             company = str(data.get("company", "")).strip()
             if len(company) < 2:
                 raise ValueError("Tell us the name of the business")
+            billing.ensure_subscription(conn, organization_id)
             place = str(data.get("place", "")).strip()
             resolved = timezones.resolve(place) if place else timezones.resolve("")
             now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -965,6 +968,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             )
             created_location = None
             if data.get("add_location") and str(data.get("location_name", "")).strip():
+                billing.require_location_capacity(conn, organization_id)
                 location_id = f"loc-{uuid.uuid4().hex[:10]}"
                 conn.execute(
                     """INSERT INTO locations(
@@ -1000,6 +1004,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             sample_location = None
             opens, closes = _trading_hours(data)
             if not has_location:
+                billing.require_location_capacity(conn, organization_id)
                 sample_location = seed_workspace(
                     conn, organization_id,
                     concept=str(data.get("concept", "")),
@@ -1026,6 +1031,40 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                 "sample_location": bool(sample_location),
                 "open_hour": opens, "close_hour": closes,
             })
+            return True
+
+        if path == "/api/locations" and method == "POST":
+            data = self._read_json()
+            name = str(data.get("name", "")).strip()[:120]
+            concept = str(data.get("concept", "")).strip()[:120]
+            place = str(data.get("place", "")).strip()[:160]
+            region = str(data.get("region", "")).strip()[:40]
+            if len(name) < 2 or not concept or not place:
+                raise ValueError("Add a location name, what you serve, and its city")
+            place_query = f"{place}, {region}" if region and not place.upper().endswith(region.upper()) else place
+            resolved = timezones.resolve(str(data.get("timezone") or place_query))
+            if not resolved.get("confident"):
+                raise ValueError("Choose a recognised city or time zone before adding the location")
+            geo = timezones.resolve(place_query)
+            opens, closes = _trading_hours(data)
+            billing.ensure_subscription(conn, organization_id)
+            billing.require_location_capacity(conn, organization_id)
+            location_id = f"loc-{uuid.uuid4().hex[:10]}"
+            latitude, longitude = geo.get("latitude"), geo.get("longitude")
+            verified = latitude is not None and longitude is not None
+            conn.execute(
+                """INSERT INTO locations(id,organization_id,name,concept,address,city,region,postal_code,
+                      latitude,longitude,timezone,open_hour,close_hour,currency,active)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'USD',1)""",
+                (location_id, organization_id, name, concept, "", geo.get("city") or place,
+                 geo.get("region") or region, "",
+                 latitude if verified else 0, longitude if verified else 0, resolved["timezone"], opens, closes),
+            )
+            conn.execute("INSERT INTO settings(location_id,key,value) VALUES(?,'geography_status',?)",
+                         (location_id, "verified" if verified else "unverified"))
+            conn.commit()
+            self.json_response({"location": dict(_location(conn, location_id, organization_id)),
+                                "geography_status": "verified" if verified else "unverified"}, status=201)
             return True
 
         if path == "/api/bootstrap" and method == "GET":
@@ -1073,7 +1112,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             data = self._read_json()
             self.json_response(billing.start_checkout(
                 conn, organization_id, session["email"], session["display_name"],
-                str(data.get("plan", "standard")), f"{self._public_origin()}/",
+                str(data.get("plan", "solo")), f"{self._public_origin()}/",
             ))
             return True
         if path == "/api/billing/portal" and method == "POST":
@@ -1083,7 +1122,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             return True
         if path == "/api/billing/plan" and method == "POST":
             data = self._read_json()
-            self.json_response(billing.change_plan(conn, organization_id, str(data.get("plan", "standard"))))
+            self.json_response(billing.change_plan(conn, organization_id, str(data.get("plan", "solo"))))
             return True
         if path == "/api/billing/cancel/reason" and method == "POST":
             data = self._read_json()

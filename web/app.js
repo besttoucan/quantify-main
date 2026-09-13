@@ -268,8 +268,6 @@
     const caption = where.name
       ? `Running on ${e(where.name)}, a sample ${e(String(where.concept || "restaurant").toLowerCase())}, and its ${years} of sales.`
       : "The sample location is still being set up.";
-    const monthly = money(show.pricing?.monthly || 79);
-    const yearly = money(show.pricing?.annual_monthly || 69);
 
     root.innerHTML = `<div class="site">
       <header class="site-nav">
@@ -298,9 +296,12 @@
           <p>Quantify reads the register and learns what each item sells on each kind of day. Weather, holidays and what is on nearby are checked against your own sales, and dropped when they never moved them. Count what is in the walk-in and it says what to buy, from which supplier, and by when. Each closed day is scored, per item, against the number given the day before, and that score sits in History.</p>
         </section>
 
-        <section class="prose" id="pricing">
-          <h2>Price</h2>
-          <p>${monthly} per location, per month. ${yearly} a month paid yearly. No card to look around. Cancel from the account page.</p>
+        <section class="pricing" id="pricing">
+          <h2>Choose by the number of locations</h2>
+          <p>Both plans include Today, Order, History, recipes, Morning email and Updates. Square can connect; other registers use sample data until connected.</p>
+          ${planChoices(show.pricing?.plans || [])}
+          <p>Try it for 14 days without a card. Prices are in US dollars, billed monthly. Cancel from Account.</p>
+          <a class="btn accent" href="/signup" data-link="/signup">Create account</a>
         </section>
       </main>
 
@@ -378,7 +379,16 @@
           <table class="dt sample-list"><tbody>
             ${rows.map(([k, v]) => `<tr><td class="name">${e(k)}</td><td>${e(v)}</td></tr>`).join("")}
           </tbody></table>
-        </section></div>`;
+      </section></div>`;
+    }
+
+    if (demoTabs.tab === "updates") {
+      return `${top("Updates", "Observations from the sample location")}
+        <div class="stack"><section class="card">
+          <div class="card-head"><div><h2>${e(dLong(b.date))}</h2><p>Today's plan</p></div></div>
+          <div class="card-body"><p>${money(b.summary.expected_revenue)} expected, compared with ${money(b.comparison.sales)} on ${e(b.comparison.label)}.</p>
+            <p>${num(b.summary.expected_units)} items expected to sell. Open Today to see the make list.</p></div>
+        </section><section class="card"><div class="card-body"><p>Live observations appear in your workspace when its register and other sources are connected. This preview uses sample data.</p></div></section></div>`;
     }
 
     return `${top(e(dLong(b.date)), e(where.name || ""))}${sampleToday(b)}`;
@@ -2704,6 +2714,27 @@
     return "";
   }
 
+  function planChoices(plans, billing = null) {
+    if (!plans.length) return `<p class="muted">Plan details could not be loaded. Refresh to try again.</p>`;
+    return `<div class="plan-options">${plans.map((plan) => {
+      const current = billing?.plan?.code === plan.code;
+      const fits = !billing || (billing.location_allowance?.used || 0) <= plan.max_locations;
+      let action = "";
+      if (billing) {
+        if (current) action = `<span class="plan-choice-note">Current ${billing.status === "trialing" ? "trial " : ""}plan</span>`;
+        else if (!fits) action = `<span class="plan-choice-note">Your active locations exceed this plan.</span>`;
+        else if (billing.can_select_trial_plan) action = `<button class="btn" type="button" data-do="billing-trial-plan" data-plan="${e(plan.code)}">Use during trial</button>`;
+        else if (billing.has_subscription && billing.provider?.connected) action = `<button class="btn" type="button" data-do="billing-portal">Review in Manage billing</button>`;
+        else if (plan.checkout_ready) action = `<button class="btn" type="button" data-do="billing-checkout" data-plan="${e(plan.code)}">Continue to payment</button>`;
+        else action = `<span class="plan-choice-note">Payments are not set up for this plan yet.</span>`;
+      }
+      return `<article class="plan-option"><h3>${e(plan.name)}</h3>
+        <p class="plan-amount">${money(plan.monthly)}<span> per month</span></p>
+        <p>${plan.max_locations === 1 ? "One active location." : `Up to ${num(plan.max_locations)} active locations, ${money(plan.monthly / plan.max_locations)} each when all are used.`}</p>
+        <p>All operating tools included.</p>${action}</article>`;
+    }).join("")}</div>`;
+  }
+
   function settingsAccount(setup, billing) {
     const plan = billing.plan;
     const connected = !!(billing.provider && billing.provider.connected);
@@ -2750,11 +2781,12 @@
       </section>` : ""}
 
       <section class="card">
-        <div class="card-head"><div><h2>Plan</h2><p>${e(plan.blurb)}</p></div></div>
+        <div class="card-head"><div><h2>${e(plan.name)}</h2><p>${e(plan.blurb)}</p></div></div>
         <div class="plancard">
           <div>
-            <div class="price">${money(plan.monthly)}<span> per location, per month</span></div>
-            <div class="small muted" style="margin-top:5px">${money(plan.annual_monthly)} a month if you pay for the year.</div>
+            <div class="price">${money(plan.monthly_total)}<span>${plan.legacy ? " listed monthly price" : " per month for this account"}</span></div>
+            <p class="small muted">${num(billing.location_allowance?.used || 0)} active ${billing.location_allowance?.used === 1 ? "location" : "locations"}${billing.location_allowance?.limit ? ` of ${num(billing.location_allowance.limit)} included` : " on your existing allowance"}.</p>
+            ${plan.legacy ? `<p class="small muted">Your existing price and access stay as they are until you choose a change.</p>` : ""}
             ${connected && state ? `<p class="plan-state">${e(state)}</p>` : ""}
           </div>
           ${connected ? `<div class="plan-side">
@@ -2764,8 +2796,8 @@
                    <div style="margin-top:4px;font-weight:600">${e(billing.payment_method.brand || "Card")} ending ${e(billing.payment_method.last4)}</div>
                    <div class="small muted">Expires ${e(billing.payment_method.expires || "")}</div></div>`
               : `<div class="small muted">No card on file yet.</div>`}
-            <button class="btn ${billing.payment_method ? "" : "accent"}" type="button" data-do="billing-portal">${billing.payment_method ? "Update card" : "Add a card"}</button>
-            ${!billing.payment_method && !cancelling ? `<button class="btn" type="button" data-do="billing-checkout">Start the plan</button>` : ""}
+            ${billing.has_subscription ? `<button class="btn" type="button" data-do="billing-portal">Manage billing</button>` : ""}
+            ${!billing.has_subscription && !cancelling && billing.checkout_ready ? `<button class="btn" type="button" data-do="billing-checkout" data-plan="${e(plan.code)}">Continue to payment</button>` : ""}
           </div>` : ""}
         </div>
         ${billing.invoices && billing.invoices.length ? `<div style="border-top:1px solid var(--line)">
@@ -2775,6 +2807,19 @@
             <span>${inv.url ? `<a class="btn sm" href="${e(inv.url)}" target="_blank" rel="noopener">Receipt ${icon("external")}</a>` : `<span class="tag plain">${e(inv.status)}</span>`}</span>
           </div>`).join("")}</div>` : ""}
         ${connected ? "" : `<div class="card-foot">Billing is not switched on for this account yet.</div>`}
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h2>Plans</h2><p>All operating tools are included. Choose by the number of active locations.</p></div></div>
+        <div class="card-body">${planChoices(billing.plans || [], billing)}</div>
+        <div class="card-foot">Monthly prices in US dollars. A trial choice takes no payment. Paid changes are confirmed through Manage billing.</div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h2>Locations</h2><p>Each location has its own register, menu, hours and history.</p></div></div>
+        <div class="card-body"><div class="btn-row">
+          <button class="btn" type="button" data-do="location-add" ${billing.location_allowance?.remaining === 0 ? "disabled" : ""}>Add location</button>
+        </div>${billing.location_allowance?.remaining === 0 ? `<p class="small muted">All ${num(billing.location_allowance.limit)} included locations are in use. Choose a larger plan above to add another.</p>` : ""}</div>
       </section>
 
       ${!connected ? "" : cancelling ? `<section class="card">
@@ -2813,6 +2858,31 @@
             <button class="btn ghost" type="button" data-do="close-layer">Cancel</button>
             <button class="btn accent" type="submit">Change password</button>
           </div>
+        </form>
+      </div></div>`);
+  }
+
+  function openAddLocation() {
+    if (!toastNode.classList.contains("error") && !toastNode.classList.contains("hold")) toastNode.className = "toast";
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true" aria-label="Add location">
+        <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
+        <div class="modal-head"><h2>Add location</h2><p>Starts with an empty menu and history. Connect its register or add items in Settings.</p></div>
+        <form id="f-new-location" class="modal-body">
+          <label class="field"><span>Location name</span><input name="name" required minlength="2" maxlength="120"></label>
+          <label class="field"><span>What you serve</span><input name="concept" required maxlength="120" placeholder="Bakery, cafe, pizza shop"></label>
+          <div class="form-grid two">
+            <label class="field"><span>City</span><div class="typeahead"><input name="place" required data-typeahead autocomplete="off" placeholder="Denver"></div></label>
+            <label class="field"><span>State or region</span><input name="region" maxlength="40" placeholder="CO"></label>
+          </div>
+          <details><summary class="btn ghost">Set the time zone yourself</summary><label class="field"><span>Time zone</span><input name="timezone" placeholder="Mountain time"></label></details>
+          <div class="form-grid two">
+            <label class="field"><span>Opens</span><select name="open_hour">${hourOptions(7, 0, 14)}</select></label>
+            <label class="field"><span>Closes</span><select name="close_hour">${hourOptions(21, 14, 28)}</select></label>
+          </div>
+          <p class="small muted">Weather and nearby events wait until this place is matched.</p>
+          <p class="form-error" id="new-location-error"></p>
+          <div class="btn-row"><button class="btn ghost" type="button" data-do="close-layer">Cancel</button><button class="btn accent" type="submit">Add location</button></div>
         </form>
       </div></div>`);
   }
@@ -2928,7 +2998,7 @@
   // submit handler already stops the page reload and re-enables the button.
   document.addEventListener("submit", async (event) => {
     const form = event.target;
-    if (!["f-name", "f-password", "f-square"].includes(form.id)) return;
+    if (!["f-name", "f-password", "f-square", "f-new-location"].includes(form.id)) return;
     event.preventDefault();
     if (form.dataset.saving) return;
     form.dataset.saving = "true";
@@ -2937,6 +3007,16 @@
     const data = Object.fromEntries(new FormData(form).entries());
     const say = (id, text) => { const node = document.getElementById(id); if (node) node.textContent = text; };
     try {
+      if (form.id === "f-new-location") {
+        say("new-location-error", "");
+        const result = await API.send("/api/locations", "POST", data);
+        S.locationId = result.location.id; store.set("quantify.location", S.locationId);
+        S.boot = await API.get(`/api/bootstrap?location_id=${encodeURIComponent(S.locationId)}`);
+        S.date = S.boot.today; resetLocationState(); closeLayer();
+        S.settingsTab = "location"; store.set("quantify.stab", "location");
+        toast("Location added. Connect its register to bring in its menu and sales.");
+        return loadView();
+      }
       if (form.id === "f-name") {
         const result = await API.send("/api/auth/profile", "POST", { display_name: data.display_name });
         if (S.boot && S.boot.user) S.boot.user.name = result.display_name || data.display_name;
@@ -2964,6 +3044,7 @@
       const text = plainError(error);
       if (form.id === "f-password") return say("password-error", text);
       if (form.id === "f-square") return say("square-error", text);
+      if (form.id === "f-new-location") return say("new-location-error", text);
       toast(text, "error");
     } finally {
       delete form.dataset.saving;
@@ -3822,7 +3903,17 @@
       case "order-reset": S.order.edits = {}; return render(true);
       case "order-add": return openOrderAdd();
       case "billing-portal": return billingRedirect("/api/billing/portal");
-      case "billing-checkout": return billingRedirect("/api/billing/checkout");
+      case "billing-checkout": return billingRedirect("/api/billing/checkout", target.dataset.plan);
+      case "location-add": return openAddLocation();
+      case "billing-trial-plan":
+        if (target.disabled) return;
+        target.disabled = true;
+        try {
+          const result = await API.send("/api/billing/plan", "POST", { plan: target.dataset.plan });
+          toast(result.message); S.data = null; await loadView(true);
+        } catch (error) { toast(plainError(error), "error"); }
+        finally { target.disabled = false; }
+        return;
       case "billing-resume":
         try { const r = await API.send("/api/billing/resume", "POST", {}); toast(r.message); await loadView(); }
         catch (error) { toast(error.message, "error"); }
@@ -3851,7 +3942,7 @@
     event.preventDefault();
     const form = event.target;
     if (String(form.id || "").startsWith("f-supply-")) return;
-    if (["f-name", "f-password", "f-square"].includes(form.id)) return;
+    if (["f-name", "f-password", "f-square", "f-new-location"].includes(form.id)) return;
     if (form.dataset.saving) return;
     form.dataset.saving = "1";
     const data = Object.fromEntries(new FormData(form).entries());
@@ -4300,9 +4391,9 @@
     } catch (error) { toast(plainError(error), "error"); }
   }
 
-  async function billingRedirect(path) {
+  async function billingRedirect(path, plan) {
     try {
-      const result = await API.send(path, "POST", { plan: "standard" });
+      const result = await API.send(path, "POST", { plan: plan || S.data?.billing?.plan?.code || "solo" });
       if (result.url) window.location.href = result.url;
       else toast(result.message || "Billing is not switched on for this account yet", "error");
     } catch (error) { toast(plainError(error), "error"); }

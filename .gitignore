@@ -23,3 +23,9 @@ QUANTIFY/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code build worktrees (git worktree checkouts, never committed)
+.claude/worktrees/
+
+# Live agent coordination log (Claude and Codex); lives on disk, not in history
+AGENT_COORDINATION.md

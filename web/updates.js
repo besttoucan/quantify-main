@@ -101,7 +101,7 @@ window.QuantifyUpdates = (() => {
     function tryNotice() {
       clearTimeout(noticeTimer); noticeTimer = null;
       const current = synchronize(), note = pendingNotice;
-      if (!running || !note || !isLive(note) || note.severity !== "important" || shown.has(String(note.id)) || note.seen_at || popup) return;
+      if (!running || !note || !isLive(note) || shown.has(String(note.id)) || note.seen_at || popup) return;
       if (blocked() || busy) { noticeTimer = setTimeout(tryNotice, 2500); return; }
       const holder = document.createElement("aside");
       holder.className = "updates-notice";
@@ -109,7 +109,7 @@ window.QuantifyUpdates = (() => {
       holder.setAttribute("role", "status");
       holder.setAttribute("aria-live", "polite");
       holder.setAttribute("aria-atomic", "true");
-      holder.innerHTML = `<div class="updates-notice-head"><span class="updates-priority">Needs a look</span>
+      holder.innerHTML = `<div class="updates-notice-head"><span class="${note.severity === "important" ? "updates-priority" : "updates-state"}">${note.severity === "important" ? "Needs a look" : "Sales pattern"}</span>
         <button type="button" class="updates-dismiss" data-update-dismiss aria-label="Dismiss update"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
         <h2>${escape(note.title)}</h2><p>${escape(note.body)}</p>
         <button type="button" class="btn" data-update-view="${escape(note.id)}">View update</button>`;
@@ -119,21 +119,23 @@ window.QuantifyUpdates = (() => {
       const ticket = { epoch, sequence, key: keyFor(current), location: current.locationId };
       void acknowledgeShown(note, ticket);
     }
-    function considerNotice() {
-      const candidate = feed?.notification;
-      pendingNotice = candidate && isLive(candidate) && candidate.severity === "important" ? candidate : null;
+    function considerNotice(timely = false) {
+      const important = feed?.notification, pattern = timely ? feed?.timely_notification : null;
+      pendingNotice = important && isLive(important) && important.severity === "important" ? important :
+        pattern && isLive(pattern) && ["important", "notice"].includes(pattern.severity) ? pattern : null;
       tryNotice();
     }
 
-    function load({ refresh = false, notify = false } = {}) {
+    function load({ refresh = false, notify = false, timely = false } = {}) {
       const current = synchronize();
       if (!current.locationId) return Promise.resolve(null);
       if (foreground) {
         foreground.notify ||= notify;
+        foreground.timely ||= timely;
         // A requested fresh check can replace an older read, but never another fresh check.
         if (!refresh || busy === "refresh" || busy === "read") return foreground.promise;
       }
-      const ticket = ticketFor(current), work = { notify, promise: null };
+      const ticket = ticketFor(current), work = { notify, timely, promise: null };
       busy = refresh ? "refresh" : "load"; error = ""; failedAction = null; foreground = work; render();
       work.promise = (async () => {
         try {
@@ -149,7 +151,7 @@ window.QuantifyUpdates = (() => {
         } finally {
           if (stillCurrent(ticket)) {
             busy = ""; foreground = null; render();
-            if (work.notify && !error) considerNotice();
+            if (work.notify && !error) considerNotice(work.timely);
           }
         }
       })();
@@ -241,7 +243,7 @@ window.QuantifyUpdates = (() => {
       const note = notes().find(row => String(row.id) === control.dataset.updateAction);
       if (note?.action && ["today", "ordering", "settings"].includes(note.action.view) && ["active", "scheduled"].includes(stateOf(note))) onNavigate(note.action);
     }
-    function check() { if (running && !document.hidden) void load({ notify: true }); }
+    function check(timely = false) { if (running && !document.hidden) void load({ notify: true, timely }); }
     function visibility() { if (!document.hidden) { check(); tryNotice(); } }
     function attachListeners() {
       if (listeners) return;
@@ -249,7 +251,7 @@ window.QuantifyUpdates = (() => {
     }
     function start() {
       synchronize(); attachListeners();
-      if (!running) { running = true; checkTimer = setInterval(check, 5 * 60 * 1000); }
+      if (!running) { running = true; checkTimer = setInterval(() => check(true), 5 * 60 * 1000); }
       return load({ notify: true });
     }
     function stop() {

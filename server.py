@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import mimetypes
 import os
@@ -20,10 +21,13 @@ from urllib.parse import parse_qs, urlparse
 
 from quantify_app import ai, billing, costs, intraday, localtime, ordering, supply, timezones, transactions
 from quantify_app.auth import (
+    EMAIL_CODE_MINUTES,
     auth_state,
     begin_login,
+    change_password,
     clear_cookie_header,
     complete_login,
+    complete_password_reset,
     confirm_email,
     cookie_header,
     create_owner,
@@ -37,12 +41,15 @@ from quantify_app.auth import (
     revoke_session,
     session_from_token,
     start_email_verification,
+    start_password_reset,
 )
 from quantify_app.connectors import (
     process_square_webhook,
     provider_readiness,
     refresh_events,
     refresh_weather,
+    save_square_credentials,
+    square_status,
     sync_square_orders,
 )
 from quantify_app.database import connect, initialize
@@ -52,6 +59,7 @@ from quantify_app.email_brief import (
     mail_provider,
     preferences as email_preferences,
     send_due_briefs,
+    send_password_reset_code,
     send_verification_code,
     update_preferences,
 )
@@ -93,6 +101,66 @@ def parse_date(value: str | None, fallback: date | None = None) -> date:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise ValueError("Dates must look like 2026-08-11") from exc
+
+
+def _int(value: Any, default: int | None, low: int, high: int, label: str) -> int:
+    """A whole number from request input, or a sentence a person can act on.
+
+    Blank means `default`. Anything else has to read as a number and sit
+    between `low` and `high`, or the reply says so in the words the screen
+    uses ("Days must be a whole number between 1 and 14"). Python's own
+    wording for a bad int never reaches the interface.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if default is None:
+            raise ValueError(f"{label} is required")
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a whole number between {low} and {high}")
+    try:
+        number = float(str(value).strip().replace(",", ""))
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be a whole number between {low} and {high}") from None
+    if number != number or number != int(number) or not (low <= number <= high):
+        raise ValueError(f"{label} must be a whole number between {low} and {high}")
+    return int(number)
+
+
+def _float(value: Any, default: float | None, low: float, high: float, label: str) -> float:
+    """A number from request input, with the same manners as `_int`."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if default is None:
+            raise ValueError(f"{label} is required")
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a number between {low:g} and {high:g}")
+    try:
+        number = float(str(value).strip().replace(",", ""))
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be a number between {low:g} and {high:g}") from None
+    if number != number or not (low <= number <= high):
+        raise ValueError(f"{label} must be a number between {low:g} and {high:g}")
+    return number
+
+
+# Fragments that mean an error message was written by Python, not for a person.
+_PYTHON_TELLS = (
+    "int()", "float(", "nonetype", "not subscriptable", "not iterable", "invalid literal",
+    "could not convert", "has no attribute", "object is not", "unsupported operand",
+    "traceback", "keyerror", "typeerror", "valueerror", "attributeerror",
+)
+NOT_UNDERSTOOD = "That request was not understood"
+
+
+def _plain_error(exc: BaseException) -> str:
+    """The message a 400 carries: the sentence that was written for a person, or a plain stand-in."""
+    text = str(exc).strip()
+    if not text or len(text) > 300 or "\n" in text:
+        return NOT_UNDERSTOOD
+    lowered = text.lower()
+    if any(tell in lowered for tell in _PYTHON_TELLS):
+        return NOT_UNDERSTOOD
+    return text
 
 
 def _json(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -172,13 +240,18 @@ def _data_version(conn: sqlite3.Connection, organization_id: str, location_id: s
         f"SELECT MAX(date) AS a, COUNT(*) AS b FROM sales WHERE location_id IN ({scope})",
         f"SELECT MAX(scored_at) AS a, COUNT(*) AS b FROM day_accuracy WHERE location_id IN ({scope})",
         f"SELECT MAX(updated_at) AS a, COUNT(*) AS b FROM forecast_overrides WHERE location_id IN ({scope})",
+        f"SELECT MAX(counted_at) AS a, COUNT(*) AS b FROM stock_counts WHERE location_id IN ({scope})",
+        f"SELECT MAX(sent_at) AS a, COUNT(*) AS b FROM purchase_orders WHERE location_id IN ({scope})",
     ):
         row = conn.execute(sql, (organization_id,)).fetchone()
         parts.append(f"{row['a']}:{row['b']}" if row else "")
+    # Written text is keyed by menu item, or by "<location>:<date>" for a day.
+    # Both are matched to this organisation's locations and nothing else.
     row = conn.execute(
         f"""SELECT MAX(created_at) AS a FROM ai_generations
-            WHERE subject LIKE '%' OR subject IN (SELECT id FROM menu_items WHERE location_id IN ({scope}))""",
-        (organization_id,),
+            WHERE subject IN (SELECT id FROM menu_items WHERE location_id IN ({scope}))
+               OR substr(subject, 1, instr(subject, ':') - 1) IN ({scope})""",
+        (organization_id, organization_id),
     ).fetchone()
     parts.append(str(row["a"] if row else ""))
     if location_id:
@@ -239,7 +312,7 @@ def _location_today(conn: sqlite3.Connection, location_id: str) -> date:
 
     A place that shuts at two in the morning is still working on yesterday at
     one, so the date the interface defaults to has to come from the location
-    rather than from wherever the server happens to be running.
+    and not from wherever the server happens to be running.
     """
     row = conn.execute(
         "SELECT timezone,open_hour,close_hour FROM locations WHERE id=?", (location_id,)
@@ -255,7 +328,7 @@ def _location_today(conn: sqlite3.Connection, location_id: str) -> date:
 def _trading_hours(data: dict[str, Any]) -> tuple[int, int]:
     """Opening and closing hour, with a close after midnight stored past 24.
 
-    Keeping "closes at 2 AM" as 26 rather than 2 means every span in the product
+    Keeping "closes at 2 AM" as 26 instead of 2 means every span in the product
     stays a plain subtraction. A bar open 11 to 2 is a fifteen hour day, and
     nothing downstream needs a special case for it.
     """
@@ -457,12 +530,48 @@ def _composition_for(conn: sqlite3.Connection, location_id: str, item_id: str, f
     }
 
 
+# Static files are read once per process and kept with their validator, so a
+# revalidation from a tablet costs a dictionary lookup and a 304.
+_STATIC: dict[str, tuple[float, bytes, str]] = {}
+_STATIC_LOCK = threading.Lock()
+
+
+def _static_file(target: Path) -> tuple[bytes, str]:
+    """The bytes of one file under web/ and a short ETag for them."""
+    stamp = target.stat().st_mtime
+    key = str(target)
+    with _STATIC_LOCK:
+        cached = _STATIC.get(key)
+        if cached and cached[0] == stamp:
+            return cached[1], cached[2]
+    content = target.read_bytes()
+    etag = '"' + hashlib.sha1(content).hexdigest()[:16] + '"'
+    with _STATIC_LOCK:
+        _STATIC[key] = (stamp, content, etag)
+    return content, etag
+
+
 class QuantifyHandler(BaseHTTPRequestHandler):
     server_version = "Quantify/3.0"
+    # Keep-alive. Every response carries a Content-Length, so a browser can
+    # fetch the ten files and calls an open needs over one connection instead
+    # of a handshake each, and never reuses a socket the server has dropped.
+    protocol_version = "HTTP/1.1"
+    # The request body, once read. Set per request in _dispatch.
+    _body: bytes | None = None
 
     def log_message(self, fmt: str, *args: Any) -> None:
         if os.getenv("QUANTIFY_QUIET", "0") != "1":
             super().log_message(fmt, *args)
+
+    def _write(self, body: bytes) -> None:
+        """Send the body and flush it. A client that has gone is not an error worth logging."""
+        try:
+            if body:
+                self.wfile.write(body)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            self.close_connection = True
 
     def _headers(self, content_type: str, content_length: int, status: int = 200, extra: dict[str, str] | None = None) -> None:
         self.send_response(status)
@@ -477,15 +586,20 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
             "script-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'",
         )
-        self.send_header("Cache-Control", "no-store" if content_type.startswith("application/json") else "no-cache")
+        if not (extra and "Cache-Control" in extra):
+            self.send_header("Cache-Control", "no-store" if content_type.startswith("application/json") else "no-cache")
         for key, value in (extra or {}).items():
             self.send_header(key, value)
         self.end_headers()
 
     def json_response(self, payload: Any, status: int = 200, extra: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
-        self._headers("application/json; charset=utf-8", len(body), status, extra)
-        self.wfile.write(body)
+        try:
+            self._headers("application/json; charset=utf-8", len(body), status, extra)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            self.close_connection = True
+            return
+        self._write(body)
 
     def _cookie_token(self) -> str | None:
         raw = self.headers.get("Cookie", "")
@@ -507,21 +621,38 @@ class QuantifyHandler(BaseHTTPRequestHandler):
         return self.client_address[0]
 
     def _public_origin(self) -> str:
-        scheme = self.headers.get("X-Forwarded-Proto", "http")
-        host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "localhost"
+        # Forwarded headers are read on the same condition as the client
+        # address: only behind a proxy this process was told to trust.
+        scheme = "http"
+        host = self.headers.get("Host") or "localhost"
+        if os.getenv("QUANTIFY_TRUST_PROXY", "0") == "1":
+            scheme = (self.headers.get("X-Forwarded-Proto") or scheme).split(",", 1)[0].strip() or "http"
+            host = (self.headers.get("X-Forwarded-Host") or host).split(",", 1)[0].strip() or host
         return f"{scheme}://{host}"
 
-    def _auth_bypass(self) -> dict[str, Any] | None:
+    def _auth_bypass(self, conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
         if os.getenv("QUANTIFY_AUTH_BYPASS", "0") != "1":
             return None
-        return {
+        session = {
             "id": "bypass", "user_id": "bypass", "email": "demo@quantify.local",
             "display_name": "Demo Owner", "organization_id": "org-demo", "csrf_token": "bypass",
             "totp_enabled": False, "email_verified": True, "expires_at": "2099-01-01T00:00:00+00:00",
         }
+        # When a real account exists in the sample workspace, act as it, so the
+        # account screens can be exercised without a sign in.
+        if conn is not None:
+            row = conn.execute(
+                "SELECT id,email,display_name,totp_enabled FROM users WHERE organization_id='org-demo' AND active=1 ORDER BY created_at LIMIT 1"
+            ).fetchone()
+            if row is not None:
+                session.update({
+                    "user_id": row["id"], "email": row["email"], "display_name": row["display_name"],
+                    "totp_enabled": bool(row["totp_enabled"]),
+                })
+        return session
 
     def _session(self, conn: sqlite3.Connection, required: bool = True) -> dict[str, Any] | None:
-        bypass = self._auth_bypass()
+        bypass = self._auth_bypass(conn)
         if bypass:
             return bypass
         session = session_from_token(conn, self._cookie_token())
@@ -533,17 +664,37 @@ class QuantifyHandler(BaseHTTPRequestHandler):
         if session.get("id") == "bypass":
             return
         token = self.headers.get("X-CSRF-Token", "")
-        if not token or token != session.get("csrf_token"):
+        expected = str(session.get("csrf_token") or "")
+        if not token or not expected or not hmac.compare_digest(token, expected):
             raise PermissionError("Your session expired. Refresh the page and try again")
 
     def _read_raw(self) -> bytes:
+        """The request body, read once. Later calls get the same bytes.
+
+        On a kept-alive connection an unread body would be taken for the start
+        of the next request, so the body is always consumed, even when the
+        route that needed it was never reached.
+        """
+        if self._body is not None:
+            return self._body
         try:
-            length = int(self.headers.get("Content-Length", "0"))
+            length = int(self.headers.get("Content-Length", "0") or "0")
         except ValueError as exc:
+            self.close_connection = True
             raise ValueError("Invalid request length") from exc
         if length < 0 or length > MAX_BODY_BYTES:
+            self.close_connection = True
             raise ValueError("That request is too large")
-        return self.rfile.read(length) if length else b""
+        self._body = self.rfile.read(length) if length else b""
+        return self._body
+
+    def _drain(self) -> None:
+        """Consume a body nobody read, so the connection stays usable."""
+        if self._body is None and not self.close_connection:
+            try:
+                self._read_raw()
+            except Exception:  # noqa: BLE001 - already marked to close
+                self.close_connection = True
 
     def _read_json(self, raw: bytes | None = None) -> dict[str, Any]:
         raw = self._read_raw() if raw is None else raw
@@ -576,6 +727,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
+        self._body = None
         try:
             if path == "/api/health":
                 self.json_response({"ok": True, "version": VERSION, "time": datetime.now(timezone.utc).isoformat(timespec="seconds")})
@@ -585,15 +737,30 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                 return
             self.serve_static(path)
         except PermissionError as exc:
+            self._drain()
             self.json_response({"error": str(exc)}, 403)
-        except (ValueError, TypeError) as exc:
-            self.json_response({"error": str(exc)}, 400)
+        except ValueError as exc:
+            # Only a sentence written for a person passes through. Python's
+            # own wording for a bad number is replaced, never shown.
+            self._drain()
+            self.json_response({"error": _plain_error(exc)}, 400)
+        except (TypeError, AttributeError):
+            # The body had the wrong shape somewhere a route did not check.
+            # That is the caller's mistake, said plainly, not a server fault.
+            if os.getenv("QUANTIFY_DEBUG", "0") == "1":
+                traceback.print_exc()
+            self._drain()
+            self.json_response({"error": NOT_UNDERSTOOD}, 400)
         except RuntimeError as exc:
+            self._drain()
             self.json_response({"error": str(exc)}, 502)
         except Exception as exc:  # pragma: no cover - final safety boundary
             traceback.print_exc()
+            self._drain()
             detail = str(exc) if os.getenv("QUANTIFY_DEBUG", "0") == "1" else None
             self.json_response({"error": "Something went wrong on our side", "detail": detail}, 500)
+        finally:
+            self._drain()
 
     # -- API ---------------------------------------------------------------
 
@@ -685,6 +852,29 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             token = result.pop("session_token")
             self.json_response(result, extra={"Set-Cookie": cookie_header(token)})
             return True
+        if path == "/api/auth/password/reset/start" and method == "POST":
+            # Always the same answer, so the form never says which addresses
+            # have an account here.
+            data = self._read_json()
+            email = str(data.get("email", "")).strip().lower()
+            if "@" not in email or len(email) > 254:
+                raise ValueError("Enter the email address you sign in with")
+            issued = start_password_reset(conn, email, self._client_ip())
+            payload: dict[str, Any] = {"ok": True, "expires_in_minutes": EMAIL_CODE_MINUTES}
+            if issued is not None:
+                sent = self._deliver_code(issued["email"], issued, purpose="reset")
+                if "preview_code" in sent:
+                    payload["preview_code"] = sent["preview_code"]
+                    payload["preview_note"] = sent["preview_note"]
+            self.json_response(payload)
+            return True
+        if path == "/api/auth/password/reset/complete" and method == "POST":
+            data = self._read_json()
+            self.json_response(complete_password_reset(
+                conn, str(data.get("email", "")), str(data.get("code", "")),
+                str(data.get("new_password", "")), self._client_ip(),
+            ))
+            return True
         if path == "/api/timezone" and method == "GET":
             text = (query.get("q") or [""])[0]
             self.json_response({"match": timezones.resolve(text), "suggestions": timezones.suggest(text)})
@@ -694,22 +884,22 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             return True
         return False
 
-    def _deliver_code(self, email: str, issued: dict[str, Any]) -> dict[str, Any]:
-        """Send the confirmation code, and say plainly how it went out.
+    def _deliver_code(self, email: str, issued: dict[str, Any], purpose: str = "verify") -> dict[str, Any]:
+        """Send a six-digit code, and say plainly how it went out.
 
-        Until a mail provider is configured the message is written to
-        data/outbox and the code is handed straight back to the browser, which
-        is the only way an unlaunched product can let someone finish signing up.
-        The moment POSTMARK_SERVER_TOKEN or SMTP_HOST is set, the code stops
-        being returned and only arrives by email.
+        Until a mail provider is connected the message is kept on the server
+        and the code is handed straight back to the browser, which is the only
+        way an unlaunched product can let someone finish. The moment mail is
+        connected, the code stops being returned and only arrives by email.
         """
         if issued.get("already_verified"):
             return {"already_verified": True, "sent_to": email}
         code = issued["code"]
-        # Decided before the send, from configuration alone. A configured
+        # Decided before the send, from configuration alone. A connected
         # provider that happens to fail must never fall back to showing the code.
         unconfigured = mail_provider() == "outbox"
-        result = send_verification_code(ROOT, email, code, issued["expires_in_minutes"])
+        send = send_password_reset_code if purpose == "reset" else send_verification_code
+        result = send(ROOT, email, code, issued["expires_in_minutes"])
         payload = {
             "sent_to": email,
             "provider": result["provider"],
@@ -719,14 +909,10 @@ class QuantifyHandler(BaseHTTPRequestHandler):
         if result["provider"] == "blocked":
             raise PermissionError("That address cannot receive mail from Quantify")
         if not unconfigured and not result.get("delivered"):
-            raise RuntimeError("The confirmation email could not be sent. Try again in a moment")
+            raise RuntimeError("The email could not be sent. Try again in a moment")
         if unconfigured:
             payload["preview_code"] = code
-            payload["preview_note"] = (
-                "No mail provider is connected yet, so the message was written to data/outbox "
-                "and the code is shown here. Set POSTMARK_SERVER_TOKEN or SMTP_HOST to send it for real."
-            )
-            payload["preview_path"] = result.get("path")
+            payload["preview_note"] = "Email is not switched on yet, so your code is shown here."
         return payload
 
     def _account_routes(self, conn: sqlite3.Connection, session: dict[str, Any], method: str, path: str, query: dict[str, list[str]]) -> bool:
@@ -786,6 +972,14 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             revoke_session(conn, self._cookie_token(), self._client_ip())
             self.json_response({"ok": True}, extra={"Set-Cookie": clear_cookie_header()})
             return True
+        if path == "/api/auth/password/change" and method == "POST":
+            self._csrf(session)
+            data = self._read_json()
+            self.json_response(change_password(
+                conn, session["user_id"], str(data.get("current_password", "")),
+                str(data.get("new_password", "")), session_id=session.get("id"), ip=self._client_ip(),
+            ))
+            return True
         return False
 
     def _workspace_routes(self, conn: sqlite3.Connection, session: dict[str, Any], method: str, path: str, query: dict[str, list[str]]) -> bool:
@@ -834,8 +1028,11 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                         str(data.get("concept", "Restaurant"))[:60], str(data.get("address", ""))[:200],
                         str(data.get("city", place))[:80], str(data.get("region", ""))[:40],
                         str(data.get("postal_code", ""))[:16],
-                        float(data.get("latitude") or 40.7128), float(data.get("longitude") or -74.0060),
-                        resolved["timezone"], int(data.get("open_hour") or 7), int(data.get("close_hour") or 21),
+                        _float(data.get("latitude"), 40.7128, -90.0, 90.0, "Latitude"),
+                        _float(data.get("longitude"), -74.0060, -180.0, 180.0, "Longitude"),
+                        resolved["timezone"],
+                        _int(data.get("open_hour"), 7, 0, 23, "Opening hour"),
+                        _int(data.get("close_hour"), 21, 0, 28, "Closing hour"),
                     ),
                 )
                 conn.execute(
@@ -881,13 +1078,18 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                 "SELECT * FROM locations WHERE organization_id=? AND active=1 ORDER BY name", (organization_id,)
             ).fetchall()]
             organization = _json(conn.execute("SELECT * FROM organizations WHERE id=?", (organization_id,)).fetchone())
+            # The day the interface opens on is the chosen location's own day.
+            chosen = (query.get("location_id") or [None])[0]
+            if chosen and not any(row["id"] == chosen for row in locations):
+                chosen = None
+            first = chosen or (locations[0]["id"] if locations else None)
             self.json_response({
                 "version": VERSION,
                 "organization": organization,
                 "locations": locations,
                 "default_location_id": locations[0]["id"] if locations else None,
-                "today": date.today().isoformat(),
-                "providers": provider_readiness(),
+                "today": (_location_today(conn, first) if first else date.today()).isoformat(),
+                "providers": provider_readiness(conn, first),
                 "writer": ai.status(),
                 "billing": {"connected": billing.connected(), "plan": billing.overview(conn, organization_id)["plan"]},
                 "user": {"name": session["display_name"], "email": session["email"]},
@@ -901,6 +1103,9 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             self.json_response({
                 "version": _data_version(conn, organization_id, location_id),
                 "server_time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                # The location's own date, so the screen rolls over at its
+                # midnight and not at the browser's.
+                "today": (_location_today(conn, location_id) if location_id else date.today()).isoformat(),
                 "scoring": SCORER.state(),
                 "reforecasting": REFORECASTER.state(),
             })
@@ -988,13 +1193,13 @@ class QuantifyHandler(BaseHTTPRequestHandler):
 
         if path == "/api/outlook" and method == "GET":
             start = parse_date((query.get("start") or [today.isoformat()])[0])
-            days = int((query.get("days") or ["14"])[0])
+            days = _int((query.get("days") or ["14"])[0], 14, 1, 14, "Days")
             self.json_response(forecast_range(conn, location_id, start, days))
             return True
 
         if path == "/api/accuracy" and method == "GET":
             as_of = parse_date((query.get("as_of") or [today.isoformat()])[0])
-            days = int((query.get("days") or ["30"])[0])
+            days = _int((query.get("days") or ["30"])[0], 30, 1, 365, "Days")
             result = performance(conn, location_id, as_of, days)
             result["trend"] = transactions.accuracy_trend(conn, location_id, days=60)
             self.json_response(result)
@@ -1008,7 +1213,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                 with_costs=True,
                 before=parse_date(before[0]) if before else None,
                 start=parse_date(start[0]) if start else None,
-                limit=int((query.get("limit") or ["18"])[0]),
+                limit=_int((query.get("limit") or ["18"])[0], 18, 1, 200, "Limit"),
             ))
             return True
 
@@ -1019,8 +1224,8 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                 conn, location_id,
                 before_date=parse_date(before[0]) if before else None,
                 start=parse_date(start[0]) if start else None,
-                skip=int((query.get("skip") or ["0"])[0]),
-                limit=int((query.get("limit") or ["40"])[0]),
+                skip=_int((query.get("skip") or ["0"])[0], 0, 0, 1_000_000, "Skip"),
+                limit=_int((query.get("limit") or ["40"])[0], 40, 1, 500, "Limit"),
             ))
             return True
 
@@ -1108,7 +1313,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                     "name": str(row.get("name", ""))[:80],
                     "role": str(row.get("role", "other"))[:24],
                     "quantity": str(row.get("quantity", ""))[:48],
-                    "share": max(0, min(100, int(row.get("share") or 0))),
+                    "share": int(round(_float(row.get("share"), 0.0, 0.0, 100.0, "Share"))),
                     "confidence": "high",
                 }
                 for row in (data.get("components") or []) if str(row.get("name", "")).strip()
@@ -1141,7 +1346,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             return True
 
         if path == "/api/ordering" and method == "GET":
-            days = max(1, min(14, int((query.get("days") or ["3"])[0])))
+            days = _int((query.get("days") or ["3"])[0], 3, 1, 14, "Days")
             start = parse_date((query.get("start") or [today.isoformat()])[0])
             plan = ordering.order_plan(conn, location_id, start, days)
             self.json_response(supply.attach(conn, location_id, plan) if plan.get("ready") else plan)
@@ -1195,12 +1400,18 @@ class QuantifyHandler(BaseHTTPRequestHandler):
 
         if path == "/api/setup" and method == "GET":
             location = dict(_location(conn, location_id, session["organization_id"]))
+            # The email settings never carry their own zone: the location's is
+            # the one that counts, and two fields for one fact would drift.
+            email = email_preferences(conn, location_id)
+            email.pop("timezone", None)
+            email["provider_connected"] = mail_provider() != "outbox"
             self.json_response({
                 "location": location,
                 "timezone": timezones.resolve(location["timezone"]),
                 "integrations": _integration_view(conn, location_id),
-                "providers": provider_readiness(),
-                "email": email_preferences(conn, location_id),
+                "providers": provider_readiness(conn, location_id),
+                "register": square_status(conn, location_id),
+                "email": email,
                 "menu": menu_intelligence_view(conn, location_id)["summary"],
                 "writer": ai.status(),
                 "security": {
@@ -1246,25 +1457,29 @@ class QuantifyHandler(BaseHTTPRequestHandler):
         if path == "/api/email/preferences" and method in {"POST", "PUT"}:
             data = self._read_json()
             location = _location(conn, location_id, session["organization_id"])
-            resolved = timezones.resolve(str(data.get("timezone", location["timezone"])), fallback=location["timezone"])
-            self.json_response({
-                **update_preferences(
-                    conn, location_id, str(data.get("owner_email", "")), bool(data.get("enabled", True)),
-                    str(data.get("send_time", "05:30")), resolved["timezone"], bool(data.get("include_week_ahead", True)),
-                ),
-                "timezone_match": resolved,
-            })
+            # The zone is the location's. A zone sent with the form is ignored.
+            saved = update_preferences(
+                conn, location_id, str(data.get("owner_email", "")), bool(data.get("enabled", True)),
+                str(data.get("send_time", "05:30")), location["timezone"], bool(data.get("include_week_ahead", True)),
+            )
+            saved.pop("timezone", None)
+            saved["provider_connected"] = mail_provider() != "outbox"
+            self.json_response(saved)
             return True
 
         if path == "/api/email/send-test" and method == "POST":
             data = self._read_json()
             target = parse_date(str(data.get("date") or today.isoformat()))
-            # Only addresses already on this account. Otherwise anyone who signs
-            # up can send Quantify-branded mail to a stranger.
-            allowed = {session["email"].lower(), (email_preferences(conn, location_id)["owner_email"] or "").lower()}
+            # Only addresses already on this account, checked on the address
+            # the test would actually go to. Otherwise anyone who signs up can
+            # send Quantify-branded mail to a stranger.
+            saved_to = (email_preferences(conn, location_id)["owner_email"] or "").strip().lower()
+            allowed = {session["email"].lower(), saved_to} - {""}
             requested = str(data.get("recipient") or "").strip().lower()
-            recipient = requested if requested in allowed and requested else None
-            if requested and recipient is None:
+            recipient = requested or saved_to
+            if not recipient:
+                raise ValueError("Add an address for the morning email first")
+            if recipient not in allowed:
                 raise ValueError("Test emails only go to an address already on this account")
             self.json_response(deliver_brief(conn, ROOT, location_id, target, recipient))
             return True
@@ -1273,7 +1488,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             data = self._read_json()
             self.json_response(set_override(
                 conn, location_id, str(data.get("item_id", "")), parse_date(str(data.get("date", ""))),
-                int(data.get("quantity", -1)), str(data.get("reason", "")),
+                _int(data.get("quantity"), None, 0, 100_000, "The number to make"), str(data.get("reason", "")),
             ))
             return True
 
@@ -1286,14 +1501,23 @@ class QuantifyHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/integrations/") and path.endswith("/sync") and method == "POST":
             provider = path.split("/")[3]
             data = self._read_json()
+            backfill = _int(data.get("backfill_days"), 1095, 1, 1825, "Days of history")
             if provider == "weather":
-                self.json_response(refresh_weather(conn, location_id, days=int(data.get("days", 16)), backfill_days=int(data.get("backfill_days", 1095))))
+                self.json_response(refresh_weather(conn, location_id, days=_int(data.get("days"), 16, 1, 16, "Days"), backfill_days=backfill))
             elif provider == "events":
-                self.json_response(refresh_events(conn, location_id, days=int(data.get("days", 90)), backfill_days=int(data.get("backfill_days", 1095))))
+                self.json_response(refresh_events(conn, location_id, days=_int(data.get("days"), 90, 1, 365, "Days"), backfill_days=backfill))
             elif provider in {"pos", "square"}:
-                self.json_response(sync_square_orders(conn, location_id, int(data.get("days", 1095))))
+                self.json_response(sync_square_orders(conn, location_id, _int(data.get("days"), 1095, 1, 1095, "Days of history")))
             else:
                 raise ValueError("That connector is not available in this build")
+            return True
+
+        if path == "/api/integrations/pos/credentials" and method == "POST":
+            data = self._read_json()
+            self.json_response(save_square_credentials(
+                conn, location_id, str(data.get("access_token", "")), str(data.get("location_id", "")),
+                str(data.get("environment") or "production"),
+            ))
             return True
 
         if path == "/api/demo/reset" and method == "POST":
@@ -1312,6 +1536,13 @@ class QuantifyHandler(BaseHTTPRequestHandler):
         return False
 
     def serve_static(self, request_path: str) -> None:
+        """A file under web/, or the shell for an in-app route.
+
+        A path with an extension is a file: when it is not there the answer
+        is a 404, so a stale or mistyped asset fails where it can be seen
+        instead of loading the landing page as a script. A path without one
+        is a screen the browser routes itself, and gets index.html.
+        """
         relative = request_path.lstrip("/") or "index.html"
         if request_path == "/favicon.ico":
             relative = "assets/favicon.svg"
@@ -1322,13 +1553,30 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             self.json_response({"error": "Not found"}, 404)
             return
         if not target.is_file():
+            if Path(relative).suffix:
+                self.json_response({"error": "Not found"}, 404)
+                return
             target = WEB_ROOT / "index.html"
-        content = target.read_bytes()
+        content, etag = _static_file(target)
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         if content_type.startswith("text/") or content_type in {"application/javascript", "application/json", "image/svg+xml"}:
             content_type += "; charset=utf-8"
-        self._headers(content_type, len(content), 200)
-        self.wfile.write(content)
+        validators = {"ETag": etag, "Cache-Control": "no-cache"}
+        held = [tag.strip() for tag in self.headers.get("If-None-Match", "").split(",")]
+        if etag in held or f"W/{etag}" in held:
+            try:
+                self._headers(content_type, 0, 304, validators)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                self.close_connection = True
+                return
+            self._write(b"")
+            return
+        try:
+            self._headers(content_type, len(content), 200, validators)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            self.close_connection = True
+            return
+        self._write(content)
 
 
 class BackgroundScorer:
@@ -1427,6 +1675,41 @@ class Reforecaster:
 
 SCORER = BackgroundScorer()
 REFORECASTER = Reforecaster()
+
+
+class QuantifyServer(ThreadingHTTPServer):
+    """The listening socket, tuned for a room full of tablets.
+
+    A backlog of 64 instead of the library's 5 means the eleven-second polls
+    from several devices lining up do not get their connection reset, and
+    daemon threads mean a stuck request never keeps the process alive.
+    """
+
+    request_queue_size = 64
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def _warm_up(db_path: Path) -> None:
+    """Compute today's plan for every location once, so the first open of the day is warm.
+
+    Runs on its own thread right after the socket opens. Nothing here can stop
+    the server: every location is wrapped, and so is the import.
+    """
+    try:
+        from quantify_app.intelligence import daily_brief as _brief
+        with connect(db_path) as conn:
+            ids = [row["id"] for row in conn.execute("SELECT id FROM locations WHERE active=1 ORDER BY name").fetchall()]
+        for location_id in ids:
+            try:
+                with connect(db_path) as conn:
+                    _brief(conn, location_id, _location_today(conn, location_id), week_days=7)
+            except Exception:  # noqa: BLE001 - a bad location is skipped, the rest still warm
+                if os.getenv("QUANTIFY_DEBUG", "0") == "1":
+                    traceback.print_exc()
+    except Exception:  # noqa: BLE001
+        if os.getenv("QUANTIFY_DEBUG", "0") == "1":
+            traceback.print_exc()
 
 
 def _scheduler(stop: threading.Event) -> None:
@@ -1544,13 +1827,14 @@ def main() -> None:
         threading.Thread(target=SCORER.run, name="quantify-scorer", daemon=True).start()
         threading.Thread(target=REFORECASTER.run, name="quantify-reforecast", daemon=True).start()
 
-    server = ThreadingHTTPServer((args.host, args.port), QuantifyHandler)
+    server = QuantifyServer((args.host, args.port), QuantifyHandler)
+    threading.Thread(target=_warm_up, args=(DB_PATH,), name="quantify-warm-up", daemon=True).start()
     writer = ai.status()
     print("\nQuantify is running.")
     print(f"  Open        http://{args.host}:{args.port}")
     print(f"  Database    {DB_PATH}")
     print(f"  Written by  {writer['model'] or 'Quantify (no AI key set)'}")
-    print("  The daily email and the accuracy scorer run while this window is open.\n")
+    print("  The morning email and the accuracy scorer run while this window is open.\n")
     if args.open:
         threading.Timer(0.7, lambda: webbrowser.open(f"http://{args.host}:{args.port}")).start()
     try:

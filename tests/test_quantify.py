@@ -562,7 +562,7 @@ class QuantifyPlatformTests(unittest.TestCase):
         # The four numbers must actually add up. If they ever stop, the screen
         # is telling an operator something that does not reconcile.
         self.assertAlmostEqual(
-            figures["gross_profit"],
+            figures["left_after_costs"],
             figures["revenue"] - figures["cogs"] - figures["labour"] - figures["other"],
             places=2,
         )

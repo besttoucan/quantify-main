@@ -14,7 +14,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .localtime import is_known, zone
+from .localtime import zone
 from .intelligence import daily_brief, utc_now
 
 BRAND_INK = "#17201c"
@@ -194,8 +194,9 @@ def update_preferences(
             raise ValueError
     except (ValueError, AttributeError):
         raise ValueError("Send time must use HH:MM") from None
-    if not is_known(timezone_name):
-        raise ValueError("We could not place that time zone. Try a city, a state, or a ZIP code")
+    # The zone is the location's own and was checked where it was set. It is
+    # kept on the row for the record; the scheduler reads the location's.
+    timezone_name = (timezone_name or "").strip() or "UTC"
     now = utc_now()
     conn.execute(
         """INSERT INTO email_preferences(location_id,owner_email,enabled,send_time,timezone,include_week_ahead,updated_at)
@@ -209,14 +210,29 @@ def update_preferences(
 
 
 def preferences(conn: sqlite3.Connection, location_id: str) -> dict[str, Any]:
+    """The morning email settings for one location. A read never writes.
+
+    With no row yet the defaults come back with `configured` False, an empty
+    address and sending off, so nothing invented ever shows up in Settings or
+    gets mailed to.
+    """
     row = conn.execute("SELECT * FROM email_preferences WHERE location_id=?", (location_id,)).fetchone()
-    if row is None:
-        location = conn.execute("SELECT timezone FROM locations WHERE id=?", (location_id,)).fetchone()
-        if location is None:
-            raise ValueError("Unknown location")
-        update_preferences(conn, location_id, "owner@example.com", False, "05:30", location["timezone"], True)
-        row = conn.execute("SELECT * FROM email_preferences WHERE location_id=?", (location_id,)).fetchone()
-    return dict(row)
+    if row is not None:
+        return dict(row) | {"configured": True}
+    location = conn.execute("SELECT timezone FROM locations WHERE id=?", (location_id,)).fetchone()
+    if location is None:
+        raise ValueError("That location is not on this account")
+    return {
+        "location_id": location_id,
+        "owner_email": "",
+        "enabled": 0,
+        "send_time": "05:30",
+        "timezone": location["timezone"],
+        "include_week_ahead": 1,
+        "last_sent_date": None,
+        "updated_at": None,
+        "configured": False,
+    }
 
 
 def _record_delivery(
@@ -307,9 +323,9 @@ def _write_outbox(root: Path, recipient: str, subject: str, text: str, html_body
 
 
 # Addresses that must never be sent to, whatever the rest of the system decides.
-# Entered by mistake during testing; the owner asked that nothing ever reach it.
-# Add more with QUANTIFY_EMAIL_BLOCKLIST as a comma separated list.
-NEVER_SEND_TO = {"srithith.chennareddy@gmail.com"}
+# The list itself lives in the environment: QUANTIFY_EMAIL_BLOCKLIST, comma
+# separated, set in the local config. Nothing personal is kept in the source.
+NEVER_SEND_TO: set[str] = set()
 
 
 def blocked_recipients() -> set[str]:
@@ -375,6 +391,30 @@ It stops working in {minutes} minutes. If you did not start creating a Quantify 
     return send_transactional(root, recipient, subject, text, html_body)
 
 
+def send_password_reset_code(root: Path, recipient: str, code: str, minutes: int = 20) -> dict[str, Any]:
+    subject = f"{code} is your Quantify password reset code"
+    text = (
+        f"Your Quantify password reset code is {code}\n\n"
+        f"Type it into the tab you left open and choose a new password. It stops working in {minutes} minutes.\n\n"
+        "If you did not ask to reset your password, you can ignore this. "
+        "Nobody can get in with this code alone.\n"
+    )
+    html_body = f"""<!doctype html><html><body style="margin:0;background:#f7f7f5;padding:32px 16px">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td align="center">
+<table role="presentation" width="440" cellspacing="0" cellpadding="0" style="width:440px;max-width:100%;background:#ffffff;border:1px solid #e7e6e2;border-radius:14px">
+<tr><td style="padding:26px 28px 6px;font:600 13px Arial,sans-serif;letter-spacing:3px;color:#15171a">QUANTIFY</td></tr>
+<tr><td style="padding:8px 28px 0;font:600 20px Arial,sans-serif;color:#15171a">Reset your password</td></tr>
+<tr><td style="padding:10px 28px 0;font:14px/1.6 Arial,sans-serif;color:#4b5058">
+Type this code into the tab you left open, then choose a new password.</td></tr>
+<tr><td style="padding:20px 28px 4px">
+<div style="font:700 34px/1 'Courier New',monospace;letter-spacing:10px;color:#15171a;background:#f2f2ef;border:1px solid #e7e6e2;border-radius:10px;padding:18px 0;text-align:center">{html.escape(code)}</div>
+</td></tr>
+<tr><td style="padding:14px 28px 26px;font:12px/1.6 Arial,sans-serif;color:#797f88">
+It stops working in {minutes} minutes. If you did not ask to reset your password you can ignore this, and nobody can get in with this code alone.</td></tr>
+</table></td></tr></table></body></html>"""
+    return send_transactional(root, recipient, subject, text, html_body)
+
+
 def deliver_brief(
     conn: sqlite3.Connection,
     root: Path,
@@ -383,39 +423,73 @@ def deliver_brief(
     recipient: str | None = None,
 ) -> dict[str, Any]:
     pref = preferences(conn, location_id)
-    to = (recipient or pref["owner_email"]).strip().lower()
+    to = (recipient or pref["owner_email"] or "").strip().lower()
+    if not to:
+        raise ValueError("Add an address for the morning email in Settings first")
     if is_blocked(to):
         return {"status": "blocked", "recipient": to,
-                "message": "That address is on the never-send list, so nothing was sent"}
+                "message": "That address cannot receive mail from Quantify, so nothing was sent"}
     built = build_email(conn, location_id, target_date)
+    # One decision, made the same way everywhere a message goes out. A token
+    # with no sender address is "not set up", never a send that fails.
+    provider = mail_provider()
     try:
-        if os.getenv("POSTMARK_SERVER_TOKEN"):
+        if provider == "postmark":
             message_id = _send_postmark(to, built["subject"], built["text"], built["html"])
             result = _record_delivery(conn, location_id, to, target_date, built["subject"], "sent", "postmark", provider_message_id=message_id)
-        elif os.getenv("SMTP_HOST"):
+        elif provider == "smtp":
             message_id = _send_smtp(to, built["subject"], built["text"], built["html"])
             result = _record_delivery(conn, location_id, to, target_date, built["subject"], "sent", "smtp", provider_message_id=message_id)
         else:
             path = _write_outbox(root, to, built["subject"], built["text"], built["html"], target_date)
             result = _record_delivery(conn, location_id, to, target_date, built["subject"], "outbox", "local-eml", artifact_path=path)
-        conn.execute("UPDATE email_preferences SET last_sent_date=?,updated_at=? WHERE location_id=?", (target_date.isoformat(), utc_now(), location_id))
+        if pref.get("configured"):
+            conn.execute("UPDATE email_preferences SET last_sent_date=?,updated_at=? WHERE location_id=?", (target_date.isoformat(), utc_now(), location_id))
         conn.commit()
         return result | {"preview": {"subject": built["subject"], "brief": built["brief"]}}
     except Exception as exc:
-        _record_delivery(conn, location_id, to, target_date, built["subject"], "failed", "configured", error=str(exc))
-        raise
+        _record_delivery(conn, location_id, to, target_date, built["subject"], "failed", provider, error=str(exc))
+        raise RuntimeError("The morning email could not be sent. Try again in a moment") from exc
+
+
+# How long after its send time a morning email is still worth sending. A
+# server started at two in the afternoon must not mail a morning plan then.
+SEND_WINDOW_HOURS = 3
 
 
 def send_due_briefs(conn: sqlite3.Connection, root: Path, now_utc: datetime | None = None) -> list[dict[str, Any]]:
+    """Send every morning email that is due. One location failing never stops the next.
+
+    The clock is the location's own. The email row keeps a copy of the zone
+    from when it was saved, but the location is where the zone is edited, so
+    that is the one that counts.
+    """
     now_utc = now_utc or datetime.now(tz=timezone.utc)
-    rows = conn.execute("SELECT * FROM email_preferences WHERE enabled=1").fetchall()
-    results = []
+    rows = conn.execute(
+        """SELECT p.*, l.timezone AS location_timezone FROM email_preferences p
+           JOIN locations l ON l.id=p.location_id
+           WHERE p.enabled=1 AND l.active=1 AND p.owner_email<>''"""
+    ).fetchall()
+    results: list[dict[str, Any]] = []
     for row in rows:
-        local_now = now_utc.astimezone(zone(row["timezone"]))
-        local_date = local_now.date()
-        send_hour, send_minute = [int(part) for part in row["send_time"].split(":", 1)]
-        due = (local_now.hour, local_now.minute) >= (send_hour, send_minute)
-        if not due or row["last_sent_date"] == local_date.isoformat():
-            continue
-        results.append(deliver_brief(conn, root, row["location_id"], local_date))
+        try:
+            local_now = now_utc.astimezone(zone(row["location_timezone"] or row["timezone"]))
+            local_date = local_now.date()
+            send_hour, send_minute = [int(part) for part in row["send_time"].split(":", 1)]
+            minutes_past = (local_now.hour * 60 + local_now.minute) - (send_hour * 60 + send_minute)
+            if minutes_past < 0 or row["last_sent_date"] == local_date.isoformat():
+                continue
+            if minutes_past > SEND_WINDOW_HOURS * 60:
+                # Missed the window. Mark the day so it is not retried all afternoon.
+                conn.execute(
+                    "UPDATE email_preferences SET last_sent_date=? WHERE location_id=?",
+                    (local_date.isoformat(), row["location_id"]),
+                )
+                conn.commit()
+                results.append({"location_id": row["location_id"], "status": "skipped",
+                                "message": "Past the send window for today"})
+                continue
+            results.append(deliver_brief(conn, root, row["location_id"], local_date))
+        except Exception as exc:  # noqa: BLE001 - one location's failure is recorded, not spread
+            results.append({"location_id": row["location_id"], "status": "failed", "error": str(exc)})
     return results

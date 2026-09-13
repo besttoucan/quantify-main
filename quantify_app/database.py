@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = "6"
+SCHEMA_VERSION = "7"
 
 SCHEMA = r"""
 PRAGMA foreign_keys = ON;
@@ -236,7 +236,10 @@ CREATE TABLE IF NOT EXISTS email_verifications (
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
-    used_at TEXT
+    used_at TEXT,
+    -- verify: confirming a new address. reset: proving the address before a
+    -- forgotten password is replaced. The two never satisfy each other.
+    purpose TEXT NOT NULL DEFAULT 'verify'
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -536,6 +539,8 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
 
 CREATE INDEX IF NOT EXISTS idx_suppliers_location ON suppliers(location_id);
 CREATE INDEX IF NOT EXISTS idx_purchase_orders_location ON purchase_orders(location_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_purchase_orders_supplier ON purchase_orders(supplier_id);
+CREATE INDEX IF NOT EXISTS idx_supplier_items_supplier ON supplier_items(supplier_id);
 """
 
 # Columns added after the first release. SQLite has no "add column if missing",
@@ -562,7 +567,27 @@ ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("day_accuracy", "call_source", "TEXT NOT NULL DEFAULT 'reconstructed'"),
     ("day_accuracy", "caught_slot", "INTEGER NOT NULL DEFAULT -1"),
     ("day_accuracy", "revisions_used", "INTEGER NOT NULL DEFAULT 0"),
+    # Codes issued before password reset existed were all for confirming an
+    # address, which is what the default says.
+    ("email_verifications", "purpose", "TEXT NOT NULL DEFAULT 'verify'"),
 ]
+
+# Steps that only make sense for a database that is already at an earlier
+# version: a column rename, a backfill, a table rebuilt around a new key.
+# Each entry is (version it brings the database to, statements to run). They
+# run in order, once, after the CREATE IF NOT EXISTS pass and the additive
+# columns, and only when the stored schema_version is below that number. New
+# tables, new indexes and new columns with a default do not belong here; the
+# schema text and ADDITIVE_COLUMNS already handle those on every start.
+MIGRATIONS: list[tuple[int, list[str]]] = []
+
+
+def _stored_schema_version(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
+    try:
+        return int(row["value"]) if row else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 class QuantifyConnection(sqlite3.Connection):
@@ -595,10 +620,15 @@ def initialize(db_path: Path | str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with connect(path) as conn:
         conn.executescript(SCHEMA)
+        stored = _stored_schema_version(conn)
         for table, column, definition in ADDITIVE_COLUMNS:
             existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
             if existing and column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        for version, statements in sorted(MIGRATIONS):
+            if stored and stored < version:
+                for statement in statements:
+                    conn.execute(statement)
         conn.execute(
             "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
             (SCHEMA_VERSION,),
@@ -630,6 +660,7 @@ def table_count(conn: sqlite3.Connection, table: str) -> int:
         "billing_events", "cancellation_feedback", "email_verifications",
         "forecast_calls", "forecast_revisions",
         "cost_settings", "category_costs", "recurring_costs",
+        "suppliers", "supplier_items", "stock_counts", "purchase_orders",
     }
     if table not in allowed:
         raise ValueError(f"Unsupported table: {table}")

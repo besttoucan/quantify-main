@@ -83,8 +83,25 @@ CANCELLATION_REASONS: list[dict[str, str]] = [
 ]
 
 
+# The one sentence every payment action says when no processor is connected.
+# It never names the processor or a key: the person reading it cannot fix that.
+NOT_SET_UP = "Payments are not set up on this account yet"
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _trial_over(record: dict[str, Any]) -> bool:
+    if record.get("status") != "trialing" or not record.get("trial_end"):
+        return False
+    try:
+        end = datetime.fromisoformat(str(record["trial_end"]))
+    except ValueError:
+        return False
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    return end < datetime.now(timezone.utc)
 
 
 def _secret_key() -> str:
@@ -107,7 +124,7 @@ def provider_status() -> dict[str, Any]:
             "provider": "stripe",
             "connected": False,
             "mode": "local",
-            "detail": "No payment processor is connected yet.",
+            "detail": "Billing is not switched on for this account yet.",
         }
     key = _secret_key()
     return {
@@ -122,7 +139,7 @@ def provider_status() -> dict[str, Any]:
 def _request(path: str, data: dict[str, Any] | None = None, method: str = "POST") -> dict[str, Any]:
     key = _secret_key()
     if not key:
-        raise RuntimeError("Stripe is not configured")
+        raise RuntimeError(NOT_SET_UP)
     url = f"{STRIPE_API}{path}"
     body = None
     if data is not None:
@@ -224,7 +241,9 @@ def overview(conn: sqlite3.Connection, organization_id: str) -> dict[str, Any]:
             invoices = []
 
     return {
-        "status": record.get("status"),
+        # A trial whose date has passed is reported as over. The row itself is
+        # left alone: the processor's webhook is the only thing that moves it.
+        "status": "trial_ended" if _trial_over(record) else record.get("status"),
         "plan": _plan_view(record),
         "plans": list(PLANS.values()),
         "seats": int(record.get("seats") or 1),
@@ -262,10 +281,10 @@ def _ensure_customer(conn: sqlite3.Connection, organization_id: str, email: str,
 
 def start_checkout(conn: sqlite3.Connection, organization_id: str, email: str, name: str, plan: str, return_url: str) -> dict[str, Any]:
     if not connected():
-        raise RuntimeError("Add a Stripe secret key before taking payments")
+        raise RuntimeError(NOT_SET_UP)
     price = _price_id(plan)
     if not price:
-        raise RuntimeError("No Stripe price ID is configured for this plan")
+        raise RuntimeError(NOT_SET_UP)
     customer = _ensure_customer(conn, organization_id, email, name)
     session = _request("/checkout/sessions", {
         "mode": "subscription",
@@ -284,7 +303,7 @@ def start_checkout(conn: sqlite3.Connection, organization_id: str, email: str, n
 def payment_portal(conn: sqlite3.Connection, organization_id: str, email: str, name: str, return_url: str) -> dict[str, Any]:
     """Stripe's hosted portal handles card changes, invoices, and receipts."""
     if not connected():
-        raise RuntimeError("Add a Stripe secret key to manage payment methods")
+        raise RuntimeError(NOT_SET_UP)
     customer = _ensure_customer(conn, organization_id, email, name)
     session = _request("/billing_portal/sessions", {"customer": customer, "return_url": return_url})
     _record_event(conn, organization_id, "portal_opened", {})
@@ -313,13 +332,13 @@ def record_cancellation_intent(
     conn.commit()
     reason = next(row for row in CANCELLATION_REASONS if row["code"] == reason_code)
     offer = {
-        "accuracy": "Before you go, we can pull your own accuracy record day by day and show exactly where the model missed. If it is wrong, that is worth fixing.",
-        "price": "If the price is the problem, there is room to move. Most locations that ask end up on a plan that fits.",
+        "accuracy": "Your accuracy record can be pulled day by day to show exactly where the calls missed.",
+        "price": "If the price is the problem, say so on the call and it will be looked at.",
         "unused": "Fifteen minutes with someone who sets these up is usually enough to tell whether it can do what you need.",
-        "switched": "We would like to know what the other product does better. If it is something we already do, we can show you where.",
-        "closing": "Nothing to sell you here. We can export your history so it goes with you.",
-        "other": "A short call costs you nothing and often turns up a fix.",
-    }.get(reason_code, "A short call costs you nothing and often turns up a fix.")
+        "switched": "It helps to know what the other product does better.",
+        "closing": "Your history can be exported so it goes with you.",
+        "other": "A short call often turns up a fix.",
+    }.get(reason_code, "A short call often turns up a fix.")
     return {"recorded": True, "reason": reason, "offer": offer, "support_email": SUPPORT_EMAIL}
 
 
@@ -390,7 +409,7 @@ def verify_webhook_signature(raw: bytes, signature_header: str | None, tolerance
 
     secret = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
     if not secret:
-        raise PermissionError("STRIPE_WEBHOOK_SECRET is not set, so webhooks are refused")
+        raise PermissionError("Payment webhooks are not switched on for this server")
     if not signature_header:
         raise PermissionError("This request carries no Stripe signature")
 

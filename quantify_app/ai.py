@@ -13,7 +13,7 @@ Two writers exist and they produce the same shape of output:
 
 The recommended model is Claude Opus 5. It is the strongest available model at
 reading a structured record, holding several competing drivers in mind, and
-writing a short, honest paragraph about them. Cost is a few cents per location
+writing a short paragraph about them. Cost is a few cents per location
 per day because the daily brief is written once and cached.
 """
 
@@ -83,18 +83,19 @@ def status() -> dict[str, Any]:
     """What the interface should say about the writing layer."""
     key = bool(_api_key())
     sdk = _sdk_installed()
+    # Nothing here is for an operator's screen. What the interface needs is
+    # the state; the install hint belongs in docs/LIVE_SETUP.md and the log.
     if key and sdk:
-        state, detail = "connected", ""
+        state = "connected"
     elif key and not sdk:
-        state, detail = "needs_package", "An Anthropic key is set but the anthropic package is not installed. Run: pip install anthropic"
+        state = "needs_package"
     else:
-        state, detail = "local", "Add an Anthropic API key in Setup for longer, more specific write-ups."
+        state = "local"
     return {
         "state": state,
-        "detail": detail,
+        "detail": "",
         "model": model_name() if key else None,
         "effort": _effort(),
-        "skills": {task: list(names) for task, names in TASK_SKILLS.items()},
     }
 
 

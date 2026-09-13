@@ -40,3 +40,5 @@ set "SMTP_USERNAME="
 set "SMTP_PASSWORD="
 set "SMTP_STARTTLS=1"
 set "SMTP_SSL=0"
+rem Addresses that must never be mailed, comma separated. Kept here, never in the code.
+set "QUANTIFY_EMAIL_BLOCKLIST="

@@ -195,7 +195,7 @@ def zone(name: str | None) -> tzinfo:
 
 
 def is_known(name: str | None) -> bool:
-    """True when `name` resolves to a real zone rather than the last-resort default."""
+    """True when `name` resolves to a real zone and not to the last-resort default."""
     key = (name or "").strip()
     if not key:
         return False

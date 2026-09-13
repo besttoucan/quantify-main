@@ -15,6 +15,10 @@ The recommended model is Claude Opus 5. It is the strongest available model at
 reading a structured record, holding several competing drivers in mind, and
 writing a short paragraph about them. Cost is a few cents per location
 per day because the daily brief is written once and cached.
+
+A refresh skips that cache on purpose, so `budget` puts a ceiling under it. When
+a location reaches the ceiling the local writer takes over, which costs nothing
+and produces the same shape of output. The bill stops. The brief does not.
 """
 
 from __future__ import annotations
@@ -27,6 +31,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+from . import budget
 
 SKILL_DIR = Path(__file__).resolve().parent / "skills"
 DEFAULT_MODEL = "claude-opus-5"
@@ -176,7 +182,10 @@ def _system_blocks(task: str) -> list[dict[str, Any]]:
     return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
 
 
-def _call_claude(task: str, payload: dict[str, Any], schema: dict[str, Any], max_tokens: int = 6000) -> dict[str, Any]:
+def _call_claude(
+    task: str, payload: dict[str, Any], schema: dict[str, Any], max_tokens: int = 6000
+) -> tuple[dict[str, Any], Any]:
+    """Return the written result and the usage counts that paid for it."""
     import anthropic
 
     client = anthropic.Anthropic(api_key=_api_key())
@@ -211,7 +220,7 @@ def _call_claude(task: str, payload: dict[str, Any], schema: dict[str, Any], max
     text = next((block.text for block in response.content if block.type == "text"), "")
     if not text:
         raise RuntimeError("The writing model returned nothing")
-    return json.loads(text)
+    return json.loads(text), getattr(response, "usage", None)
 
 
 def generate(
@@ -222,25 +231,41 @@ def generate(
     schema: dict[str, Any],
     local_writer: Callable[[dict[str, Any]], dict[str, Any]],
     force: bool = False,
+    location_id: str = "",
 ) -> dict[str, Any]:
-    """Return written output for one record, from cache when possible."""
+    """Return written output for one record, from cache when possible.
+
+    A forced call skips the cache, which is what makes it worth money and worth
+    limiting. `budget` decides whether this location has room for another call;
+    when it does not, the deterministic writer produces the same shape of output
+    and the operator sees a complete brief either way.
+    """
     digest = fingerprint(payload)
     if not force:
         cached = read_cache(conn, task, subject, digest)
         if cached is not None:
             return cached
 
+    # Composition calls are keyed by item and carry no location, so they fall to
+    # a shared bucket. The expensive path, a refresh on the day narrative, is
+    # keyed "<location>:<date>" and attributes correctly.
+    location = location_id or (subject.split(":")[0] if ":" in subject else budget.UNATTRIBUTED)
+
     writer = "local"
     result: dict[str, Any]
-    if available():
+    affordable, limit_reason = budget.decide(conn, location, forced=force, payload=payload)
+    if available() and affordable:
         try:
-            result = _call_claude(task, payload, schema)
+            result, usage = _call_claude(task, payload, schema)
             writer = "claude"
+            budget.record(conn, location, task, subject, model_name(), usage, forced=force)
         except Exception as error:  # noqa: BLE001 - the local writer must always be able to take over
             result = local_writer(payload)
             result["_fallback_reason"] = str(error)[:280]
     else:
         result = local_writer(payload)
+        if limit_reason:
+            result["_fallback_reason"] = limit_reason
 
     write_cache(conn, task, subject, digest, writer, result)
     result["_writer"] = writer

@@ -224,13 +224,13 @@ month and close to nothing after.
 
 **Expected: about $3.00 per location per month. First month about $4.20.**
 
-**Finding, and it needs fixing.** `docs/COMMERCIAL_PLAN.md` lists a target variable cost
-of $19.60 per location per month across hosting, email, weather, events, payments and
-support. There is no line for model inference. It is not a rounding error at $3.00
-against a $19.60 base. The table should carry a **$3.00 model line**, making the target
+**Finding, corrected at adoption.** `docs/COMMERCIAL_PLAN.md` listed a target variable
+cost of $19.60 per location per month across hosting, email, weather, events, payments
+and support, with no line for model inference at all. At $3.00 against a $19.60 base that
+is not a rounding error. The table now carries a **$3.00 model line**, making the target
 **$22.60** and the contribution at the $79 standard price **$56.40**, a 71 percent gross
 margin rather than 75. That is still a good business. Publishing 75 when the true figure
-is 71 is the same species of error Article 2 forbids us elsewhere.
+is 71 was the same species of error Article 2 forbids us elsewhere.
 
 ### On choosing a cheaper model
 
@@ -539,10 +539,17 @@ A constitution that cannot be violated is decoration. These are the tests.
 **13 September 2026, adopted.** Written against commit `726d86c`. Findings recorded at
 adoption, each with its article:
 
-1. Article 4: `docs/COMMERCIAL_PLAN.md` carries no model inference line. Target variable
-   cost should be $22.60, not $19.60, and gross margin at the standard price 71 percent,
-   not 75.
-2. Article 5: two uncapped regeneration paths at `server.py:1188` and `server.py:1340`.
-   `response.usage` is discarded on every call and no spend is recorded.
-3. Article 6: `payroll_load_percent: 18.0` in `quantify_app/costs.py` is a national figure
-   presented per location.
+1. Article 4, **closed**. `docs/COMMERCIAL_PLAN.md` carried no model inference line. It now
+   carries $3.00, target variable cost $22.60, gross margin at the standard price 71
+   percent.
+2. Article 5, **closed**. Two uncapped regeneration paths at `server.py:1188` and
+   `server.py:1340`, with `response.usage` discarded on every call and no spend recorded
+   anywhere. `quantify_app/budget.py` now records every call against a location and holds
+   it to the ceilings in Article 5. Thirteen tests in `tests/test_budget.py`.
+3. Article 6, **open, and owned elsewhere**. `payroll_load_percent: 18.0` in
+   `quantify_app/costs.py` is a national figure presented per location. The agent building
+   `quantify_app/geography.py` has the location resolution this needs. Article 6 states the
+   standard it must meet.
+4. Article 5, **open, small**. `_composition_for` in `server.py` knows its location but does
+   not pass it to `ai.generate`, so composition spend lands in a shared bucket. One argument
+   at the call site fixes it. Deferred because `server.py` was open in another worktree.

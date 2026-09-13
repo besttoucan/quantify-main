@@ -109,11 +109,14 @@ The following is a planning model, not a vendor quote. Per-location steady-state
 | Event/context allocation | $5.00 |
 | Payment processing allocation | $2.60 |
 | Routine support and success | $7.00 |
-| **Target variable cost** | **$19.60** |
+| Model inference for the written brief | $3.00 |
+| **Target variable cost** | **$22.60** |
 
-At the $79 standard price, that model leaves approximately $59.40 of contribution per location, or a 75% gross margin before company-wide engineering, sales, legal, and administrative expense. At the $69 annual equivalent, contribution is approximately $49.40, or 72%. The $49 founding plan is intentionally lower-margin while the team learns onboarding exceptions.
+The model line is the daily brief, the day reviews, and item compositions written once per item and then cached. It is measured, not estimated: about $0.08 per brief at the published Claude Opus 5 rate, thirty briefs a month, plus roughly $0.60 of reviews. A location's first month runs nearer $4.20 because its menu is being interpreted for the first time. `quantify_app/budget.py` holds any single location to $6.00 a month, at which point the deterministic writer takes over and the brief still ships.
 
-At $35, the same cost model leaves only about $15.40 per location before engineering and sales. That is too little room for the support and provider maintenance required by a product whose output affects daily restaurant operations.
+At the $79 standard price, that model leaves approximately $56.40 of contribution per location, or a 71% gross margin before company-wide engineering, sales, legal, and administrative expense. At the $69 annual equivalent, contribution is approximately $46.40, or 67%. The $49 founding plan is intentionally lower-margin while the team learns onboarding exceptions.
+
+At $35, the same cost model leaves only about $12.40 per location before engineering and sales. That is too little room for the support and provider maintenance required by a product whose output affects daily restaurant operations.
 
 Pilot support will be higher than the steady-state target and should be treated as product development rather than hidden inside an unrealistic permanent price.
 

@@ -282,7 +282,7 @@ def _refresh_predicthq_events(
 ) -> tuple[int, str]:
     token = os.getenv("PREDICTHQ_ACCESS_TOKEN")
     if not token:
-        raise RuntimeError("PREDICTHQ_ACCESS_TOKEN is not configured")
+        raise RuntimeError(EVENTS_NOT_CONNECTED)
     base_url = os.getenv("PREDICTHQ_EVENTS_URL", "https://api.predicthq.com/v1/events/")
     headers = {"Authorization": f"Bearer {token}"}
     limit = 500
@@ -359,7 +359,7 @@ def _refresh_ticketmaster_events(
 ) -> tuple[int, str]:
     api_key = os.getenv("TICKETMASTER_API_KEY")
     if not api_key:
-        raise RuntimeError("Configure PREDICTHQ_ACCESS_TOKEN or TICKETMASTER_API_KEY")
+        raise RuntimeError(EVENTS_NOT_CONNECTED)
     all_events: list[dict[str, Any]] = []
     page = 0
     while page < 5:  # Discovery API deep paging is limited to the first 1,000 results.
@@ -489,18 +489,131 @@ def refresh_events(
     }
 
 
-def _square_context() -> tuple[str, dict[str, str], str]:
+# What the interface is told when a sync is pressed and nothing is connected.
+# It names the button, never a variable on the server.
+SQUARE_NOT_CONNECTED = "Connect Square in Settings > Location first"
+EVENTS_NOT_CONNECTED = "Nearby events are not connected yet"
+
+SQUARE_SETTING_KEYS = ("square_access_token", "square_location_id", "square_environment")
+
+
+def _square_credentials(conn: sqlite3.Connection | None, location_id: str | None) -> dict[str, str] | None:
+    """The Square credentials for one location: what was saved in Settings first, the environment second.
+
+    Every Square call goes through here, so a location connected from the
+    screen and one connected from the server's configuration behave the same.
+    """
+    if conn is not None and location_id:
+        rows = conn.execute(
+            "SELECT key,value FROM settings WHERE location_id=? AND key IN (?,?,?)",
+            (location_id, *SQUARE_SETTING_KEYS),
+        ).fetchall()
+        stored = {row["key"]: row["value"] for row in rows}
+        if stored.get("square_access_token") and stored.get("square_location_id"):
+            return {
+                "token": stored["square_access_token"],
+                "location_id": stored["square_location_id"],
+                "environment": (stored.get("square_environment") or "production").lower(),
+                "source": "settings",
+            }
     token = os.getenv("SQUARE_ACCESS_TOKEN")
     square_location_id = os.getenv("SQUARE_LOCATION_ID")
-    if not token or not square_location_id:
-        raise RuntimeError("SQUARE_ACCESS_TOKEN and SQUARE_LOCATION_ID are required")
-    environment = os.getenv("SQUARE_ENVIRONMENT", "production").lower()
-    base = "https://connect.squareupsandbox.com" if environment == "sandbox" else "https://connect.squareup.com"
+    if token and square_location_id:
+        return {
+            "token": token,
+            "location_id": square_location_id,
+            "environment": os.getenv("SQUARE_ENVIRONMENT", "production").lower(),
+            "source": "environment",
+        }
+    return None
+
+
+def save_square_credentials(
+    conn: sqlite3.Connection,
+    location_id: str,
+    access_token: str,
+    square_location_id: str,
+    environment: str = "production",
+) -> dict[str, Any]:
+    """Keep a location's Square credentials and mark the register as configured.
+
+    No call is made to Square here. The first Sync now proves the token, and
+    its own message says what happened, so a bad paste is a one-line fix in
+    the same place it was typed.
+    """
+    access_token = str(access_token or "").strip()
+    square_location_id = str(square_location_id or "").strip()
+    environment = str(environment or "production").strip().lower() or "production"
+    if len(access_token) < 16 or any(char.isspace() for char in access_token):
+        raise ValueError("Paste the whole access token from the Square developer dashboard")
+    if len(square_location_id) < 4 or any(char.isspace() for char in square_location_id):
+        raise ValueError("Enter the location ID exactly as Square shows it")
+    if environment not in {"production", "sandbox"}:
+        raise ValueError("Environment must be production or sandbox")
+    _location(conn, location_id)
+    for key, value in (
+        ("square_access_token", access_token),
+        ("square_location_id", square_location_id),
+        ("square_environment", environment),
+    ):
+        conn.execute(
+            """INSERT INTO settings(location_id,key,value) VALUES(?,?,?)
+               ON CONFLICT(location_id,key) DO UPDATE SET value=excluded.value""",
+            (location_id, key, value),
+        )
+    existing = conn.execute(
+        "SELECT last_sync FROM integrations WHERE location_id=? AND provider='pos'", (location_id,)
+    ).fetchone()
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn.execute(
+        """INSERT INTO integrations(location_id,provider,status,last_sync,mode,details)
+           VALUES(?,?,?,?,?,?)
+           ON CONFLICT(location_id,provider) DO UPDATE SET
+             status=excluded.status,mode=excluded.mode,details=excluded.details""",
+        (
+            location_id, "pos", "configured", existing["last_sync"] if existing else None, "live",
+            json.dumps({"label": "Square", "square_location_id": square_location_id,
+                        "environment": environment, "configured_at": now}),
+        ),
+    )
+    conn.commit()
+    return {
+        "ok": True,
+        "status": "configured",
+        "register": square_status(conn, location_id),
+        "message": "Square is connected. Press Sync now to bring your sales in",
+    }
+
+
+def square_status(conn: sqlite3.Connection, location_id: str) -> dict[str, Any]:
+    """What Settings says about the register: connected or not, and on what."""
+    credentials = _square_credentials(conn, location_id)
+    row = conn.execute(
+        "SELECT status,last_sync,mode FROM integrations WHERE location_id=? AND provider='pos'", (location_id,)
+    ).fetchone()
+    connected = credentials is not None
+    return {
+        "provider": "Square",
+        "connected": connected,
+        "mode": "live" if connected else "sample",
+        "status": (row["status"] if row else None) if connected else "not-connected",
+        "environment": credentials["environment"] if credentials else None,
+        "square_location_id": credentials["location_id"] if credentials else None,
+        "source": credentials["source"] if credentials else None,
+        "last_sync": row["last_sync"] if row else None,
+    }
+
+
+def _square_context(conn: sqlite3.Connection | None = None, location_id: str | None = None) -> tuple[str, dict[str, str], str]:
+    credentials = _square_credentials(conn, location_id)
+    if credentials is None:
+        raise RuntimeError(SQUARE_NOT_CONNECTED)
+    base = "https://connect.squareupsandbox.com" if credentials["environment"] == "sandbox" else "https://connect.squareup.com"
     headers = {
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {credentials['token']}",
         "Square-Version": os.getenv("SQUARE_VERSION", SQUARE_API_VERSION),
     }
-    return base, headers, square_location_id
+    return base, headers, credentials["location_id"]
 
 
 def _square_item_id(variation_id: str) -> str:
@@ -742,8 +855,8 @@ def verify_square_webhook_signature(
     return hmac.compare_digest(expected, signature.strip())
 
 
-def _fetch_square_order(order_id: str) -> dict[str, Any]:
-    base, headers, _ = _square_context()
+def _fetch_square_order(conn: sqlite3.Connection, location_id: str, order_id: str) -> dict[str, Any]:
+    base, headers, _ = _square_context(conn, location_id)
     payload = _request_json(f"{base}/v2/orders/{urllib.parse.quote(order_id)}", headers=headers, timeout=30)
     order = payload.get("order")
     if not isinstance(order, dict):
@@ -760,7 +873,7 @@ def process_square_webhook(
 ) -> dict[str, Any]:
     key = os.getenv("SQUARE_WEBHOOK_SIGNATURE_KEY")
     if not key:
-        raise RuntimeError("SQUARE_WEBHOOK_SIGNATURE_KEY is not configured")
+        raise RuntimeError("Square live updates are not switched on for this server")
     if not verify_square_webhook_signature(notification_url, raw_body, signature, key):
         raise PermissionError("Square webhook signature is not valid")
     try:
@@ -777,7 +890,7 @@ def process_square_webhook(
         order_id = detail.get("order_id") if isinstance(detail, dict) else None
         if not order_id:
             raise ValueError("Square webhook did not include an order identifier")
-        order = _fetch_square_order(str(order_id))
+        order = _fetch_square_order(conn, location_id, str(order_id))
     counts = ingest_square_orders(conn, location_id, [order])
     now = _record_integration(
         conn,
@@ -791,7 +904,7 @@ def process_square_webhook(
 
 def sync_square_orders(conn: sqlite3.Connection, location_id: str, days: int = 1095) -> dict[str, Any]:
     location = _location(conn, location_id)
-    base, headers, square_location_id = _square_context()
+    base, headers, square_location_id = _square_context(conn, location_id)
     catalog_counts = _sync_square_catalog(conn, location_id, base, headers)
 
     requested_days = max(1, min(days, 1095))
@@ -839,11 +952,11 @@ def sync_square_orders(conn: sqlite3.Connection, location_id: str, days: int = 1
     return {"provider": "pos", **details, "last_sync": now}
 
 
-def provider_readiness() -> list[dict[str, Any]]:
+def provider_readiness(conn: sqlite3.Connection | None = None, location_id: str | None = None) -> list[dict[str, Any]]:
     return [
         {
             "provider": "Square",
-            "status": "configured" if os.getenv("SQUARE_ACCESS_TOKEN") and os.getenv("SQUARE_LOCATION_ID") else "credentials-required",
+            "status": "configured" if _square_credentials(conn, location_id) else "credentials-required",
             "history": "Up to three years, depending on what the provider kept.",
             "live_updates": "Webhook ready" if os.getenv("SQUARE_WEBHOOK_SIGNATURE_KEY") else "Webhook signature key required",
         },

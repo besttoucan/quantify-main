@@ -65,7 +65,7 @@ STATE_MINIMUM_WAGE: dict[str, float] = {
 
 # Alabama, Georgia, Louisiana, Mississippi, South Carolina, Tennessee and
 # Wyoming either have no state minimum or set one below 7.25. The federal floor
-# applies to them, so the copy names the federal minimum rather than the state.
+# applies to them, so the copy names the federal minimum, not the state.
 NO_STATE_MINIMUM = {"AL", "GA", "LA", "MS", "SC", "TN", "WY"}
 
 # Where a city or county sets a minimum above its state's, and Quantify already
@@ -406,7 +406,6 @@ def _assemble(revenue: float, cogs: float, labour: float, other: float,
         "costs": round(total, 2),
         # Not gross profit: labour and the owner's fixed costs are already out.
         "left_after_costs": round(profit, 2),
-        "gross_profit": round(profit, 2),  # deprecated alias, remove after one release
         "margin_percent": round(profit / revenue * 100) if revenue > 0 else None,
         "cogs_percent": round(cogs / revenue * 100) if revenue > 0 else None,
         "staff_hours": shift["staff_hours"],
@@ -434,7 +433,6 @@ def closed_day(context: dict[str, Any]) -> dict[str, Any]:
     return {
         "revenue": 0.0, "cogs": 0.0, "labour": 0.0, "other": round(other, 2),
         "costs": round(other, 2), "left_after_costs": round(-other, 2),
-        "gross_profit": round(-other, 2),  # deprecated alias
         "margin_percent": None, "cogs_percent": None,
         "staff_hours": 0.0, "busiest_staff": 0, "trading_hours": 0,
         "prep_and_close_hours": 0.0, "estimate": True,
@@ -450,9 +448,8 @@ def forecast_costs(
     """What a day that has not happened yet is expected to cost, and keep.
 
     Same arithmetic as a closed day, with two substitutions. The orders per hour
-    come from the forecast's own service curve rather than from the register,
-    and the cost of goods is applied to expected revenue per item rather than to
-    what was rung. Everything else, the wage, the staffing rule, the recurring
+    come from the forecast's own service curve, not from the register, and the
+    cost of goods is applied to expected revenue per item, not to what was rung. Everything else, the wage, the staffing rule, the recurring
     costs, is identical, so the number on a Tuesday forecast is comparable to
     the number on last Tuesday's history.
     """
@@ -627,9 +624,27 @@ def save_cost_settings(conn: sqlite3.Connection, location_id: str, payload: dict
     """Write the whole screen back. Percentages arrive as percentages.
 
     Operators think and talk in percent, so the form sends 33, not 0.33. The
-    conversion happens once, here, rather than in five places in the browser.
+    conversion happens once, here, and nowhere in the browser.
+
+    What is refused is said in a sentence the person typing can act on. A
+    blank wage means "use the local minimum"; a wage that is typed but too low
+    to be real is a typo, not a choice. A blank category share means "use the
+    estimate"; a share of 0 would make food free.
     """
     now = _utc_now()
+    wage = _number_or_none(payload.get("hourly_wage"))
+    if wage is not None and (wage < 0 or 0 < wage < 5):
+        raise ValueError("Enter what you pay an hour, or leave the local minimum")
+    if wage is not None and wage > 200:
+        raise ValueError("An hourly wage over $200 does not look right")
+    categories = [row for row in (_as_list(payload.get("categories"))) if isinstance(row, dict)]
+    for row in categories:
+        share = _number_or_none(row.get("percent"))
+        if share is not None and share == 0 and str(row.get("category", "")).strip():
+            raise ValueError("Food cost cannot be 0%. Leave it blank to use the estimate")
+        if share is not None and (share < 0 or share > 95):
+            raise ValueError("A food share has to be between 1% and 95%")
+    recurring = [row for row in (_as_list(payload.get("recurring"))) if isinstance(row, dict)]
     conn.execute(
         """INSERT INTO cost_settings(
                location_id, hourly_wage, payroll_load_percent, orders_per_person_per_hour,
@@ -657,23 +672,28 @@ def save_cost_settings(conn: sqlite3.Connection, location_id: str, payload: dict
     )
 
     conn.execute("DELETE FROM category_costs WHERE location_id=?", (location_id,))
-    for row in (payload.get("categories") or []):
+    for row in categories:
         name = str(row.get("category", "")).strip()[:80]
-        if not name:
+        share = _number_or_none(row.get("percent"))
+        if not name or share is None:
             continue
         conn.execute(
             "INSERT OR REPLACE INTO category_costs(location_id, category, cost_share, updated_at) VALUES(?,?,?,?)",
-            (location_id, name, _clamp(row.get("percent"), 0.0, 95.0, 30.0) / 100.0, now),
+            (location_id, name, _clamp(share, 1.0, 95.0, 30.0) / 100.0, now),
         )
 
     # The list is replaced wholesale because the form submits the whole list.
     # Nothing else in the database points at a recurring cost row, so there is
     # no identity worth preserving and a diff would only add ways to get it wrong.
     conn.execute("DELETE FROM recurring_costs WHERE location_id=?", (location_id,))
-    for row in (payload.get("recurring") or []):
+    skipped: list[str] = []
+    for row in recurring:
         name = str(row.get("name", "")).strip()[:80]
         amount = _clamp(row.get("amount"), 0.0, 5_000_000.0, 0.0)
-        if not name or amount <= 0:
+        if not name:
+            continue
+        if amount <= 0:
+            skipped.append(name)
             continue
         period = str(row.get("period", "month"))
         conn.execute(
@@ -681,4 +701,21 @@ def save_cost_settings(conn: sqlite3.Connection, location_id: str, payload: dict
             (uuid.uuid4().hex, location_id, name, amount, period if period in PERIOD_DAYS else "month", now),
         )
     conn.commit()
-    return cost_view(conn, location_id)
+    return cost_view(conn, location_id) | {"skipped": skipped}
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _number_or_none(value: Any) -> float | None:
+    """A typed number, or None for blank. Text that is not a number is blank too."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        number = float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    if number != number:  # NaN
+        return None
+    return number

@@ -224,6 +224,45 @@ def generate_email_code() -> str:
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
+def _issue_code(conn: sqlite3.Connection, user_id: str, email: str, purpose: str) -> str:
+    """Write one six-digit code for `purpose` and hand the plain code back to be sent."""
+    code = generate_email_code()
+    now = utc_now()
+    conn.execute(
+        """INSERT INTO email_verifications(id,user_id,email,code_hash,created_at,expires_at,purpose)
+           VALUES(?,?,?,?,?,?,?)""",
+        (
+            f"evc-{uuid.uuid4().hex}", user_id, email, _token_hash(code),
+            now.isoformat(timespec="seconds"),
+            (now + timedelta(minutes=EMAIL_CODE_MINUTES)).isoformat(timespec="seconds"),
+            purpose,
+        ),
+    )
+    return code
+
+
+def _check_code(conn: sqlite3.Connection, user_id: str, code: str, purpose: str, ip: str | None) -> sqlite3.Row:
+    """Find the live code for `purpose` and prove `code` matches it, or say plainly why not."""
+    normalized = "".join(char for char in str(code) if char.isdigit())
+    row = conn.execute(
+        """SELECT * FROM email_verifications WHERE user_id=? AND used_at IS NULL AND purpose=?
+           ORDER BY created_at DESC LIMIT 1""",
+        (user_id, purpose),
+    ).fetchone()
+    if row is None:
+        raise ValueError("That code has already been used. Ask for a new one")
+    if datetime.fromisoformat(row["expires_at"]) < utc_now():
+        raise ValueError("That code expired. Ask for a new one")
+    if int(row["attempts"]) >= EMAIL_CODE_ATTEMPTS:
+        raise PermissionError("Too many tries on this code. Ask for a new one")
+    if not hmac.compare_digest(row["code_hash"], _token_hash(normalized)):
+        conn.execute("UPDATE email_verifications SET attempts=attempts+1 WHERE id=?", (row["id"],))
+        _record_security_event(conn, "email_code_failed", user_id=user_id, ip=ip, details={"purpose": purpose})
+        conn.commit()
+        raise ValueError("That code is not right. Check the email and try again")
+    return row
+
+
 def start_email_verification(conn: sqlite3.Connection, user_id: str, ip: str | None = None) -> dict[str, Any]:
     """Issue a fresh six-digit code and retire any earlier one."""
     user = conn.execute("SELECT email,email_verified FROM users WHERE id=? AND active=1", (user_id,)).fetchone()
@@ -239,18 +278,11 @@ def start_email_verification(conn: sqlite3.Connection, user_id: str, ip: str | N
     if int(recent["n"]) >= 5:
         raise PermissionError("Too many codes requested. Wait a few minutes and try again")
 
-    conn.execute("UPDATE email_verifications SET used_at=? WHERE user_id=? AND used_at IS NULL", (iso_now(), user_id))
-    code = generate_email_code()
-    now = utc_now()
     conn.execute(
-        """INSERT INTO email_verifications(id,user_id,email,code_hash,created_at,expires_at)
-           VALUES(?,?,?,?,?,?)""",
-        (
-            f"evc-{uuid.uuid4().hex}", user_id, user["email"], _token_hash(code),
-            now.isoformat(timespec="seconds"),
-            (now + timedelta(minutes=EMAIL_CODE_MINUTES)).isoformat(timespec="seconds"),
-        ),
+        "UPDATE email_verifications SET used_at=? WHERE user_id=? AND used_at IS NULL AND purpose='verify'",
+        (iso_now(), user_id),
     )
+    code = _issue_code(conn, user_id, user["email"], "verify")
     _record_security_event(conn, "email_code_issued", user_id=user_id, ip=ip)
     conn.commit()
     return {
@@ -262,29 +294,132 @@ def start_email_verification(conn: sqlite3.Connection, user_id: str, ip: str | N
 
 
 def confirm_email(conn: sqlite3.Connection, user_id: str, code: str, ip: str | None = None) -> dict[str, Any]:
-    normalized = "".join(char for char in str(code) if char.isdigit())
-    row = conn.execute(
-        """SELECT * FROM email_verifications WHERE user_id=? AND used_at IS NULL
-           ORDER BY created_at DESC LIMIT 1""",
-        (user_id,),
-    ).fetchone()
-    if row is None:
-        raise ValueError("That code has already been used. Ask for a new one")
-    if datetime.fromisoformat(row["expires_at"]) < utc_now():
-        raise ValueError("That code expired. Ask for a new one")
-    if int(row["attempts"]) >= EMAIL_CODE_ATTEMPTS:
-        raise PermissionError("Too many tries on this code. Ask for a new one")
-    if not hmac.compare_digest(row["code_hash"], _token_hash(normalized)):
-        conn.execute("UPDATE email_verifications SET attempts=attempts+1 WHERE id=?", (row["id"],))
-        _record_security_event(conn, "email_code_failed", user_id=user_id, ip=ip)
-        conn.commit()
-        raise ValueError("That code is not right. Check the email and try again")
-
+    row = _check_code(conn, user_id, code, "verify", ip)
     conn.execute("UPDATE email_verifications SET used_at=? WHERE id=?", (iso_now(), row["id"]))
     conn.execute("UPDATE users SET email_verified=1 WHERE id=?", (user_id,))
     _record_security_event(conn, "email_verified", user_id=user_id, ip=ip)
     conn.commit()
     return {"verified": True, "email": row["email"]}
+
+
+# ---------------------------------------------------------------------------
+# Passwords: changing one, and replacing a forgotten one
+# ---------------------------------------------------------------------------
+
+def _revoke_sessions(conn: sqlite3.Connection, user_id: str, keep_session_id: str | None = None) -> None:
+    if keep_session_id:
+        conn.execute(
+            "UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL AND id<>?",
+            (iso_now(), user_id, keep_session_id),
+        )
+    else:
+        conn.execute("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL", (iso_now(), user_id))
+
+
+def _set_password(conn: sqlite3.Connection, user_id: str, password: str) -> None:
+    validate_password(password)
+    digest, salt = hash_password(password)
+    conn.execute("UPDATE users SET password_hash=?,password_salt=? WHERE id=?", (digest, salt, user_id))
+
+
+def change_password(
+    conn: sqlite3.Connection,
+    user_id: str,
+    current_password: str,
+    new_password: str,
+    session_id: str | None = None,
+    ip: str | None = None,
+) -> dict[str, Any]:
+    """Replace the password from inside the account. Every other device is signed out."""
+    user = conn.execute("SELECT * FROM users WHERE id=? AND active=1", (user_id,)).fetchone()
+    if user is None:
+        raise PermissionError("Account not found")
+    if not verify_password(current_password, user["password_hash"], user["password_salt"]):
+        _record_security_event(conn, "password_change_failed", user_id=user_id, ip=ip)
+        conn.commit()
+        raise ValueError("The current password is not right")
+    if current_password == new_password:
+        raise ValueError("Choose a password you have not used here before")
+    _set_password(conn, user_id, new_password)
+    _revoke_sessions(conn, user_id, keep_session_id=session_id)
+    _record_security_event(conn, "password_changed", user_id=user_id, ip=ip)
+    conn.commit()
+    return {"ok": True, "message": "Password changed. Other devices were signed out"}
+
+
+def _recent_reset_events(conn: sqlite3.Connection, email: str, ip: str | None, event_type: str, minutes: int = 15) -> int:
+    threshold = (utc_now() - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+    ip_digest = _ip_hash(ip)
+    count = 0
+    for row in conn.execute(
+        "SELECT ip_hash,details FROM security_events WHERE event_type=? AND created_at>=?",
+        (event_type, threshold),
+    ).fetchall():
+        try:
+            details = json.loads(row["details"] or "{}")
+        except json.JSONDecodeError:
+            details = {}
+        if details.get("email") == email or (ip_digest and row["ip_hash"] == ip_digest):
+            count += 1
+    return count
+
+
+def start_password_reset(conn: sqlite3.Connection, email: str, ip: str | None = None) -> dict[str, Any] | None:
+    """Issue a reset code for `email`. Returns None when no account uses it.
+
+    The caller answers the same way either way, so the form never says which
+    addresses have an account. The limit is the one sign in uses.
+    """
+    email = email.strip().lower()
+    if _recent_reset_events(conn, email, ip, "password_reset_requested") >= 8:
+        _record_security_event(conn, "password_reset_rate_limited", ip=ip, details={"email": email})
+        conn.commit()
+        raise PermissionError("Too many attempts. Wait 15 minutes and try again")
+    _record_security_event(conn, "password_reset_requested", ip=ip, details={"email": email})
+    user = conn.execute("SELECT id,email FROM users WHERE email=? AND active=1", (email,)).fetchone()
+    if user is None:
+        conn.commit()
+        return None
+    conn.execute(
+        "UPDATE email_verifications SET used_at=? WHERE user_id=? AND used_at IS NULL AND purpose='reset'",
+        (iso_now(), user["id"]),
+    )
+    code = _issue_code(conn, user["id"], user["email"], "reset")
+    conn.commit()
+    return {"user_id": user["id"], "email": user["email"], "code": code, "expires_in_minutes": EMAIL_CODE_MINUTES}
+
+
+def complete_password_reset(
+    conn: sqlite3.Connection,
+    email: str,
+    code: str,
+    new_password: str,
+    ip: str | None = None,
+) -> dict[str, Any]:
+    """Prove the code that was emailed, then replace the password and sign every device out."""
+    email = email.strip().lower()
+    if _recent_reset_events(conn, email, ip, "password_reset_failed") >= 8:
+        raise PermissionError("Too many attempts. Wait 15 minutes and try again")
+    user = conn.execute("SELECT id FROM users WHERE email=? AND active=1", (email,)).fetchone()
+    if user is None:
+        _record_security_event(conn, "password_reset_failed", ip=ip, details={"email": email})
+        conn.commit()
+        raise ValueError("That code is not right. Check the email and try again")
+    try:
+        row = _check_code(conn, user["id"], code, "reset", ip)
+    except ValueError:
+        _record_security_event(conn, "password_reset_failed", user_id=user["id"], ip=ip, details={"email": email})
+        conn.commit()
+        raise
+    _set_password(conn, user["id"], new_password)
+    conn.execute("UPDATE email_verifications SET used_at=? WHERE id=?", (iso_now(), row["id"]))
+    # Reading the code proves the address, so an account that never finished
+    # confirming it is confirmed now.
+    conn.execute("UPDATE users SET email_verified=1 WHERE id=?", (user["id"],))
+    _revoke_sessions(conn, user["id"])
+    _record_security_event(conn, "password_reset", user_id=user["id"], ip=ip)
+    conn.commit()
+    return {"ok": True, "message": "Password changed. Sign in with the new one"}
 
 
 def issue_recovery_codes(conn: sqlite3.Connection, user_id: str, ip: str | None = None) -> list[str]:
@@ -547,9 +682,9 @@ def auth_state(conn: sqlite3.Connection, token: str | None) -> dict[str, Any]:
 
 def cookie_header(token: str, max_age: int = SESSION_HOURS * 3600) -> str:
     secure = "; Secure" if os.getenv("QUANTIFY_SECURE_COOKIES", "0") == "1" else ""
-    return f"quantify_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}"
+    return f"quantify_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}"
 
 
 def clear_cookie_header() -> str:
     secure = "; Secure" if os.getenv("QUANTIFY_SECURE_COOKIES", "0") == "1" else ""
-    return f"quantify_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{secure}"
+    return f"quantify_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}"

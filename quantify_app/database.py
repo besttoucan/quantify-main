@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = "7"
+SCHEMA_VERSION = "8"
 
 SCHEMA = r"""
 PRAGMA foreign_keys = ON;
@@ -167,7 +167,8 @@ CREATE TABLE IF NOT EXISTS forecast_runs (
     model_version TEXT NOT NULL,
     history_days INTEGER NOT NULL,
     context_json TEXT NOT NULL,
-    summary_json TEXT NOT NULL
+    summary_json TEXT NOT NULL,
+    data_version TEXT
 );
 
 CREATE TABLE IF NOT EXISTS integrations (
@@ -570,6 +571,9 @@ ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     # Codes issued before password reset existed were all for confirming an
     # address, which is what the default says.
     ("email_verifications", "purpose", "TEXT NOT NULL DEFAULT 'verify'"),
+    # Who adjusted a number, shown next to it the next morning.
+    ("forecast_overrides", "updated_by", "TEXT NOT NULL DEFAULT ''"),
+    ("forecast_runs", "data_version", "TEXT"),
 ]
 
 # Steps that only make sense for a database that is already at an earlier
@@ -629,6 +633,9 @@ def initialize(db_path: Path | str) -> None:
             if stored and stored < version:
                 for statement in statements:
                     conn.execute(statement)
+        conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_run_version
+                     ON forecast_runs(location_id,target_date,model_version,data_version)
+                     WHERE data_version IS NOT NULL""")
         conn.execute(
             "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
             (SCHEMA_VERSION,),

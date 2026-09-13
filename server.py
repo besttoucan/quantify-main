@@ -201,12 +201,19 @@ def _menu_import(conn: sqlite3.Connection, location_id: str, text: str, commit: 
         return {"preview": parsed, "count": len(parsed), "committed": False}
     created = 0
     updated = 0
+    skipped = 0
     for row in parsed:
+        if not row.get("ok", row.get("price", 0) > 0):
+            skipped += 1
+            continue
         existing = conn.execute(
-            "SELECT id FROM menu_items WHERE location_id=? AND lower(name)=lower(?)",
+            "SELECT id,pos_item_id FROM menu_items WHERE location_id=? AND lower(name)=lower(?)",
             (location_id, row["name"]),
         ).fetchone()
         if existing:
+            if existing["pos_item_id"] is not None:
+                skipped += 1
+                continue
             item_id = existing["id"]
             conn.execute(
                 "UPDATE menu_items SET category=?,price=CASE WHEN ?>0 THEN ? ELSE price END,active=1 WHERE id=?",
@@ -223,7 +230,8 @@ def _menu_import(conn: sqlite3.Connection, location_id: str, text: str, commit: 
             created += 1
         upsert_interpretation(conn, item_id, row["name"], row["category"])
     conn.commit()
-    return {"count": len(parsed), "created": created, "updated": updated, "committed": True}
+    return {"count": len(parsed), "created": created, "updated": updated, "skipped": skipped,
+            "preview": parsed, "committed": True}
 
 
 def _data_version(conn: sqlite3.Connection, organization_id: str, location_id: str | None) -> str:
@@ -507,11 +515,13 @@ def _composition_for(conn: sqlite3.Connection, location_id: str, item_id: str, f
            VALUES(?,?,?,?,?,?,?)
            ON CONFLICT(menu_item_id) DO UPDATE SET
              summary=excluded.summary, confidence=excluded.confidence, verify_note=excluded.verify_note,
-             components_json=excluded.components_json, writer=excluded.writer, updated_at=excluded.updated_at""",
+             components_json=excluded.components_json, writer=excluded.writer, updated_at=excluded.updated_at
+             WHERE item_composition.writer<>'owner' OR ?""",
         (
             item_id, result.get("summary", ""), result.get("confidence", "low"), result.get("verify_note", ""),
             json.dumps(result.get("components", []), separators=(",", ":")),
             result.get("_writer", "local"), datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            force,
         ),
     )
     conn.commit()
@@ -528,6 +538,40 @@ def _composition_for(conn: sqlite3.Connection, location_id: str, item_id: str, f
         "writer": result.get("_writer", "local"),
         "written_at": result.get("_written_at"),
     }
+
+
+_COMPOSITION_JOBS: set[tuple[str, str]] = set()
+_COMPOSITION_LOCK = threading.Lock()
+
+
+def _queue_compositions(location_id: str, item_ids: list[str]) -> None:
+    """Fill missing recipes without making opening Menu wait for the writer."""
+    if not item_ids:
+        return
+    database = Path(DB_PATH)
+    key = (str(database.resolve()), location_id)
+    with _COMPOSITION_LOCK:
+        if key in _COMPOSITION_JOBS:
+            return
+        _COMPOSITION_JOBS.add(key)
+
+    def fill():
+        try:
+            with connect(database) as conn:
+                for item_id in item_ids:
+                    if conn.execute("SELECT 1 FROM item_composition WHERE menu_item_id=?", (item_id,)).fetchone():
+                        continue
+                    try:
+                        _composition_for(conn, location_id, item_id)
+                    except Exception:
+                        conn.rollback()
+                        if os.getenv("QUANTIFY_DEBUG", "0") == "1":
+                            traceback.print_exc()
+        finally:
+            with _COMPOSITION_LOCK:
+                _COMPOSITION_JOBS.discard(key)
+
+    threading.Thread(target=fill, name="quantify-recipes", daemon=True).start()
 
 
 # Static files are read once per process and kept with their validator, so a
@@ -1166,7 +1210,8 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             intraday.lock_opening_call(conn, location_id, target, brief["items"])
             brief["costs"] = costs.forecast_costs(conn, location_id, brief)
             brief["intraday"] = intraday.day_state(conn, location_id, target, brief)
-            brief["writer"] = ai.status()
+            if target < today:
+                brief["actual"] = transactions.day_detail(conn, location_id, target)
             cached = ai.read_cache(conn, "day_narrative", f"{location_id}:{target.isoformat()}", ai.fingerprint(build_day_payload(brief)))
             brief["narrative"] = cached
             self.json_response(brief)
@@ -1201,7 +1246,6 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             as_of = parse_date((query.get("as_of") or [today.isoformat()])[0])
             days = _int((query.get("days") or ["30"])[0], 30, 1, 365, "Days")
             result = performance(conn, location_id, as_of, days)
-            result["trend"] = transactions.accuracy_trend(conn, location_id, days=60)
             self.json_response(result)
             return True
 
@@ -1213,7 +1257,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                 with_costs=True,
                 before=parse_date(before[0]) if before else None,
                 start=parse_date(start[0]) if start else None,
-                limit=_int((query.get("limit") or ["18"])[0], 18, 1, 200, "Limit"),
+                limit=_int((query.get("limit") or ["14"])[0], 14, 1, 60, "Limit"),
             ))
             return True
 
@@ -1234,7 +1278,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             detail = transactions.day_detail(conn, location_id, target)
             subject = f"{location_id}:{target.isoformat()}"
             payload = transactions.review_payload(detail)
-            detail["review"] = ai.generate(conn, "day_review", subject, payload, ai.DAY_REVIEW_SCHEMA, local_day_review)
+            detail["review"] = None if detail["closed"] else ai.generate(conn, "day_review", subject, payload, ai.DAY_REVIEW_SCHEMA, local_day_review)
             self.json_response(detail)
             return True
 
@@ -1253,12 +1297,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                 row["id"] for row in view["items"]
                 if not conn.execute("SELECT 1 FROM item_composition WHERE menu_item_id=?", (row["id"],)).fetchone()
             ]
-            for item_id in missing[:40]:
-                try:
-                    _composition_for(conn, location_id, item_id)
-                except Exception:  # noqa: BLE001 - one bad item must not blank the page
-                    if os.getenv("QUANTIFY_DEBUG", "0") == "1":
-                        traceback.print_exc()
+            _queue_compositions(location_id, missing)
             stored = {
                 row["menu_item_id"]: dict(row)
                 for row in conn.execute(
@@ -1291,7 +1330,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                     item["food_cost"] = round(float(item["price"]) * share, 2)
                     item["margin"] = round(float(item["price"]) * (1.0 - share), 2)
                     item["cost_source"] = entry["source"]
-            view["writer"] = ai.status()
+            view["pending_compositions"] = len(missing)
             self.json_response(view)
             return True
 
@@ -1308,6 +1347,9 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             ).fetchone()
             if owned is None:
                 raise ValueError("That menu item is not at this location")
+            raw_components = data.get("components")
+            if not isinstance(raw_components, list) or any(not isinstance(row, dict) for row in raw_components):
+                raise ValueError("Add recipe parts as rows with a name and a share")
             components = [
                 {
                     "name": str(row.get("name", ""))[:80],
@@ -1316,8 +1358,12 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                     "share": int(round(_float(row.get("share"), 0.0, 0.0, 100.0, "Share"))),
                     "confidence": "high",
                 }
-                for row in (data.get("components") or []) if str(row.get("name", "")).strip()
+                for row in raw_components if str(row.get("name", "")).strip()
             ]
+            if not components:
+                raise ValueError("Add at least one named part to the recipe")
+            if not 95 <= sum(row["share"] for row in components) <= 105:
+                raise ValueError("Recipe shares must add up to about 100%")
             conn.execute(
                 """INSERT INTO item_composition(menu_item_id,summary,confidence,verify_note,components_json,writer,updated_at)
                    VALUES(?,?,?,?,?,?,?)
@@ -1374,8 +1420,15 @@ class QuantifyHandler(BaseHTTPRequestHandler):
         if path == "/api/supply/count" and method in {"POST", "PUT"}:
             data = self._read_json()
             rows = data.get("counts") if isinstance(data.get("counts"), list) else [data]
+            rows = [row for row in rows if isinstance(row, dict)]
+            if not rows:
+                raise ValueError("Send at least one count")
+            # The window the Order page is showing, so the returned line is
+            # the one it can patch in place.
+            days = _int(data.get("days") or (query.get("days") or ["3"])[0], 3, 1, 14, "Days")
             saved = [supply.save_count(conn, location_id, row, session.get("display_name", "")) for row in rows]
-            self.json_response({"saved": saved})
+            lines = supply.lines_for(conn, location_id, [row["ingredient"] for row in saved], days)
+            self.json_response({"saved": saved, "line": lines[0] if lines else None, "lines": lines})
             return True
 
         if path == "/api/supply/attention" and method == "GET":
@@ -1413,7 +1466,6 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                 "register": square_status(conn, location_id),
                 "email": email,
                 "menu": menu_intelligence_view(conn, location_id)["summary"],
-                "writer": ai.status(),
                 "security": {
                     "mfa_enabled": bool(session["totp_enabled"]),
                     "session_expires_at": session["expires_at"],
@@ -1489,6 +1541,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             self.json_response(set_override(
                 conn, location_id, str(data.get("item_id", "")), parse_date(str(data.get("date", ""))),
                 _int(data.get("quantity"), None, 0, 100_000, "The number to make"), str(data.get("reason", "")),
+                session.get("display_name", ""),
             ))
             return True
 

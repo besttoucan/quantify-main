@@ -33,136 +33,67 @@ def _change(value: int | float) -> str:
 
 def _email_subject(brief: dict[str, Any]) -> str:
     summary = brief["summary"]
+    weekday = datetime.fromisoformat(brief['date']).strftime('%A')
+    if brief.get("no_history"):
+        return f"Quantify: nothing to plan for {weekday} yet"
     movers = brief.get("top_surges") or brief.get("top_volume") or []
     lead = movers[0]["name"] if movers else "today's menu"
     weekday = datetime.fromisoformat(brief['date']).strftime('%A')
     change = int(summary.get('revenue_change_percent') or 0)
     if abs(change) < 4:
-        return f"Quantify: a normal {weekday}, plan for {_money(summary['expected_revenue'])}"
+        return f"Quantify: a normal {weekday}, {_money(summary['expected_revenue'])} expected"
     word = "busier" if change > 0 else "quieter"
-    return f"Quantify: {weekday} runs {abs(change)}% {word} than normal, plan for {_money(summary['expected_revenue'])}"
+    return f"Quantify: {weekday} looks {abs(change)}% {word}, {_money(summary['expected_revenue'])} expected"
 
 
-def _priority_rows(brief: dict[str, Any]) -> str:
-    priorities = brief.get("priorities", [])
-    if not priorities:
-        return '<tr><td style="padding:14px 0;border-top:1px solid #ded9cc;color:#55615b">Nothing unusual is expected. Run the normal plan and watch live sales.</td></tr>'
-    rows = []
-    for priority in priorities[:4]:
-        rows.append(
-            '<tr><td style="padding:14px 0;border-top:1px solid #ded9cc">'
-            f'<table role="presentation" width="100%"><tr><td style="font:700 15px Arial,sans-serif;color:{BRAND_INK}">{html.escape(priority["title"])}</td>'
-            f'<td align="right" style="font:700 14px Arial,sans-serif;color:{BRAND_GREEN};white-space:nowrap">{html.escape(str(priority.get("metric", "")))}</td></tr></table>'
-            f'<div style="font:14px/1.5 Arial,sans-serif;color:#55615b;margin-top:4px">{html.escape(priority["detail"])}</div>'
-            '</td></tr>'
-        )
-    return "".join(rows)
-
-
-def _item_rows(items: list[dict[str, Any]]) -> str:
-    rows = []
-    for item in items[:10]:
-        delta = int(item.get("vs_baseline_percent", 0))
-        delta_text = f"{delta:+d}%" if delta else "normal"
-        delta_color = BRAND_GREEN if delta >= 0 else "#7b4c3d"
-        rows.append(
-            '<tr>'
-            f'<td style="padding:12px 8px 12px 0;border-top:1px solid #e4dfd3;font:600 14px Arial,sans-serif;color:{BRAND_INK}">{html.escape(item["name"])}</td>'
-            f'<td align="right" style="padding:12px 8px;border-top:1px solid #e4dfd3;font:700 14px Arial,sans-serif;color:{BRAND_INK}">{item["expected"]}</td>'
-            f'<td align="right" style="padding:12px 8px;border-top:1px solid #e4dfd3;font:13px Arial,sans-serif;color:#55615b">{item["lower"]} to {item["upper"]}</td>'
-            f'<td align="right" style="padding:12px 0 12px 8px;border-top:1px solid #e4dfd3;font:700 13px Arial,sans-serif;color:{delta_color}">{delta_text}</td>'
-            '</tr>'
-        )
-    return "".join(rows)
-
-
-def _signal_rows(signals: list[dict[str, Any]]) -> str:
-    if not signals:
-        return '<div style="font:14px/1.5 Arial,sans-serif;color:#55615b">Nothing outside the restaurant is pushing today either way.</div>'
-    blocks = []
-    for signal in signals[:5]:
-        effect = signal.get("effect", 0)
-        blocks.append(
-            f'<div style="padding:10px 0;border-top:1px solid #ded9cc"><span style="font:700 13px Arial,sans-serif;color:{BRAND_INK}">{html.escape(signal["label"])}</span>'
-            f'<span style="float:right;font:700 13px Arial,sans-serif;color:{BRAND_GREEN}">{_change(effect)}</span>'
-            f'<div style="clear:both;font:13px/1.45 Arial,sans-serif;color:#59645e;margin-top:3px">{html.escape(signal.get("detail", ""))}</div></div>'
-        )
-    return "".join(blocks)
-
-
-def _week_rows(week: list[dict[str, Any]]) -> str:
-    rows = []
-    for day in week[:6]:
-        label = datetime.fromisoformat(day["date"]).strftime("%a %b %-d") if os.name != "nt" else datetime.fromisoformat(day["date"]).strftime("%a %b %#d")
-        rows.append(
-            '<tr>'
-            f'<td style="padding:10px 6px 10px 0;border-top:1px solid #e4dfd3;font:600 13px Arial,sans-serif;color:{BRAND_INK}">{html.escape(label)}</td>'
-            f'<td align="right" style="padding:10px 6px;border-top:1px solid #e4dfd3;font:13px Arial,sans-serif;color:{BRAND_INK}">{_money(day["expected_revenue"])}</td>'
-            f'<td align="right" style="padding:10px 0 10px 6px;border-top:1px solid #e4dfd3;font:700 13px Arial,sans-serif;color:{BRAND_GREEN}">{_change(day["change_percent"])}</td>'
-            '</tr>'
-        )
-    return "".join(rows)
+def _empty_message(brief: dict[str, Any]) -> str:
+    return (f"{brief['location']['name']} has no sales recorded yet. Connect the register "
+            "or add your menu and the first plan appears the next morning.")
 
 
 def render_brief_html(brief: dict[str, Any]) -> str:
     location = brief["location"]
     summary = brief["summary"]
-    weather = brief["context"]["weather"]
-    generated = datetime.fromisoformat(brief["generated_at"]).strftime("%I:%M %p UTC").lstrip("0")
-    return f"""<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{html.escape(_email_subject(brief))}</title></head>
-<body style="margin:0;background:{BRAND_PAPER};color:{BRAND_INK};font-family:Arial,sans-serif">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:{BRAND_PAPER}"><tr><td align="center" style="padding:28px 14px">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px;background:#fff;border:1px solid #ded9cc;border-radius:14px;overflow:hidden">
-<tr><td style="padding:24px 28px 18px;background:{BRAND_INK};color:#fff">
-<table role="presentation" width="100%"><tr><td style="font:700 20px Georgia,serif;letter-spacing:.2px">QUANTIFY</td><td align="right" style="font:12px Arial,sans-serif;color:#cbd2ce">Daily demand brief</td></tr></table>
-<div style="font:12px Arial,sans-serif;color:#b9c3bd;margin-top:18px;text-transform:uppercase;letter-spacing:1.2px">{html.escape(location['name'])} · {html.escape(brief['date_label'])}</div>
-<h1 style="font:400 31px/1.18 Georgia,serif;margin:8px 0 8px;color:#fff">{html.escape(brief['headline'])}</h1>
-<div style="font:14px/1.5 Arial,sans-serif;color:#cbd2ce">{html.escape(brief['comparison']['label'])} normally does {_money(brief['comparison']['sales'])} and {brief['comparison']['units']} items.</div>
-</td></tr>
-<tr><td style="padding:22px 28px 8px">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr>
-<td width="33%" style="vertical-align:top;padding-right:12px"><div style="font:11px Arial,sans-serif;color:#707972;text-transform:uppercase;letter-spacing:.8px">Expected sales</div><div style="font:700 27px Georgia,serif;color:{BRAND_INK};margin-top:5px">{_money(summary['expected_revenue'])}</div><div style="font:700 13px Arial,sans-serif;color:{BRAND_GREEN};margin-top:3px">{_change(summary['revenue_change_percent'])}, {_money(abs(summary.get('difference_sales') or 0))} against {_money(brief['comparison']['sales'])} on {html.escape(brief['comparison']['label'])}</div></td>
-<td width="33%" style="vertical-align:top;padding:0 12px;border-left:1px solid #e4dfd3"><div style="font:11px Arial,sans-serif;color:#707972;text-transform:uppercase;letter-spacing:.8px">Peak hour</div><div style="font:700 27px Georgia,serif;color:{BRAND_INK};margin-top:5px">{html.escape(summary.get('peak_hour') or 'Not set')}</div><div style="font:13px Arial,sans-serif;color:#59645e;margin-top:3px">The hour to have covered</div></td>
-<td width="34%" style="vertical-align:top;padding-left:12px;border-left:1px solid #e4dfd3"><div style="font:11px Arial,sans-serif;color:#707972;text-transform:uppercase;letter-spacing:.8px">Conditions</div><div style="font:700 17px Georgia,serif;color:{BRAND_INK};margin-top:7px">{html.escape(weather['condition'])}</div><div style="font:13px Arial,sans-serif;color:#59645e;margin-top:5px">{weather['high']}° / {weather['low']}° · {summary['confidence']}% confidence</div></td>
-</tr></table>
-</td></tr>
-<tr><td style="padding:18px 28px 6px"><div style="font:700 12px Arial,sans-serif;color:{BRAND_OCHRE};text-transform:uppercase;letter-spacing:1px">What matters</div><table role="presentation" width="100%" cellspacing="0" cellpadding="0">{_priority_rows(brief)}</table></td></tr>
-<tr><td style="padding:20px 28px 6px"><div style="font:700 12px Arial,sans-serif;color:{BRAND_OCHRE};text-transform:uppercase;letter-spacing:1px">Highest expected demand</div><table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><th align="left" style="padding:10px 8px 8px 0;font:11px Arial,sans-serif;color:#707972;text-transform:uppercase">Item</th><th align="right" style="padding:10px 8px 8px;font:11px Arial,sans-serif;color:#707972;text-transform:uppercase">Plan</th><th align="right" style="padding:10px 8px 8px;font:11px Arial,sans-serif;color:#707972;text-transform:uppercase">Likely range</th><th align="right" style="padding:10px 0 8px 8px;font:11px Arial,sans-serif;color:#707972;text-transform:uppercase">vs. normal</th></tr>{_item_rows(brief['top_volume'])}</table></td></tr>
-<tr><td style="padding:20px 28px 8px"><table role="presentation" width="100%"><tr><td width="58%" style="vertical-align:top;padding-right:22px"><div style="font:700 12px Arial,sans-serif;color:{BRAND_OCHRE};text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Why the day looks this way</div>{_signal_rows(brief['context']['signals'])}</td><td width="42%" style="vertical-align:top;padding-left:22px;border-left:1px solid #e4dfd3"><div style="font:700 12px Arial,sans-serif;color:{BRAND_OCHRE};text-transform:uppercase;letter-spacing:1px">Next six days</div><table role="presentation" width="100%" cellspacing="0" cellpadding="0">{_week_rows(brief.get('week_ahead', []))}</table></td></tr></table></td></tr>
-<tr><td style="padding:20px 28px;background:#f0ede5;border-top:1px solid #ded9cc"><div style="font:12px/1.5 Arial,sans-serif;color:#59645e">Sent {generated}. Register data runs through {brief['data_health']['latest_sale_date'] or 'no sales yet'} ({brief['data_health']['pos_freshness']}), {brief['data_health']['history_days']} days of history behind it. Change the time or turn this off in Settings.</div></td></tr>
-</table></td></tr></table></body></html>"""
+    generated = datetime.fromisoformat(brief["generated_at"]).astimezone(zone(location["timezone"]))
+    sent = generated.strftime("%I:%M %p %Z").lstrip("0")
+    text_style = "font:14px/1.5 Arial,sans-serif;color:#35433b"
+    if brief.get("no_history"):
+        content = f'<h1 style="font:600 24px Arial,sans-serif">Nothing to plan yet</h1><p>{html.escape(_empty_message(brief))}</p>'
+    else:
+        rows = []
+        for item in brief.get("top_volume", [])[:10]:
+            values = [html.escape(item["name"]), str(item["make"]), str(item["expected"]), str(item["baseline"])]
+            cells = ''.join(f'<td style="padding:12px 8px;border-top:1px solid #d7dcd9;text-align:{"left" if i == 0 else "right"}">{value}</td>' for i,value in enumerate(values))
+            rows.append(f'<tr>{cells}</tr>')
+        heads = ''.join(f'<th style="padding:8px;text-align:{"left" if i == 0 else "right"};font-weight:500">{label}</th>' for i,label in enumerate(["Item", "Make", "Expected", "Normal"]))
+        reasons = ''.join(f'<p><b>{html.escape(row["label"])}</b><br>{html.escape(row.get("detail", ""))}</p>' for row in brief["context"]["signals"][:4])
+        actions = ''.join(f'<p><b>{html.escape(row["title"])}</b><br>{html.escape(row["detail"])}</p>' for row in brief.get("priorities", [])[:2])
+        content = f"""<h1 style="font:600 24px/1.3 Arial,sans-serif;margin:16px 0">{html.escape(brief['headline'])}</h1>
+<p><b>Expected sales {_money(summary['expected_revenue'])}</b><br>{_money(brief['comparison']['sales'])} on {html.escape(brief['comparison']['label'])}.</p>
+<p><b>Make {summary['make_units']} items</b><br>{summary['expected_units']} expected to sell.</p>
+<p><b>Busiest hour {html.escape(summary.get('peak_hour') or 'Not available')}</b><br>{summary.get('peak_units',0)} items, about {summary.get('peak_share_percent',0)}% of the day.</p>
+<h2 style="font:600 18px Arial,sans-serif;margin-top:24px">What matters</h2>{actions or '<p>The make list is close to normal.</p>'}
+<h2 style="font:600 18px Arial,sans-serif;margin-top:24px">What to make</h2><table width="100%" cellpadding="0" cellspacing="0" style="font:14px/1.5 Arial,sans-serif"><thead><tr>{heads}</tr></thead><tbody>{''.join(rows)}</tbody></table>
+<h2 style="font:600 18px Arial,sans-serif;margin-top:24px">Why</h2>{reasons or '<p>No clear change from normal.</p>'}"""
+    return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{html.escape(_email_subject(brief))}</title></head>
+<body style="margin:0;background:#f6f7f6;{text_style}"><table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td align="center" style="padding:24px 12px"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:white;border:1px solid #d7dcd9"><tr><td style="padding:24px;{text_style}"><div style="font-weight:600;color:{BRAND_INK}">QUANTIFY</div><p>Morning email<br>{html.escape(location['name'])}<br>{html.escape(brief['date_label'])}</p>{content}<p style="margin-top:24px;padding-top:16px;border-top:1px solid #d7dcd9;font-size:12px">Sent {html.escape(sent)}. Register data runs through {html.escape(brief['data_health']['latest_sale_date'] or 'no sales yet')}. Change the time or turn this off in Settings.</p></td></tr></table></td></tr></table></body></html>"""
 
 
 def render_brief_text(brief: dict[str, Any]) -> str:
+    if brief.get("no_history"):
+        return "Quantify morning email\n\nNothing to plan yet\n" + _empty_message(brief)
     summary = brief["summary"]
-    lines = [
-        "QUANTIFY, YOUR MORNING BRIEF",
-        f"{brief['location']['name']} · {brief['date_label']}",
-        "",
-        brief["headline"],
-        f"Expected sales: {_money(summary['expected_revenue'])}, against {_money(brief['comparison']['sales'])} on {brief['comparison']['label']}",
-        f"Items to make: {summary['expected_units']}, against {brief['comparison']['units']} on a normal day",
-        f"Peak hour: {summary.get('peak_hour') or 'Not available'}",
-        f"How sure: {summary['confidence']}%, built from {brief['comparison']['based_on_days']} comparable days",
-        "",
-        "WHAT MATTERS",
-    ]
-    lines.extend(f"- {row['title']}: {row['detail']}" for row in brief.get("priorities", []))
-    lines.extend(["", "HIGHEST EXPECTED DEMAND"])
+    lines = ["Quantify morning email", f"{brief['location']['name']} | {brief['date_label']}", "", brief["headline"],
+             f"Expected sales: {_money(summary['expected_revenue'])}; {_money(brief['comparison']['sales'])} on {brief['comparison']['label']}.",
+             f"Make {summary['make_units']} items; {summary['expected_units']} expected to sell.",
+             f"Busiest hour: {summary.get('peak_hour') or 'Not available'}; {summary.get('peak_units',0)} items.", "", "What matters"]
+    lines.extend(f"- {row['title']}: {row['detail']}" for row in brief.get("priorities", [])[:2])
+    lines.extend(["", "What to make"])
     for item in brief.get("top_volume", [])[:10]:
-        lines.append(f"- {item['name']}: {item['expected']} (anywhere from {item['lower']} to {item['upper']}, {item['vs_baseline_percent']:+d}% against normal)")
-    lines.extend(["", "WHY"])
-    if brief["context"]["signals"]:
-        lines.extend(f"- {row['label']}: {row['effect']:+.0f}%. {row.get('detail', '')}" for row in brief["context"]["signals"])
-    else:
-        lines.append("- Nothing outside the restaurant is pushing today either way.")
-    lines.extend([
-        "",
-        f"Register data runs through {brief['data_health']['latest_sale_date'] or 'no sales yet'} "
-        f"({brief['data_health']['pos_freshness']}).",
-        "Change the time or turn this off in Settings.",
-    ])
+        lines.append(f"- {item['name']}: make {item['make']}, expected {item['expected']}, normal {item['baseline']}.")
+    lines.extend(["", "Why"])
+    lines.extend(f"- {row['label']}: {row.get('detail', '')}" for row in brief["context"]["signals"][:4])
+    lines.extend(["", f"Register data runs through {brief['data_health']['latest_sale_date'] or 'no sales yet'}.", "Change the time or turn this off in Settings."])
     return "\n".join(lines)
 
 
@@ -186,7 +117,7 @@ def update_preferences(
     include_week_ahead: bool = True,
 ) -> dict[str, Any]:
     owner_email = owner_email.strip().lower()
-    if "@" not in owner_email or len(owner_email) > 254:
+    if (enabled or owner_email) and ("@" not in owner_email or len(owner_email) > 254):
         raise ValueError("Enter a valid owner email address")
     try:
         hour, minute = [int(part) for part in send_time.split(":", 1)]

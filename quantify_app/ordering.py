@@ -11,8 +11,8 @@ whole screen untrustworthy:
 1. **A portion is not a purchase.** You do not buy lettuce in portions, you buy
    it in cases. Usage is computed in whatever unit the recipe speaks, and it is
    only turned into an order once somebody has said how they actually buy the
-   thing. Until then the screen says what will be used and asks, rather than
-   inventing a case count.
+   thing. Until then the screen says what will be used and asks. It never
+   invents a case count.
 2. **A range is a range.** "1 to 2 patties" is the honest reading of a burger
    line that covers singles and doubles. It is carried as a low and a high, not
    flattened to one number and presented as fact.
@@ -38,10 +38,14 @@ from .intelligence import forecast_day
 MASS_IN_GRAMS = {"g": 1.0, "kg": 1000.0, "oz": 28.3495, "lb": 453.592}
 VOLUME_IN_ML = {"ml": 1.0, "l": 1000.0, "cup": 236.588, "floz": 29.5735}
 
-# Units that describe a share of something rather than a thing you can order.
+# Units that describe a share of something, not a thing you can order.
 # Frying oil is real, but "one basket share" is not a line on an invoice, so it
-# is reported separately rather than pretended into a case count.
+# is reported separately and never pretended into a case count.
 UNCOUNTABLE = {"basket share", "share", "pinch", "coat", "part"}
+
+# Words a till label adds to an ingredient that do not change what gets bought.
+# "Burger bun" and "Bun" are one order line; "Wrap" and "Wrap and box" are not.
+_MERGE_DROP = {"burger", "hamburger", "sandwich", "the", "a", "an", "of"}
 
 # Plural forms the recipe lines use, mapped back to one word so "2 slices" and
 # "1 slice" land in the same bucket.
@@ -87,7 +91,7 @@ def parse_quantity(text: str) -> Amount | None:
     """Read a recipe line like "about 4 oz" or "1 to 2 patties" into an amount.
 
     Returns None for a line with no number in it, which is a line the ordering
-    screen has to ask about rather than guess at.
+    screen has to ask about instead of guessing.
     """
     if not text:
         return None
@@ -146,8 +150,24 @@ def _to_base(amount: float, unit: str) -> float:
     return amount
 
 
+def merge_key(name: str, unit: str = "") -> str:
+    """The key two spellings of one ingredient share.
+
+    Lower case, one word form ("patties" and "patty" are the same), and the
+    qualifiers a till label adds ("burger bun", "bun") dropped. The unit is part
+    of the key, so "Bread" by the slice and "Bread or roll" by the roll stay
+    apart: they are different things on an order.
+    """
+    words = [_SINGULAR.get(word, word) for word in re.split(r"[^a-z0-9]+", str(name).lower()) if word]
+    kept = [word for word in words if word not in _MERGE_DROP] or words
+    return " ".join(kept) + ("|" + _normalise_unit(unit) if unit else "")
+
+
 def readable(base: float, kind: str, unit: str) -> tuple[float, str]:
-    """Report a total back in whatever unit a person would say out loud."""
+    """Report a total back in whatever unit a person would say out loud.
+
+    Countable things come back whole: nobody orders four and a half patties.
+    """
     if kind == "mass":
         if base >= 907.184:
             return round(base / 453.592, 1), "lb"
@@ -160,8 +180,7 @@ def readable(base: float, kind: str, unit: str) -> tuple[float, str]:
         if base >= 1000:
             return round(base / 1000.0, 1), "l"
         return round(base), "ml"
-    value = round(base, 1)
-    return (int(value) if abs(value - round(value)) < 1e-9 else value), unit
+    return int(round(base)), unit
 
 
 @dataclass
@@ -176,14 +195,30 @@ class Line:
     high: float = 0.0
     exact: bool = True
     from_items: dict[str, float] = field(default_factory=dict)
+    # Mid usage in the base unit for each day of the window, in order.
+    daily: list[float] = field(default_factory=list)
+    # How many menu items use each spelling, so the line can be called what
+    # most of the menu calls it.
+    spellings: dict[str, int] = field(default_factory=dict)
 
-    def add(self, amount: Amount, servings: float, item_name: str) -> None:
+    def add(self, amount: Amount, servings: float, item_name: str, offset: int, spelling: str) -> None:
         self.low += _to_base(amount.low, amount.unit) * servings
         self.high += _to_base(amount.high, amount.unit) * servings
         self.exact = self.exact and amount.exact
-        self.from_items[item_name] = self.from_items.get(item_name, 0.0) + (
-            _to_base(amount.mid, amount.unit) * servings
-        )
+        mid = _to_base(amount.mid, amount.unit) * servings
+        self.from_items[item_name] = self.from_items.get(item_name, 0.0) + mid
+        while len(self.daily) <= offset:
+            self.daily.append(0.0)
+        self.daily[offset] += mid
+        if offset == 0:
+            self.spellings[spelling] = self.spellings.get(spelling, 0) + 1
+
+    @property
+    def shown_name(self) -> str:
+        """The spelling most of the menu uses; ties go to the longer one."""
+        if not self.spellings:
+            return self.name
+        return max(self.spellings, key=lambda word: (self.spellings[word], len(word)))
 
 
 def _compositions(conn: sqlite3.Connection, location_id: str) -> dict[str, list[dict[str, Any]]]:
@@ -251,7 +286,7 @@ def ingredient_demand(
         for item in plan["items"]:
             # Order to what will be made, not to what will be sold. The prep
             # number already carries the cost of running out.
-            servings = float(item.get("make") or item["expected"])
+            servings = float(item.get("make", item["expected"]))
             parts = composition.get(item["item_id"]) or []
             if not parts:
                 if offset == 0:
@@ -277,7 +312,7 @@ def ingredient_demand(
                             "reason": "the recipe line has no quantity in it",
                         })
                     continue
-                key = name.lower()
+                key = merge_key(name, amount.unit)
                 line = lines.get(key)
                 if line is None:
                     line = Line(
@@ -285,7 +320,7 @@ def ingredient_demand(
                         unit=amount.unit, kind=_kind(amount.unit),
                     )
                     lines[key] = line
-                line.add(amount, servings, item["name"])
+                line.add(amount, servings, item["name"], offset, name)
 
     out = []
     for line in lines.values():
@@ -294,14 +329,19 @@ def ingredient_demand(
         typical, _ = readable((line.low + line.high) / 2.0, line.kind, line.unit)
         drivers = sorted(line.from_items.items(), key=lambda kv: -kv[1])[:3]
         total = sum(line.from_items.values()) or 1.0
+        shown = line.shown_name
         out.append({
-            "name": line.name,
+            "name": shown,
+            # Every spelling that rolled into this line, lower case, so a count
+            # or a supplier saved under "burger bun" still finds "Bun".
+            "aliases": sorted({word.lower() for word in line.spellings} | {line.name.lower(), shown.lower()}),
             "role": line.role,
             "kind": line.kind,
             "unit": unit,
             "low": low,
             "high": high,
             "typical": typical,
+            "daily_base": [round(value, 3) for value in line.daily],
             # Two different kinds of doubt, kept apart. `has_range` means the
             # recipe genuinely spans two amounts, like a single or a double.
             # `certain` means the line was read straight, with no interpreting.
@@ -343,8 +383,8 @@ def _recipe_backlog(
 
     Recipe entry is the single most cited reason this kind of software gets
     abandoned, so nothing here is required. This is a list the owner can work
-    through when it suits them, ordered by what each one is actually worth,
-    rather than a wall that blocks the screen until it is empty.
+    through when it suits them, ordered by what each one is actually worth. It
+    never blocks the screen.
     """
     if not unknown:
         return []
@@ -405,7 +445,7 @@ def order_plan(
     for line in demand["lines"]:
         line["orderable"] = line["kind"] != "share"
         line["note"] = (
-            "A share of something rather than a thing you buy by the case."
+            "Used as a share of a bigger thing, like a basket of oil, so there is no case count."
             if line["kind"] == "share" else ""
         )
 

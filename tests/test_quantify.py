@@ -206,7 +206,7 @@ class QuantifyPlatformTests(unittest.TestCase):
             self.assertIn("Quantify", email["subject"])
             self.assertIn("What matters", email["html"])
             self.assertIn("Expected sales", email["html"])
-            self.assertIn("WHY", email["text"])
+            self.assertIn("Why", email["text"])
             self.assertEqual(delivered["status"], "outbox")
             artifact = Path(delivered["artifact_path"])
             self.assertTrue(artifact.exists())
@@ -274,7 +274,7 @@ class QuantifyPlatformTests(unittest.TestCase):
             visible = conn.execute(
                 "SELECT COUNT(*) AS n FROM locations WHERE organization_id=?", (first["organization_id"],)
             ).fetchone()["n"]
-            self.assertEqual(visible, 3)
+            self.assertEqual(visible, 0)  # The first signup is isolated from sample accounts too.
 
 
     def test_zero_entry_menu_and_square_catalog_use_clean_schema(self) -> None:

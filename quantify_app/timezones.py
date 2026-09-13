@@ -341,16 +341,16 @@ def resolve(text: str, fallback: str = EASTERN) -> dict[str, Any]:
 
     if query in CITIES:
         state, zone = CITIES[query]
-        return {"timezone": zone, "label": describe(zone), "matched": f"{query.title()}, {state}", "confident": True, "input": raw}
+        return {"timezone": zone, "label": describe(zone), "matched": f"{query.title()}, {state}", "city": query.title(), "region": state, "confident": True, "input": raw}
 
     if query in STATES:
         abbr, zone = STATES[query]
-        return {"timezone": zone, "label": describe(zone), "matched": f"the state of {raw.strip()}", "confident": True, "input": raw}
+        return {"timezone": zone, "label": describe(zone), "matched": f"the state of {raw.strip()}", "region": abbr, "confident": True, "input": raw}
 
     if query in STATE_ABBREVIATIONS:
         name = STATE_ABBREVIATIONS[query]
         abbr, zone = STATES[name]
-        return {"timezone": zone, "label": describe(zone), "matched": f"the state of {name.title()}", "confident": True, "input": raw}
+        return {"timezone": zone, "label": describe(zone), "matched": f"the state of {name.title()}", "region": abbr, "confident": True, "input": raw}
 
     digits = re.sub(r"\D", "", query)
     if len(digits) >= 5:
@@ -365,14 +365,14 @@ def resolve(text: str, fallback: str = EASTERN) -> dict[str, Any]:
             piece = " ".join(words[start:start + size])
             if piece in CITIES:
                 state, zone = CITIES[piece]
-                return {"timezone": zone, "label": describe(zone), "matched": f"{piece.title()}, {state}", "confident": True, "input": raw}
+                return {"timezone": zone, "label": describe(zone), "matched": f"{piece.title()}, {state}", "city": piece.title(), "region": state, "confident": True, "input": raw}
             if piece in STATES:
                 abbr, zone = STATES[piece]
-                return {"timezone": zone, "label": describe(zone), "matched": f"the state of {piece.title()}", "confident": True, "input": raw}
+                return {"timezone": zone, "label": describe(zone), "matched": f"the state of {piece.title()}", "region": abbr, "confident": True, "input": raw}
             if piece in STATE_ABBREVIATIONS:
                 name = STATE_ABBREVIATIONS[piece]
                 abbr, zone = STATES[name]
-                return {"timezone": zone, "label": describe(zone), "matched": f"the state of {name.title()}", "confident": True, "input": raw}
+                return {"timezone": zone, "label": describe(zone), "matched": f"the state of {name.title()}", "region": abbr, "confident": True, "input": raw}
             if piece in ABBREVIATIONS:
                 zone = ABBREVIATIONS[piece]
                 return {"timezone": zone, "label": describe(zone), "matched": "time zone", "confident": True, "input": raw}

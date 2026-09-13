@@ -59,6 +59,9 @@ def _data_version(conn: sqlite3.Connection, location_id: str, *, training: bool 
             "SELECT * FROM stock_counts WHERE location_id=? ORDER BY ingredient",
             "SELECT COUNT(*),MAX(sent_at) FROM purchase_orders WHERE location_id=?",
             "SELECT COUNT(*),MAX(scored_at) FROM day_accuracy WHERE location_id=?",
+            "SELECT * FROM cost_settings WHERE location_id=?",
+            "SELECT * FROM category_costs WHERE location_id=? ORDER BY category",
+            "SELECT c.* FROM item_composition c JOIN menu_items m ON m.id=c.menu_item_id WHERE m.location_id=? ORDER BY c.menu_item_id",
             "SELECT * FROM recurring_costs WHERE location_id=? ORDER BY id",
         ]
     for sql in queries:

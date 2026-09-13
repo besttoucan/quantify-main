@@ -1,5 +1,5 @@
 """Unknown payroll stays unknown; location data cannot borrow another city's point."""
-from datetime import date
+from datetime import date, timedelta
 import json
 import os
 from pathlib import Path
@@ -166,6 +166,51 @@ class LocationCosts(unittest.TestCase):
             self.assertEqual((supplied["attendance"],supplied["attendance_source"]), (4000,"provider_estimate"))
             self.assertEqual(supplied["distance_source"], "city_point")
             self.assertGreater(supplied["distance_miles"], 0)
+
+    def test_cost_and_recipe_edits_rebuild_brief_without_retraining(self):
+        target = date(2026, 9, 13)
+        with connect(self.path) as conn:
+            conn.execute("INSERT INTO menu_items(id,location_id,name,category,price) VALUES('item','loc','House sandwich','Lunch',12)")
+            conn.executemany("INSERT INTO sales(location_id,item_id,date,quantity,revenue) VALUES('loc','item',?,?,?)",
+                [((target-timedelta(days=n)).isoformat(), 80+(n%7)*8, (80+(n%7)*8)*12) for n in range(1,91)])
+            payload = {"hourly_wage":20, "payroll_load_percent":10,
+                       "categories":[{"category":"Lunch", "percent":20}]}
+            # All edits deliberately share a timestamp, so values must invalidate the cache.
+            with patch.object(costs,"_utc_now",return_value="2026-09-13T12:00:00+00:00"), \
+                 patch.object(intelligence,"_build_daily_brief",wraps=intelligence._build_daily_brief) as build, \
+                 patch.object(intelligence,"_fit_model_bundle",wraps=intelligence._fit_model_bundle) as fit:
+                costs.save_cost_settings(conn,"loc",payload)
+                before = intelligence.daily_brief(conn,"loc",target,week_days=2)
+                intelligence.daily_brief(conn,"loc",target,week_days=2)
+                self.assertEqual(build.call_count,1)
+                trained = fit.call_count
+                self.assertGreater(trained,0)
+                training_version = intelligence._data_version(conn,"loc",training=True)
+                version = intelligence._data_version(conn,"loc")
+                payload["categories"][0]["percent"] = 80
+                costs.save_cost_settings(conn,"loc",payload)
+                self.assertNotEqual(version,intelligence._data_version(conn,"loc"))
+                after = intelligence.daily_brief(conn,"loc",target,week_days=2)
+                self.assertEqual(build.call_count,2)
+                self.assertLess(after["items"][0]["make"],before["items"][0]["make"])
+
+                version = intelligence._data_version(conn,"loc")
+                payload["hourly_wage"] = 23
+                costs.save_cost_settings(conn,"loc",payload)
+                self.assertNotEqual(version,intelligence._data_version(conn,"loc"))
+                intelligence.daily_brief(conn,"loc",target,week_days=2)
+                self.assertEqual(build.call_count,3)
+
+                for components in ['[{"name":"Bread","quantity":1}]','[{"name":"Bread","quantity":2}]']:
+                    version = intelligence._data_version(conn,"loc")
+                    conn.execute("""INSERT INTO item_composition(menu_item_id,summary,confidence,components_json,updated_at)
+                        VALUES('item','Recipe','confirmed',?,'2026-09-13')
+                        ON CONFLICT(menu_item_id) DO UPDATE SET components_json=excluded.components_json""",(components,))
+                    self.assertNotEqual(version,intelligence._data_version(conn,"loc"))
+                    intelligence.daily_brief(conn,"loc",target,week_days=2)
+                self.assertEqual(build.call_count,5)
+                self.assertEqual(training_version,intelligence._data_version(conn,"loc",training=True))
+                self.assertEqual(fit.call_count,trained)
 
 
 if __name__ == "__main__":

@@ -305,7 +305,7 @@
 
         <section class="prose" id="how">
           <h2>How it works</h2>
-          <p>Quantify reads the register and learns what each item sells on each kind of day. Weather, holidays and what is on nearby are checked against your own sales, and dropped when they never moved them. Count what is in the walk-in and it says what to buy, from which supplier, and by when. Each closed day is scored, per item, against the number given the day before, and that score sits in History.</p>
+          <p>Quantify reads the register and learns what each item sells on each kind of day. Weather, holidays and what is on nearby are checked against your own sales, and dropped when they never moved them. Count what is in the walk-in and it says what to buy, from which supplier, and by when. History compares sales with the saved opening call when one exists, and labels reconstructed comparisons.</p>
         </section>
 
         <section class="pricing" id="pricing">
@@ -3800,6 +3800,7 @@
     const high = Math.round(Number(dist.today_high ?? t.high ?? 0));
     const canAdjust = p.date >= todayISO();
     const when = p.date === todayISO() ? "today" : `on ${dShort(p.date)}`;
+    const callSentence = `${canAdjust ? "Expected" : e(t.call_label || "Reconstructed expectation")}: ${num(expected)} ${e(when)}.`;
     const share = Number(prep.cost_share_percent);
     const price = Number(p.item.price || 0);
     const costs = Number.isFinite(share) && price > 0
@@ -3812,13 +3813,13 @@
       : "";
 
     const top = `<section class="isec">
-      <div class="isec-head"><h2>${canAdjust ? "Make" : "Planned"} ${num(make)} ${e(when)}</h2>
+      <div class="isec-head"><h2>${canAdjust ? "Make" : override ? "Saved plan" : "Reconstructed plan"} ${num(make)} ${e(when)}</h2>
         ${canAdjust ? `<button class="btn sm" data-do="adjust" data-date="${e(p.date)}" data-item="${e(p.item.id)}" data-name="${e(p.item.name)}" data-qty="${make}" data-expected="${expected}" data-suggested="${suggested}" data-override="${override ? e(override.quantity) : ""}" data-reason="${override ? e(override.reason || "") : ""}">Adjust</button>` : ""}
       </div>
       ${override
-        ? `<p class="lede">${setBy}</p>
+        ? `<p class="lede">${setBy} ${callSentence}</p>
            ${canAdjust ? `<div class="btn-row isec-row"><button class="btn sm ghost" data-do="clear-adjust" data-item="${e(p.item.id)}">Use ${num(suggested)}</button></div>` : ""}`
-        : `<p class="lede">A normal ${e(day)} sells ${num(normal)}. ${canAdjust ? "Expected" : "The call was"} ${num(expected)} ${e(when)}. With ${num(make)}, you run out ${runOutWords(prep.sell_out_percent)}; anywhere from ${num(low)} to ${num(high)} would still be a normal ${e(day)}.</p>`}
+        : `<p class="lede">A normal ${e(day)} sells ${num(normal)}. ${callSentence} With ${num(make)}, you run out ${runOutWords(prep.sell_out_percent)}; anywhere from ${num(low)} to ${num(high)} would still be a normal ${e(day)}.</p>`}
       ${costs ? `<p class="small muted isec-note">Wasting one costs about ${money(costs.waste, true)}. Missing a sale costs about ${money(costs.miss, true)}.</p>` : ""}
       ${stale ? `<p class="small muted isec-note">Register data stops at ${e(dShort(lastSale))}.</p>` : ""}
     </section>`;
@@ -4101,7 +4102,7 @@
       view: "history",
       target: ["#dayrows .dayrow:not(.head)", "#dayrows", ".dayrows"],
       title: "How close past calls were",
-      body: "Each closed day: what it sold, what it kept, and how close the morning number was. The score is always against what was said before service.",
+      body: "Each closed day shows what sold and how close the opening call was. If no opening call was saved, History labels the comparison as reconstructed. Add your actual pay and payroll costs to see what the day kept.",
       place: "bottom",
     },
     {

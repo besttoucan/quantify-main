@@ -63,9 +63,11 @@ All routes in this section require `?location_id=<id>`, in addition to any liste
 | GET | `/api/history/day` | date, default yesterday; sold/expected detail, costs, orders, and review unless closed |
 | GET | `/api/accuracy` | as_of, default today; days default 30, range 1 through 365 |
 
-The old `/api/results` route is not part of this API. History uses `/api/history/*` and `/api/accuracy.` next_before is exclusive. History Days includes calendar gaps; an empty location returns an empty list. Order cursors can stop partway through a date, so clients must preserve both next_before_date and next_skip.
+The old `/api/results` route is not part of this API. History uses `/api/history/*` and `/api/accuracy`. next_before is exclusive. History Days includes calendar gaps; an empty location returns an empty list. Order cursors can stop partway through a date, so clients must preserve both next_before_date and next_skip.
 
 Item fields distinguish expected/model_expected (predicted sales), baseline (normal sales), and make (preparation). new_item=true means fewer than seven selling days; the client must display "No number yet" and not interpret placeholder zeros as measured demand. These items are excluded from forecast totals and ingredient demand.
+
+The item endpoint's `today` object also includes `call_source` (`live`, `stored`, or `reconstructed`), `call_label`, `call_recorded_at`, and `recomputed_expected`. For closed dates, `expected` and `model_expected` use the recorded opening call or the rounded scored History value when available. `recomputed_expected` preserves the current reanalysis separately. Make, preparation analysis, and a saved quantity override remain separate from that historical Expected.
 
 When location-matched weather is unavailable, the brief's `context.weather` has `available:false` with `null` conditions and numeric measurements. Clients must show the missing context rather than substituting a temperature. Event attendance and distance likewise require provenance; missing values remain `null`.
 

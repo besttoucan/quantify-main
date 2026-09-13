@@ -1,0 +1,122 @@
+[
+  {
+    "file": "today-ipad-1024.png",
+    "source": "scratchpad/codex-design/integrated-final/ipad-today.png",
+    "viewport": [
+      1024,
+      768
+    ],
+    "sha256": "c42cdb15c81196ef2c0b1ecbf8583b694c86ede79754897857819eebf00bb847",
+    "bytes": 73699,
+    "visual_reviewed": "2026-09-13",
+    "data": "local sample database or public sample presentation"
+  },
+  {
+    "file": "hours-ipad-1024.png",
+    "source": "scratchpad/codex-design/integrated-final/ipad-today-hours.png",
+    "viewport": [
+      1024,
+      768
+    ],
+    "sha256": "b9d23050a58b47f8e5acbd8136f434300be479d799aa5811c6ff8ad7e8d0c558",
+    "bytes": 65674,
+    "visual_reviewed": "2026-09-13",
+    "data": "local sample database or public sample presentation"
+  },
+  {
+    "file": "order-phone-390.png",
+    "source": "scratchpad/codex-design/integrated-final/phone-order.png",
+    "viewport": [
+      390,
+      844
+    ],
+    "sha256": "8024bc199e49b7476fd2a7d07696997ac580da2ac7f425816870dd1cc11160d7",
+    "bytes": 39672,
+    "visual_reviewed": "2026-09-13",
+    "data": "local sample database or public sample presentation"
+  },
+  {
+    "file": "updates-phone-390.png",
+    "source": "scratchpad/codex-design/integrated-final/phone-updates.png",
+    "viewport": [
+      390,
+      844
+    ],
+    "sha256": "3ab5d134929050a3fa298b352d3cce0b5d328422a9b94a32dc31c1897225e2f4",
+    "bytes": 48224,
+    "visual_reviewed": "2026-09-13",
+    "data": "local sample database or public sample presentation"
+  },
+  {
+    "file": "ahead-portrait-820.png",
+    "source": "scratchpad/codex-design/final-persona-weather/verified/820-ahead-labels.png",
+    "viewport": [
+      820,
+      1180
+    ],
+    "sha256": "0aa36be8c439e05a03e63fad1ffdf9442c10138f45c5ed8099bbdc02acedcbd6",
+    "bytes": 94085,
+    "visual_reviewed": "2026-09-13",
+    "data": "local sample database or public sample presentation"
+  },
+  {
+    "file": "costs-references-ipad-1024.png",
+    "source": "scratchpad/codex-design/final-persona-weather/verified/1024-costs-references-open.png",
+    "viewport": [
+      1024,
+      768
+    ],
+    "sha256": "8e70c4d376f21681dc2a2e5f2176043425a57ea770b3555c4cbec7655f0be8a3",
+    "bytes": 84550,
+    "visual_reviewed": "2026-09-13",
+    "data": "local sample database or public sample presentation"
+  },
+  {
+    "file": "landing-desktop-1440.png",
+    "source": "scratchpad/codex-design/current-public/1440-landing.png",
+    "viewport": [
+      1440,
+      900
+    ],
+    "sha256": "f397cc2fe1982ee6624b262f0c04bea0fa63c6e1d07d755acd89e4c26ea7546b",
+    "bytes": 73578,
+    "visual_reviewed": "2026-09-13",
+    "data": "local sample database or public sample presentation"
+  },
+  {
+    "file": "pricing-desktop-1440.png",
+    "source": "scratchpad/codex-design/current-public/1440-pricing.png",
+    "viewport": [
+      1440,
+      900
+    ],
+    "sha256": "3130774692b864bf35335a8cb15b8f41038ec472f6e4b91e8df142bacb40daec",
+    "bytes": 60505,
+    "visual_reviewed": "2026-09-13",
+    "data": "local sample database or public sample presentation"
+  },
+  {
+    "file": "history-day-ipad-1024.png",
+    "source": "scratchpad/codex-design/final-history/ipad-day-unknown-costs.png",
+    "viewport": [
+      1024,
+      768
+    ],
+    "sha256": "34eb4f42cee668ffacbb01bfbc28dfa95e7132264b71d25a3e828c14f70970fc",
+    "bytes": 91911,
+    "visual_reviewed": "2026-09-13",
+    "data": "local sample database or public sample presentation"
+  },
+  {
+    "file": "history-item-ipad-1024.png",
+    "source": "scratchpad/codex-design/final-history/ipad-historical-item.png",
+    "viewport": [
+      1024,
+      768
+    ],
+    "sha256": "8576697e0e9d2b42e681b346dc4f07bb30c9ec5bac5dd8cf4a4ad4ab662a81ed",
+    "bytes": 103159,
+    "visual_reviewed": "2026-09-13",
+    "data": "local sample database or public sample presentation"
+  }
+]

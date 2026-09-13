@@ -50,7 +50,7 @@ History has Days and Track record tabs. Days starts with yesterday in the locati
 
 Open a day to compare Sold with Expected by item and through the day. The day also shows available costs, orders, and a short review. A day marked closed has no sales review. Order records identify whether they came from the register or were rebuilt from aggregate sales; rebuilt tickets are not original receipts.
 
-Track record measures forecast error against completed sales. When an opening forecast was saved before service, the record uses it. Otherwise the comparison is reconstructed using prior sales and labelled accordingly. A forecast revised after seeing part of the day's sales does not replace the opening comparison. Whole-item quantities agree across the score, day detail, and chart.
+Track record measures forecast error against completed sales. When an opening forecast was saved before service, the record uses it. Otherwise the comparison is reconstructed using prior sales and labelled accordingly. A forecast revised after seeing part of the day's sales does not replace the opening comparison. Whole-item quantities agree across the score, day detail, item sheet, and chart.
 
 Cost estimates use the location's saved assumptions. If average pay or employer payroll costs are missing, wages and the amount left after costs remain unknown. No cost estimate is proof of accounting profit, avoided waste, or savings.
 

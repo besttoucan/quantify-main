@@ -64,6 +64,8 @@ Separate bounded caches hold training context and item models. Saved food-cost, 
 
 `transactions.py` scores completed days against opening calls where available. Otherwise it rebuilds a comparison from prior observations and records `call_source="reconstructed"`. Later revisions are described separately from opening accuracy. Scoring and day detail use the same rounded item quantities.
 
+`item_analysis.py` reads the same historical Expected for the item sheet: a stored opening call first, then the rounded scored History value. The item's `today` object carries source, label, and recorded time, with `recomputed_expected` keeping current reanalysis separate. Preparation figures and saved quantity overrides do not replace the historical call.
+
 History Days uses calendar pagination. Its default page starts yesterday and includes dates without sales; next_before is exclusive. Day detail identifies closed days and avoids generating a sales review for them. Register receipts and reconstructed orders expose their source.
 
 ## Recipes and supply

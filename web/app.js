@@ -5,17 +5,29 @@
   const layer = document.getElementById("layer");
   const toastNode = document.getElementById("toast");
 
+  // localStorage throws in a private window or when site data is blocked. Every
+  // read and write goes through here so a blocked store can never stop boot.
+  const store = {
+    get: (key) => { try { return localStorage.getItem(key); } catch (_) { return null; } },
+    set: (key, value) => { try { localStorage.setItem(key, value); } catch (_) { /* private mode */ } },
+    remove: (key) => { try { localStorage.removeItem(key); } catch (_) { /* private mode */ } },
+  };
+
   const S = {
     auth: null,
     boot: null,
-    locationId: localStorage.getItem("quantify.location") || "",
-    view: localStorage.getItem("quantify.view") || "today",
-    date: new Date().toISOString().slice(0, 10),
+    locationId: store.get("quantify.location") || "",
+    view: store.get("quantify.view") || "today",
+    date: "",
     data: null,
     historyTab: "days",
-    settingsTab: "location",
+    settingsTab: store.get("quantify.stab") || "location",
     open: new Set(),
-    pulse: { version: null, checkedAt: null, live: false },
+    pulse: { version: null, checkedAt: null, live: false, pending: false },
+    // What each screen last showed, keyed by view, location and date, so coming
+    // back to a screen paints at once and refreshes underneath.
+    cache: {},
+    itemCache: {},
     history: { days: [], nextBefore: null, hasMore: true, loading: false, range: "all", costs: null },
     costs: null,
     tour: null,
@@ -45,27 +57,50 @@
   const pct = (v) => `${Number(v) > 0 ? "+" : ""}${Math.round(Number(v || 0))}%`;
   const noun = (n, one, many) => `${num(n)} ${Math.abs(Math.round(Number(n || 0))) === 1 ? one : (many || one + "s")}`;
 
-  const dObj = (iso) => new Date(`${iso}T12:00:00`);
-  const dShort = (iso) => new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(dObj(iso));
-  const dMed = (iso) => new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric" }).format(dObj(iso));
-  const dLong = (iso) => new Intl.DateTimeFormat("en-US", { weekday: "long", month: "long", day: "numeric" }).format(dObj(iso));
-  const weekday = (iso) => new Intl.DateTimeFormat("en-US", { weekday: "long" }).format(dObj(iso));
+  // Dates arrive as YYYY-MM-DD, sometimes with a time on the end. Only the day
+  // part is read, and a bad value formats as nothing instead of throwing.
+  const dObj = (iso) => new Date(`${String(iso || "").slice(0, 10)}T12:00:00`);
+  const dFmt = (iso, options) => {
+    const d = dObj(iso);
+    return Number.isNaN(d.getTime()) ? "" : new Intl.DateTimeFormat("en-US", options).format(d);
+  };
+  const dShort = (iso) => dFmt(iso, { month: "short", day: "numeric" });
+  const dMed = (iso) => dFmt(iso, { weekday: "short", month: "short", day: "numeric" });
+  const dLong = (iso) => dFmt(iso, { weekday: "long", month: "long", day: "numeric" });
+  const weekday = (iso) => dFmt(iso, { weekday: "long" });
   const clock = (t) => {
     const [h, m] = String(t || "").split(":");
     const hour = Number(h);
     return `${((hour % 12) || 12)}:${m} ${hour < 12 ? "AM" : "PM"}`;
   };
+  const localISO = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const addDays = (iso, n) => {
     const d = dObj(iso); d.setDate(d.getDate() + n);
-    return d.toISOString().slice(0, 10);
+    return localISO(d);
   };
-  const todayISO = () => new Date().toISOString().slice(0, 10);
+  // "Today" is the location's own date, sent by /api/bootstrap and refreshed by
+  // /api/pulse. The browser clock is only a fallback before the first answer.
+  const todayISO = () => (S.boot && S.boot.today) || localISO(new Date());
+
+  // Copies text and resolves true when it worked. Plain http has no
+  // navigator.clipboard, so the old execCommand path is kept as the fallback.
+  async function copyText(text) {
+    const value = String(text || "");
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try { await navigator.clipboard.writeText(value); return true; } catch (_) { /* fall through */ }
+    }
+    const box = document.createElement("textarea");
+    box.value = value; box.setAttribute("readonly", ""); box.style.position = "fixed"; box.style.top = "-1000px";
+    document.body.appendChild(box); box.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
+    box.remove();
+    return ok;
+  }
 
   const ICONS = {
     today: '<path d="M3 8h18M7 3v3M17 3v3M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/>',
-    forecast: '<path d="M3 17l5-6 4 3 4-6 5 5"/><path d="M3 21h18"/>',
     history: '<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v4l3 2"/>',
-    menu: '<path d="M4 5h16M4 12h16M4 19h10"/>',
     order: '<path d="M3 7.5 12 3l9 4.5v9L12 21l-9-4.5v-9Z"/><path d="M3 7.5 12 12l9-4.5M12 12v9"/>',
     settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 7.5 19a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3 13.5H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 7.5a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/>',
     chevR: '<path d="M9 5l7 7-7 7"/>',
@@ -74,16 +109,14 @@
     close: '<path d="M18 6 6 18M6 6l12 12"/>',
     check: '<path d="M20 6 9 17l-5-5"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 16v-5M12 8h.01"/>',
-    refresh: '<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/>',
     prev: '<path d="M15 18l-6-6 6-6"/>',
     next: '<path d="M9 6l6 6-6 6"/>',
     copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
     external: '<path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>',
     empty: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 4v16"/>',
-    spark: '<path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/>',
   };
   const icon = (name, cls = "ico") =>
-    `<svg class="ico ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
+    `<svg class="ico ${cls}" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 
   // `hold` is for messages somebody has to actually read and act on, like being
   // told a person is going to call them. Those stay up long enough to be read
@@ -102,11 +135,21 @@
     root.innerHTML = `<main class="boot">${wordmark("lg")}<div class="bar"><i></i></div><p>${e(message)}</p></main>`;
   }
 
+  // Errors reach the screen as a sentence, never as a stack trace or a
+  // browser's own wording for a broken response.
+  function plainError(error) {
+    const text = String((error && error.message) || error || "");
+    if (!text || /^(TypeError|RangeError|SyntaxError|ReferenceError)|Failed to fetch|NetworkError|Request failed \(5/.test(text)) {
+      return "Quantify could not reach the server. Check the connection and try again.";
+    }
+    return text;
+  }
+
   function fatal(error) {
     root.innerHTML = `<main class="boot">${wordmark("lg")}
       <div class="card" style="max-width:440px"><div class="card-body" style="text-align:center">
         <h2 style="font-size:16px">Quantify could not load</h2>
-        <p class="lede" style="margin-top:8px">${e(error.message || error)}</p>
+        <p class="lede" style="margin-top:8px">${e(plainError(error))}</p>
         <div class="btn-row" style="justify-content:center;margin-top:16px"><button class="btn primary" data-do="retry">Try again</button></div>
       </div></div></main>`;
   }
@@ -138,7 +181,9 @@
   async function boot() {
     const path = pathNow();
     const inApp = path === "/app" || path.startsWith("/app/");
-    if (inApp) booting("Opening your workspace");
+    // The boot screen only shows when there is nothing on screen yet. A retry
+    // or a back button keeps whatever is already painted.
+    if (inApp && !root.querySelector(".app")) booting("Opening Quantify");
     try {
       S.auth = await API.get("/api/auth/state");
       if (S.auth.user?.csrf_token) API.setCsrf(S.auth.user.csrf_token);
@@ -174,20 +219,27 @@
   }
 
   function leaveApp() {
-    clearInterval(startPulse._t);
-    clearInterval(startPulse._clock);
+    stopPulse();
   }
 
   async function loadWorkspace() {
     S.boot = await API.get("/api/bootstrap");
     const known = S.boot.locations.some((row) => row.id === S.locationId);
     if (!known) S.locationId = S.boot.default_location_id || "";
-    localStorage.setItem("quantify.location", S.locationId);
-    // Two screens that used to be top level now live inside others. A browser
+    store.set("quantify.location", S.locationId);
+    // The day opens on the location's date, not the browser's.
+    if (!S.date) S.date = todayISO();
+    // Screens that used to be top level now live inside others. A browser
     // that remembers the old name lands on the new place, not on a blank page.
     if (S.view === "forecast") { S.view = "today"; S.todayPane = "ahead"; }
     if (S.view === "menu") { S.view = "settings"; S.settingsTab = "menu"; }
+    if (S.view === "suppliers") S.view = "ordering";
     if (!["today", "ordering", "history", "settings"].includes(S.view)) S.view = "today";
+    if (["email", "connections"].includes(S.settingsTab)) S.settingsTab = "location";
+    if (S.settingsTab === "suppliers") S.settingsTab = "location";
+    if (S.settingsTab === "security") S.settingsTab = "account";
+    if (!["location", "menu", "costs", "account"].includes(S.settingsTab)) S.settingsTab = "location";
+    store.set("quantify.stab", S.settingsTab);
     await loadView();
     startPulse();
     // First arrival gets the tutorial, once. It waits for the real screen so
@@ -690,16 +742,6 @@
     renderOnboarding();
   }
 
-  // Whatever is typed survives a re-render. Choosing an option must never wipe
-  // the name someone already entered.
-  function captureOnboarding() {
-    const form = document.getElementById("f-onb");
-    if (!form) return;
-    for (const [name, value] of new FormData(form).entries()) {
-      S.onboarding.values[name] = value;
-    }
-  }
-
   const CONCEPTS = [
     "Bakery or cafe", "Coffee shop", "Pizza", "Burgers and grill", "Fast casual",
     "Full service restaurant", "Deli or sandwiches", "Bar and kitchen", "Juice or smoothies",
@@ -917,10 +959,6 @@
     return `<span class="tz-hint">${icon("check")} Read as ${e(tz.matched)}, so ${e(label)}.</span>`;
   }
 
-  const debounce = (fn, ms) => {
-    let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
-  };
-
   /* ---------- shell ---------- */
   // Three places to work and one place to set things up. What to make today,
   // what to buy, and what happened. The next two weeks are a panel inside
@@ -930,56 +968,102 @@
     ["today", "Today", "today"],
     ["ordering", "Order", "order"],
     ["history", "History", "history"],
+    ["settings", "Settings", "settings"],
   ];
 
+  const currentLocation = () => S.boot.locations.find((row) => row.id === S.locationId) || S.boot.locations[0] || {};
+
   function shell(title, subtitle, tools, body) {
-    const location = S.boot.locations.find((row) => row.id === S.locationId) || S.boot.locations[0] || {};
-    const since = S.pulse.checkedAt ? Math.round((Date.now() - S.pulse.checkedAt) / 1000) : null;
+    const location = currentLocation();
+    const many = S.boot.locations.length > 1;
+    // The Today button says which day is open when it is not today.
+    const navLabel = (key, label) => (key === "today" && S.date !== todayISO() ? dShort(S.date) : label);
+    const where = `<span><b>${e(location.name || "Choose a location")}</b><span>${e([location.city, location.region].filter(Boolean).join(", "))}</span></span>`;
     return `<div class="app">
       <aside class="rail">
         <div class="rail-head">${wordmark()}</div>
         <nav class="rail-nav">
           ${NAV.map(([key, label, ico]) => `
             <button class="nav-item ${S.view === key ? "active" : ""}" data-view="${key}">
-              <i>${icon(ico)}</i><span>${label}</span></button>`).join("")}
-        </nav>
-        <div class="rail-label">Workspace</div>
-        <nav class="rail-nav">
-          <button class="nav-item ${S.view === "settings" ? "active" : ""}" data-view="settings"><i>${icon("settings")}</i><span>Settings</span></button>
+              <i>${icon(ico)}</i><span>${e(navLabel(key, label))}</span></button>`).join("")}
         </nav>
         <div class="rail-foot">
-          <button class="locpick" data-do="switch-location">
-            <span><b>${e(location.name || "Choose a location")}</b><span>${e([location.city, location.region].filter(Boolean).join(", "))}</span></span>
-            ${icon("chevD")}
-          </button>
+          ${many
+            ? `<button class="locpick" data-do="switch-location" aria-label="Switch location">${where}${icon("chevD")}</button>`
+            : `<div class="locpick static">${where}</div>`}
           <div class="rail-status">
             <span class="pulse-dot ${S.pulse.live ? "" : "stale"}"></span>
-            <span id="pulse-text">${S.pulse.live ? (since !== null && since > 3 ? `Updated ${since}s ago` : "Live") : "Connecting"}</span>
+            <span id="pulse-text">${pulseLabel()}</span>
           </div>
         </div>
       </aside>
       <div class="main">
         <header class="topbar">
+          <div class="progress" aria-hidden="true"><i></i></div>
           <div class="topbar-title"><h1>${e(title)}</h1>${subtitle ? `<p>${subtitle}</p>` : ""}</div>
           <div class="topbar-tools">${tools || ""}</div>
+          ${many ? `<button class="btn sm ghost locpick-top" data-do="switch-location" aria-label="Switch location"><span>${e(location.name || "")}</span>${icon("chevD")}</button>` : ""}
         </header>
         <main class="content">${body}</main>
       </div>
     </div>`;
   }
 
+  // Two arrows and the date as a button. The native picker sits invisibly over
+  // the button, so a tap opens it on every browser without a second control.
   function dateTools(includeToday = true) {
     return `<div class="datectl">
-      <button class="icon-btn" data-day="-1" title="Previous day">${icon("prev")}</button>
-      <input type="date" id="date-picker" value="${e(S.date)}" aria-label="Date">
-      <button class="icon-btn" data-day="1" title="Next day">${icon("next")}</button>
-    </div>${includeToday && S.date !== todayISO() ? `<button class="btn sm" data-do="today">Today</button>` : ""}`;
+      <button class="icon-btn" data-day="-1" aria-label="Previous day">${icon("prev")}</button>
+      <label class="datebtn"><span>${e(dShort(S.date))}</span>
+        <input type="date" id="date-picker" value="${e(S.date)}" aria-label="Pick a date"></label>
+      <button class="icon-btn" data-day="1" aria-label="Next day">${icon("next")}</button>
+    </div>${includeToday && S.date !== todayISO() ? `<button class="btn sm" data-do="today">Back to today</button>` : ""}`;
   }
 
+  // The thin bar at the top of the page while something is being fetched. The
+  // screen underneath stays put.
+  function progress(on) {
+    const bar = root.querySelector(".progress");
+    if (bar) bar.classList.toggle("on", !!on);
+  }
+
+  const isTyping = () => {
+    const active = document.activeElement;
+    return !!active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName) && active.type !== "date";
+  };
+
   /* ---------- data loading ---------- */
+  // What a screen last held, so it can be put back at once next time. Settings
+  // is left out: its forms are saved from, so it always reads fresh.
+  function viewKey() {
+    const base = `${S.view}:${S.locationId}:${S.date}`;
+    if (S.view === "ordering") return `${base}:${S.order.days}`;
+    if (S.view === "history") return `${base}:${S.historyTab}:${S.history.range}:${S.orders.range}`;
+    return base;
+  }
+  function snapshot() {
+    if (S.view === "today") return { data: S.data, attention: S.attention, outlook: S.outlook };
+    if (S.view === "history") return { data: S.data, history: S.history, orders: S.orders };
+    return { data: S.data };
+  }
+  function remember() {
+    if (S.view === "settings") return;
+    const keys = Object.keys(S.cache);
+    if (keys.length > 40) keys.slice(0, 20).forEach((key) => { delete S.cache[key]; });
+    S.cache[viewKey()] = snapshot();
+  }
+
+  // Keeps the current screen on while the next one is fetched. A screen seen
+  // before paints from memory at once and refreshes underneath; only a first
+  // open with nothing on screen shows a placeholder.
   async function loadView(silent = false) {
-    if (!silent) root.innerHTML = shell(viewTitle(), "", "", skeleton());
+    const first = !root.querySelector(".app");
+    const cached = S.cache[viewKey()];
+    if (first) root.innerHTML = shell(viewTitle(), "", "", skeleton());
+    else if (!silent && cached) { Object.assign(S, cached); render(); silent = true; }
+    const token = (loadView._seq = (loadView._seq || 0) + 1);
     const q = `location_id=${encodeURIComponent(S.locationId)}`;
+    progress(true);
     try {
       if (S.view === "today") {
         // The stock strip is optional. Nothing on Today waits for it, and a
@@ -988,23 +1072,44 @@
           API.get(`/api/brief?${q}&date=${S.date}`),
           API.get(`/api/supply/attention?${q}`).catch(() => null),
         ]);
+        if (token !== loadView._seq) return;
         S.data = brief;
         S.attention = attention;
       }
-      if (S.view === "ordering") S.data = await API.get(`/api/ordering?${q}&start=${S.date}&days=${S.order.days}`);
-      if (S.view === "history") await loadHistory(silent);
-      if (S.view === "settings") {
-        const [setup, billing] = await Promise.all([API.get(`/api/setup?${q}`), API.get("/api/billing")]);
-        S.data = { setup, billing };
-        if (S.settingsTab === "menu") S.menu = await API.get(`/api/menu?${q}`);
-        if (S.settingsTab === "costs" && !S.costs) S.costs = await API.get(`/api/costs?${q}`);
+      if (S.view === "ordering") {
+        const plan = await API.get(`/api/ordering?${q}&start=${S.date}&days=${S.order.days}`);
+        if (token !== loadView._seq) return;
+        S.data = plan;
       }
-      render();
+      if (S.view === "history") {
+        await loadHistory(silent);
+        if (token !== loadView._seq) return;
+      }
+      if (S.view === "settings") {
+        // Setup and billing are read once per visit and again after a save
+        // (the save handlers drop S.data). Tab taps never refetch them.
+        const have = S.data && S.data.setup && S.data.billing && S.data.location_id === S.locationId;
+        if (!have) {
+          const [setup, billing] = await Promise.all([API.get(`/api/setup?${q}`), API.get("/api/billing")]);
+          if (token !== loadView._seq) return;
+          S.data = { setup, billing, location_id: S.locationId };
+        }
+        if (S.settingsTab === "menu" && !S.menu) S.menu = await API.get(`/api/menu?${q}`);
+        if (S.settingsTab === "costs" && !S.costs) S.costs = await API.get(`/api/costs?${q}`);
+        if (token !== loadView._seq) return;
+      }
+      remember();
+      S.pulse.pending = false;
+      // A background refresh never repaints under someone's fingers.
+      if (!(silent && (isTyping() || layer.innerHTML))) render(silent);
       if (S.view === "today") maybeFetchNarrative();
       if (S.view === "today" && S.todayPane === "ahead") loadOutlook();
     } catch (error) {
+      if (token !== loadView._seq) return;
       if (error.status === 403) return boot();
-      fatal(error);
+      if (first) fatal(error); else toast(plainError(error), "error");
+    } finally {
+      if (token === loadView._seq) progress(false);
     }
   }
 
@@ -1047,10 +1152,9 @@
   }
 
   function rangeStart(range) {
-    const now = new Date();
-    if (range === "month") { now.setDate(now.getDate() - 30); return now.toISOString().slice(0, 10); }
-    if (range === "quarter") { now.setDate(now.getDate() - 90); return now.toISOString().slice(0, 10); }
-    if (range === "year") { now.setFullYear(now.getFullYear() - 1); return now.toISOString().slice(0, 10); }
+    if (range === "month") return addDays(todayISO(), -30);
+    if (range === "quarter") return addDays(todayISO(), -90);
+    if (range === "year") return addDays(todayISO(), -365);
     return null;
   }
 
@@ -1060,9 +1164,12 @@
     S.narrativeTried = key;
     try {
       const result = await API.get(`/api/brief/narrative?location_id=${encodeURIComponent(S.locationId)}&date=${S.date}`);
-      if (result && !result.pending && S.view === "today") {
+      // A late answer for another day or another location is dropped.
+      const same = S.view === "today" && `${S.locationId}:${S.date}` === key && S.data;
+      if (result && !result.pending && same) {
         S.data.narrative = result;
-        render(true);
+        remember();
+        if (!isTyping() && !layer.innerHTML) render(true);
       }
     } catch (_) { /* the built-in writer already filled the page */ }
   }
@@ -1074,22 +1181,30 @@
     return "Settings";
   }
 
+  // Only ever shown when there is nothing on screen yet.
   function skeleton() {
     return `<div class="stack">
       <div class="skel" style="height:150px;border-radius:13px"></div>
-      <div class="tiles">${[1, 2, 3, 4].map(() => `<div class="skel" style="height:118px;border-radius:13px"></div>`).join("")}</div>
+      <div class="tiles three">${[1, 2, 3].map(() => `<div class="skel" style="height:96px;border-radius:13px"></div>`).join("")}</div>
       <div class="skel" style="height:280px;border-radius:13px"></div>
     </div>`;
   }
 
   function render(preserve = false) {
     const y = window.scrollY;
-    if (S.view === "today") renderToday();
-    if (S.view === "history") renderHistory();
-    if (S.view === "ordering") renderOrdering();
-    if (S.view === "settings") renderSettings();
+    try {
+      if (S.view === "today") renderToday();
+      if (S.view === "history") renderHistory();
+      if (S.view === "ordering") renderOrdering();
+      if (S.view === "settings") renderSettings();
+    } catch (error) {
+      // One broken card must not take the whole screen down. What was on
+      // screen stays, and the person is told in a sentence.
+      if (!root.querySelector(".app")) throw error;
+      toast("Part of this screen could not be drawn. Try again in a moment.", "error");
+      return;
+    }
     if (preserve) window.scrollTo(0, y);
-    if (S.view === "history" && S.historyTab !== "accuracy") watchScroll();
   }
 
   /* ---------- today ---------- */
@@ -3091,7 +3206,7 @@
     },
   ];
   function tourEligible() {
-    if (localStorage.getItem("quantify.tour") === "done") return false;
+    if (store.get("quantify.tour") === "done") return false;
     return S.view === "today" && !!S.data;
   }
 
@@ -3105,7 +3220,7 @@
     document.body.classList.remove("tour-on");
     layer.innerHTML = "";
     S.tour = null;
-    localStorage.setItem("quantify.tour", "done");
+    store.set("quantify.tour", "done");
     if (finished) tourFinale();
   }
 
@@ -3133,7 +3248,7 @@
     if (needsView || needsTab) {
       S.view = stop.view;
       if (stop.tab) S.settingsTab = stop.tab;
-      localStorage.setItem("quantify.view", S.view);
+      store.set("quantify.view", S.view);
       await loadView();
       // loadView repaints the whole screen, so the tour card has to go back on.
       document.body.classList.add("tour-on");
@@ -3310,61 +3425,92 @@
     }
   }
 
-  function closeLayer() {
-    layer.innerHTML = "";
-    S.cancelFlow = null;
+  /* ---------- layers ---------- */
+  // Every sheet and modal opens through here so it gets focus on open and
+  // gives it back on close. Screens still setting layer.innerHTML directly
+  // are converted by their own region; new code uses openLayer.
+  function openLayer(html) {
+    if (!openLayer._from) openLayer._from = document.activeElement;
+    layer.innerHTML = html;
+    const first = layer.querySelector("[autofocus], input:not([type=hidden]), textarea, select, button:not(.modal-close):not(.scrim)");
+    if (first) { try { first.focus({ preventScroll: true }); } catch (_) { /* nothing focusable */ } }
   }
 
-  function emptyState(title, detail) {
-    return `<div class="empty">${icon("empty")}<b>${e(title)}</b><span>${e(detail)}</span></div>`;
+  function closeLayer() {
+    if (S.tour) return endTour(false);
+    layer.innerHTML = "";
+    S.cancelFlow = null;
+    const from = openLayer._from;
+    openLayer._from = null;
+    if (from && from.focus && document.contains(from)) { try { from.focus({ preventScroll: true }); } catch (_) { /* gone */ } }
+  }
+
+  // One heading, one sentence saying what will appear, and at most one button.
+  function emptyState(title, detail, button = "") {
+    return `<div class="empty">${icon("empty")}<b>${e(title)}</b><span>${e(detail)}</span>${button ? `<div>${button}</div>` : ""}</div>`;
   }
 
   /* ---------- live pulse ---------- */
-  function startPulse() {
+  // Asks the server every few seconds whether anything changed. It never
+  // repaints while a field has focus, while a sheet or modal is open, or on
+  // Settings, and it rests while the tab is hidden.
+  function pulseLabel() {
+    return S.pulse.live ? "Up to date" : "Reconnecting";
+  }
+
+  function stopPulse() {
     clearInterval(startPulse._t);
-    clearInterval(startPulse._clock);
+    startPulse._t = null;
+    if (startPulse._vis) document.removeEventListener("visibilitychange", startPulse._vis);
+    startPulse._vis = null;
+  }
+
+  function startPulse() {
+    stopPulse();
     const check = async () => {
+      if (document.hidden || !S.boot) return;
       try {
         const result = await API.get(`/api/pulse?location_id=${encodeURIComponent(S.locationId)}`);
         S.pulse.checkedAt = Date.now();
-        const changed = S.pulse.version && S.pulse.version !== result.version;
+        if (result.today) S.boot.today = result.today;
+        const changed = !!(S.pulse.version && S.pulse.version !== result.version);
         S.pulse.version = result.version;
         S.pulse.live = true;
-        if (changed && !layer.innerHTML) await loadView(true);
-        else paintPulse();
+        const busy = !!layer.innerHTML || isTyping() || S.view === "settings";
+        if ((changed || S.pulse.pending) && !busy) { S.pulse.pending = false; await loadView(true); }
+        else if (changed) S.pulse.pending = true;
       } catch (_) {
         S.pulse.live = false;
-        paintPulse();
       }
+      paintPulse();
     };
+    const tick = () => { clearInterval(startPulse._t); startPulse._t = setInterval(check, 11000); };
+    startPulse._vis = () => {
+      if (document.hidden) { clearInterval(startPulse._t); startPulse._t = null; }
+      else { check(); tick(); }
+    };
+    document.addEventListener("visibilitychange", startPulse._vis);
     check();
-    startPulse._t = setInterval(check, 11000);
-    startPulse._clock = setInterval(paintPulse, 1000);
+    tick();
   }
 
   function paintPulse() {
     const dot = document.querySelector(".pulse-dot");
     const text = document.getElementById("pulse-text");
     if (!dot || !text) return;
-    dot.className = `pulse-dot ${S.pulse.live ? "" : "stale"}`;
-    if (!S.pulse.live) { text.textContent = "Reconnecting"; return; }
-    const since = Math.round((Date.now() - S.pulse.checkedAt) / 1000);
-    text.textContent = since <= 3 ? "Live, updating on its own" : `Checked ${since}s ago`;
+    const cls = `pulse-dot ${S.pulse.live ? "" : "stale"}`.trim();
+    if (dot.className !== cls) dot.className = cls;
+    const label = pulseLabel();
+    if (text.textContent !== label) text.textContent = label;
   }
 
-  /* ---------- infinite scroll ---------- */
-  let observer = null;
-  function watchScroll() {
-    if (observer) observer.disconnect();
-    const sentinel = document.getElementById("sentinel");
-    if (!sentinel) return;
-    observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) {
-        if (S.historyTab === "days") moreDays();
-        else if (S.historyTab === "orders") moreOrders();
-      }
-    }, { rootMargin: "300px" });
-    observer.observe(sentinel);
+  // Everything a location holds in memory. Called when the location changes so
+  // nothing from the last one is shown or saved against the new one.
+  function resetLocationState() {
+    S.costs = null; S.menu = null; S.supply = null; S.attention = null; S.outlook = null; S.data = null;
+    S.order.edits = {}; S.order.extras = [];
+    S.narrativeTried = ""; S.itemCache = {}; S.open = new Set();
+    S.history.costs = null; S.pulse.version = null; S.pulse.pending = false;
   }
 
   async function moreDays() {
@@ -3397,7 +3543,24 @@
   }
 
   /* ---------- interactions ---------- */
+  // Moves to another day. The page starts at the top and any order quantities
+  // typed for the old window are let go.
+  function setDate(iso) {
+    if (!iso || iso === S.date) return;
+    S.date = iso;
+    if (S.view === "ordering") S.order.edits = {};
+    window.scrollTo(0, 0);
+    return loadView();
+  }
+
   document.addEventListener("click", async (event) => {
+    // Tapping the dimmed page outside a sheet or modal closes it.
+    if (event.target.classList.contains("scrim") || event.target.classList.contains("modal-wrap")) return closeLayer();
+    if (event.target.id === "date-picker") {
+      // Chrome only opens the calendar from its own icon; ask for it outright.
+      try { if (event.target.showPicker) event.target.showPicker(); } catch (_) { /* the native tap already opened it */ }
+      return;
+    }
     const link = event.target.closest("a[data-link]");
     if (link) { event.preventDefault(); return go(link.dataset.link); }
     const anchor = event.target.closest("a[data-scroll]");
@@ -3417,36 +3580,51 @@
     if (target.tagName === "A") event.preventDefault();
 
     if (target.dataset.view) {
+      // A second tap on the same button while it is still loading does nothing.
+      if (S.view === target.dataset.view && root.querySelector(".progress.on")) return;
       S.view = target.dataset.view;
-      localStorage.setItem("quantify.view", S.view);
+      store.set("quantify.view", S.view);
       window.scrollTo(0, 0);
       return loadView();
     }
     if (target.dataset.htab) { S.historyTab = target.dataset.htab; return loadView(); }
-    if (target.dataset.owin) { S.order.days = Number(target.dataset.owin); return loadView(); }
+    if (target.dataset.owin) { S.order.days = Number(target.dataset.owin); S.order.edits = {}; return loadView(); }
     if (target.dataset.oadj) return orderAdjust(target.dataset.oadj, Number(target.dataset.step));
     if (target.dataset.odrop) {
       S.order.extras.splice(Number(target.dataset.odrop), 1);
-      return render();
+      return render(true);
     }
     if (target.dataset.stab) {
+      // The tab paints from what is already in memory; only what it lacks is
+      // fetched afterwards.
+      const have = S.view === "settings" && S.data && S.data.setup && S.data.billing;
       S.settingsTab = target.dataset.stab;
-      S.view = "settings"; localStorage.setItem("quantify.view", S.view);
+      store.set("quantify.stab", S.settingsTab);
+      S.view = "settings"; store.set("quantify.view", S.view);
       window.scrollTo(0, 0);
-      return loadView(true);
+      if (have) { render(); return loadView(true); }
+      return loadView();
     }
     if (target.dataset.pane) {
       S.todayPane = target.dataset.pane;
-      render(true);
+      // Only the panel changes, not the page around it.
+      const panel = document.getElementById("daypanes");
+      const head = panel && panel.querySelector(".card-head");
+      if (panel && head && S.data && typeof todayPane === "function") {
+        head.querySelectorAll("[data-pane]").forEach((node) => node.classList.toggle("on", node.dataset.pane === S.todayPane));
+        while (head.nextSibling) head.nextSibling.remove();
+        head.insertAdjacentHTML("afterend", todayPane(S.data));
+      } else render(true);
       if (S.todayPane === "ahead") loadOutlook();
       return;
     }
     if (target.dataset.drange) { S.history.range = target.dataset.drange; return loadView(); }
     if (target.dataset.orange) { S.orders.range = target.dataset.orange; return loadView(); }
-    if (target.dataset.day) { S.date = addDays(S.date, Number(target.dataset.day)); return loadView(); }
+    if (target.dataset.day) return setDate(addDays(S.date, Number(target.dataset.day)));
     if (target.dataset.openDate) {
-      S.date = target.dataset.openDate; S.view = "today"; S.todayPane = "make"; closeLayer();
-      window.scrollTo(0, 0); return loadView();
+      S.view = "today"; S.todayPane = "make"; closeLayer();
+      store.set("quantify.view", S.view);
+      S.date = ""; return setDate(target.dataset.openDate);
     }
     if (target.dataset.dayDetail) return openDaySheet(target.dataset.dayDetail);
     if (target.dataset.itemSheet) return openItemSheet(target.dataset.itemSheet);
@@ -3507,12 +3685,13 @@
 
     switch (action) {
       case "retry": return boot();
-      case "today": S.date = todayISO(); return loadView();
+      case "today": return setDate(todayISO());
       case "back-signin": return go("/login");
       case "close-layer": return closeLayer();
-      case "copy":
-        await navigator.clipboard.writeText(target.dataset.copy || "");
-        return toast("Copied");
+      case "copy": {
+        const ok = await copyText(target.dataset.copy || "");
+        return toast(ok ? "Copied" : "Could not copy on this browser", ok ? "ok" : "error");
+      }
       case "onb-back":
         S.onboarding.step = Math.max(0, S.onboarding.step - 1);
         return renderOnboarding();
@@ -3532,9 +3711,11 @@
       }
       case "preview-email": return previewEmail();
       case "send-test": return sendTest();
-      case "adjust": return openAdjust(target);
+      case "adjust":
+        try { return openAdjust(target); }
+        catch (_) { return toast("Open Today to adjust this item", "error"); }
       case "clear-adjust": return clearAdjust(target);
-      case "compose": case "recompose": return composeItem(target.dataset.item, action === "recompose");
+      case "recompose": return composeItem(target.dataset.item, true);
       case "edit-composition": return editComposition(target.dataset.item);
       case "menu-preview": case "menu-import": return menuImport(action === "menu-import");
       case "switch-location": return openLocationPicker();
@@ -3544,8 +3725,9 @@
       case "mfa-off": return openTwoStepOff();
       case "signout":
         try { await API.send("/api/auth/logout", "POST", {}); } catch (_) { /* expire locally */ }
-        clearInterval(startPulse._t); clearInterval(startPulse._clock);
-        API.setCsrf(""); S.auth = null; S.boot = null;
+        leaveApp();
+        API.setCsrf(""); S.auth = null; S.boot = null; S.cache = {}; S.date = "";
+        store.set("quantify.view", "today");
         return go("/", true);
       case "more-days": return moreDays();
       case "more-orders": return moreOrders();
@@ -3557,9 +3739,14 @@
       case "tour-next": S.tour.step += 1; return paintTour();
       case "tour-back": S.tour.step = Math.max(0, S.tour.step - 1); return paintTour();
       case "tour-end": return endTour(false);
-      case "tour-start": return startTour(true);
-      case "order-reset": S.order.edits = {}; return render();
-      case "order-copy": return orderCopy();
+      case "tour-start":
+        // Replayed from Settings > Account: the tour begins on Today.
+        closeLayer();
+        S.view = "today"; S.todayPane = "make"; store.set("quantify.view", S.view);
+        window.scrollTo(0, 0);
+        await loadView();
+        return startTour(true);
+      case "order-reset": S.order.edits = {}; return render(true);
       case "order-add": return openOrderAdd();
       case "billing-portal": return billingRedirect("/api/billing/portal");
       case "billing-checkout": return billingRedirect("/api/billing/checkout");
@@ -3576,21 +3763,26 @@
     if (box) {
       const value = Number(box.value);
       S.order.edits[box.dataset.oqty] = Number.isFinite(value) && value >= 0 ? value : 0;
-      render();
+      render(true);
     }
   });
 
   document.addEventListener("change", async (event) => {
-    if (event.target.id === "date-picker") { S.date = event.target.value; return loadView(); }
+    if (event.target.id === "date-picker") return setDate(event.target.value);
   });
 
+  // One handler per form id. The supply forms (ids starting f-supply-) have
+  // their own listener in the ordering block and are skipped here. The submit
+  // button stays disabled until the request settles, so a double tap sends once.
   document.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.target;
+    if (String(form.id || "").startsWith("f-supply-")) return;
     const data = Object.fromEntries(new FormData(form).entries());
     const button = form.querySelector("button[type=submit]");
     if (button) button.disabled = true;
     try {
+      if (form.id === "f-costs") { await saveCosts(); return; }
       if (form.id === "f-create") {
         const result = await API.send("/api/auth/setup", "POST", data);
         API.setCsrf(result.csrf_token);
@@ -3636,16 +3828,18 @@
         return renderOnboarding();
       }
       if (form.id === "f-location") {
-        const result = await API.send(`/api/location?location_id=${encodeURIComponent(S.locationId)}`, "POST", data);
-        toast(`Saved. Times run on ${result.timezone.label.toLowerCase()}.`);
+        await API.send(`/api/location?location_id=${encodeURIComponent(S.locationId)}`, "POST", data);
+        toast("Saved");
         S.boot = await API.get("/api/bootstrap");
-        return loadView();
+        S.data = null;
+        return loadView(true);
       }
       if (form.id === "f-email") {
         await API.send(`/api/email/preferences?location_id=${encodeURIComponent(S.locationId)}`, "POST",
           { ...data, enabled: form.elements.enabled.checked, include_week_ahead: true });
-        toast("Morning email saved");
-        return loadView();
+        toast("Saved");
+        S.data = null;
+        return loadView(true);
       }
       if (form.id === "f-composition") {
         const components = String(data.parts || "").split(NEWLINE).map((line) => line.split("|").map((v) => v.trim()))
@@ -3657,20 +3851,27 @@
         await API.send(`/api/menu/composition?location_id=${encodeURIComponent(S.locationId)}`, "PUT",
           { item_id: data.item_id, summary: data.summary, components });
         closeLayer();
-        toast("Saved. This item is no longer an estimate.");
-        return loadView();
+        toast("Saved");
+        S.menu = null;
+        return loadView(true);
       }
       if (form.id === "f-adjust") {
         await API.send(`/api/forecast/override?location_id=${encodeURIComponent(S.locationId)}`, "POST",
           { item_id: data.item_id, date: S.date, quantity: Number(data.quantity), reason: data.reason });
+        // The item sheet notes which item it has open in S.sheetItem, so an
+        // adjustment made from the sheet lands back on the sheet.
+        const back = S.sheetItem || "";
         closeLayer();
-        toast("Your number is in. The model result is kept alongside it.");
-        return loadView();
+        toast("Adjusted");
+        if (S.view !== "today") { S.view = "today"; S.todayPane = "make"; store.set("quantify.view", S.view); }
+        await loadView(true);
+        if (back) openItemSheet(back);
+        return;
       }
     } catch (error) {
-      toast(error.message, "error");
+      toast(plainError(error), "error");
     } finally {
-      if (button) button.disabled = false;
+      if (button && document.contains(button)) button.disabled = false;
     }
   });
 
@@ -3813,9 +4014,9 @@
   }
 
   function openLocationPicker() {
-    layer.innerHTML = `<div class="scrim" data-do="close-layer"></div>
-      <div class="modal-wrap"><div class="modal">
-        <button class="modal-close" data-do="close-layer">${icon("close")}</button>
+    openLayer(`<div class="scrim" data-do="close-layer"></div>
+      <div class="modal-wrap"><div class="modal" role="dialog" aria-modal="true" aria-label="Switch location">
+        <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
         <div class="modal-head"><h2>Switch location</h2></div>
         <div class="modal-body"><div style="display:grid;gap:8px">
           ${S.boot.locations.map((row) => `
@@ -3823,12 +4024,12 @@
               <span class="radio"></span>
               <div><b>${e(row.name)}</b><small>${e(row.concept)} · ${e(row.city)}, ${e(row.region)}</small></div></button>`).join("")}
         </div></div>
-      </div></div>`;
+      </div></div>`);
     layer.querySelectorAll("[data-pick-location]").forEach((node) => {
       node.addEventListener("click", async () => {
         S.locationId = node.dataset.pickLocation;
-        localStorage.setItem("quantify.location", S.locationId);
-        S.narrativeTried = "";
+        store.set("quantify.location", S.locationId);
+        resetLocationState();
         closeLayer();
         await loadView();
       });

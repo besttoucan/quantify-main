@@ -1514,7 +1514,16 @@
     ((live && live.hours) || []).forEach((h) => { byslot[h.slot] = h; });
     const max = Math.max(...rows.map((r) => Number(r.units || 0)), ...Object.values(byslot).map((h) => Number(h.rung_units || 0)), 1);
     const peak = rows.reduce((best, row) => (Number(row.units) > Number(best.units) ? row : best), rows[0]);
-    return `<div class="chart-key hours-key"><span><i class="k-pred"></i>Expected</span>${live ? '<span><i class="k-actual"></i>Sold</span>' : '<span><i class="k-peak"></i>Busiest hour</span>'}</div><div class="hours">${rows.map((row) => {
+    // One series of bars with one member picked out is not two datasets. The
+    // two-entry key said it was, which is what made it read as nonsense. The
+    // peak is already named in bold under its own bar and again in the
+    // sentence below, so removing the key loses nothing. Live service does
+    // draw two real series, and that key stays, with a block swatch shaped
+    // like the bars it describes.
+    const key = live
+      ? `<div class="chart-key hours-key"><span><i class="k-pred"></i>Expected</span><span><i class="k-actual"></i>Sold</span></div>`
+      : "";
+    return `<p class="hours-unit">${live ? "Items each hour, expected and sold" : "Items expected each hour"}</p>${key}<div class="hours">${rows.map((row) => {
       const h = (Number(row.units || 0) / max) * 100;
       const state = byslot[row.slot ?? row.hour];
       const done = !!(state && state.state === "done");

@@ -601,8 +601,13 @@ table.dt.stack { display: table; gap: 0; }
 .chart-key i { display: inline-block; width: 18px; border-top: 2px solid; margin-right: 6px; vertical-align: middle; }
 .chart-key .k-actual { border-color: var(--ink); }
 .chart-key .k-pred { border-color: var(--series-1); border-top-style: dashed; }
-.chart-key .k-peak { border-color: var(--accent); }
-.hours-key .k-pred { border-top-style: solid; }
+.hours-unit { margin-bottom: 2px; font-size: var(--t-sm); color: var(--ink-2); }
+/* This chart draws bars, so its key draws a bar. A line swatch described a
+   mark the hour chart never makes. The border has to be cleared at this
+   specificity, because .chart-key .k-pred above also carries two classes. */
+.hours-key i { width: 10px; height: 12px; border-radius: 2px 2px 0 0; }
+.hours-key .k-pred { border: 0; background: var(--series-1); }
+.hours-key .k-actual { border: 0; background: var(--ink); }
 
 /* ---------- week strip ---------- */
 .week { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); }

@@ -204,9 +204,17 @@ class QuantifyPlatformTests(unittest.TestCase):
                 email = build_email(conn, LOCATION, TODAY)
                 delivered = deliver_brief(conn, self.root, LOCATION, TODAY)
             self.assertIn("Quantify", email["subject"])
-            self.assertIn("What matters", email["html"])
+            self.assertIn("What to do", email["html"])
             self.assertIn("Expected sales", email["html"])
             self.assertIn("Why", email["text"])
+            # Mail clients turn figures and dates into links and paint them
+            # blue. Every number here exists to be read, so the override that
+            # forces them back has to survive any future edit of this template.
+            self.assertIn("x-apple-data-detectors", email["html"])
+            self.assertIn("format-detection", email["html"])
+            # The change against normal is worked out for the reader rather
+            # than left as two columns to subtract.
+            self.assertIn("Change", email["html"])
             self.assertEqual(delivered["status"], "outbox")
             artifact = Path(delivered["artifact_path"])
             self.assertTrue(artifact.exists())

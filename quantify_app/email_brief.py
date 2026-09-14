@@ -51,32 +51,178 @@ def _empty_message(brief: dict[str, Any]) -> str:
             "or add your menu and the first plan appears the next morning.")
 
 
-def render_brief_html(brief: dict[str, Any]) -> str:
+# The product palette, as literals. Email cannot read CSS variables, and every
+# one of these has to be stated inline on the element that uses it: a client
+# that strips <style> or inverts for dark mode will otherwise repaint the text
+# and the figures stop being readable.
+INK, INK_2, INK_3 = "#15171a", "#4b5058", "#797f88"
+LINE, PAGE, CARD = "#e7e6e2", "#f7f7f5", "#ffffff"
+ACCENT, UP, DOWN, WARN, STOP = "#14634f", "#17694f", "#a4402c", "#8a5a12", "#8c2f1c"
+FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+NUM = "font-variant-numeric:tabular-nums;font-feature-settings:'tnum'"
+DASH = "&#8212;"
+
+
+def _delta(expected: float, baseline: float) -> tuple[str, str]:
+    """The change against normal, and the colour it earns.
+
+    Returned already worked out, because the reader should not have to subtract
+    one column from another at six in the morning. Same materiality gate the
+    make table uses on screen, three items and five percent, so the email and
+    the screen never disagree about which rows moved.
+    """
+    try:
+        gap = round(float(expected) - float(baseline))
+        share = abs(gap) / max(1.0, float(baseline)) * 100
+    except (TypeError, ValueError):
+        return "", INK_3
+    if abs(gap) < 3 or share < 5:
+        return "", INK_3
+    return (f"+{gap}" if gap > 0 else str(gap)), (UP if gap > 0 else DOWN)
+
+
+def _stat(label: str, value: str, compare: str) -> str:
+    """One figure, its name, and the thing it should be read against."""
+    return (
+        f'<td class="sp" width="33%" valign="top" style="padding:0 14px 0 0">'
+        f'<div style="font:600 11px {FONT};letter-spacing:.08em;text-transform:uppercase;color:{INK_3};padding-bottom:5px">{label}</div>'
+        f'<div style="font:600 26px/1.1 {FONT};color:{INK};{NUM}">{value}</div>'
+        f'<div style="font:13px/1.4 {FONT};color:{INK_2};padding-top:4px">{compare}</div></td>'
+    )
+
+
+def _heading(text: str) -> str:
+    return (f'<h2 style="margin:30px 0 10px;font:600 15px {FONT};color:{INK};'
+            f'padding-bottom:8px;border-bottom:1px solid {LINE}">{text}</h2>')
+
+
+def _stock_block(lines: list[dict[str, Any]]) -> str:
+    """What runs out, and by when it has to be ordered.
+
+    This is the one part of the morning that has a deadline attached, so it sits
+    above the make list rather than below it. Only lines already inside a day of
+    cover reach here, because a warning that arrives every morning stops being
+    read by the second week.
+    """
+    if not lines:
+        return ""
+    rows = []
+    for line in lines[:5]:
+        runs = html.escape(str(line.get("runs_out_label") or "soon"))
+        name = html.escape(str(line.get("name") or "Something"))
+        if line.get("no_supplier") or not line.get("supplier_id"):
+            todo, tone = "No supplier chosen yet", STOP
+        elif line.get("late"):
+            todo, tone = "The order is already late", STOP
+        elif line.get("order_by_label"):
+            todo, tone = f"Order by {html.escape(str(line['order_by_label']))}", INK_2
+        else:
+            todo, tone = f"From {html.escape(str(line.get('supplier') or 'your supplier'))}", INK_2
+        rows.append(
+            f'<tr><td style="padding:11px 0;border-top:1px solid {LINE};font:14px/1.45 {FONT};color:{INK}">'
+            f'<b style="font-weight:600">{name}</b>'
+            f'<span style="color:{STOP};font-weight:600"> runs out {runs}</span><br>'
+            f'<span style="font-size:13px;color:{tone}">{todo}</span></td></tr>'
+        )
+    return (_heading("Before anything else")
+            + '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
+            + "".join(rows) + "</table>")
+
+
+def render_brief_html(brief: dict[str, Any], stock: list[dict[str, Any]] | None = None) -> str:
     location = brief["location"]
     summary = brief["summary"]
     generated = datetime.fromisoformat(brief["generated_at"]).astimezone(zone(location["timezone"]))
     sent = generated.strftime("%I:%M %p %Z").lstrip("0")
-    text_style = "font:14px/1.5 Arial,sans-serif;color:#35433b"
+    body_font = f"font:15px/1.55 {FONT};color:{INK_2}"
+
     if brief.get("no_history"):
-        content = f'<h1 style="font:600 24px Arial,sans-serif">Nothing to plan yet</h1><p>{html.escape(_empty_message(brief))}</p>'
+        content = (f'<h1 style="margin:14px 0 8px;font:600 24px/1.25 {FONT};color:{INK}">Nothing to plan yet</h1>'
+                   f'<p style="margin:0;{body_font}">{html.escape(_empty_message(brief))}</p>')
     else:
+        stats = "".join([
+            _stat("Expected sales", _money(summary["expected_revenue"]),
+                  f"{_money(brief['comparison']['sales'])} on {html.escape(brief['comparison']['label'])}"),
+            _stat("To make", f"{summary['make_units']}", f"{summary['expected_units']} expected to sell"),
+            _stat("Busiest hour", html.escape(summary.get("peak_hour") or "Not known"),
+                  f"{summary.get('peak_units', 0)} items, {summary.get('peak_share_percent', 0)}% of the day"),
+        ])
+
         rows = []
         for item in brief.get("top_volume", [])[:10]:
-            values = [html.escape(item["name"]), str(item["make"]), str(item["expected"]), str(item["baseline"])]
-            cells = ''.join(f'<td style="padding:12px 8px;border-top:1px solid #d7dcd9;text-align:{"left" if i == 0 else "right"}">{value}</td>' for i,value in enumerate(values))
-            rows.append(f'<tr>{cells}</tr>')
-        heads = ''.join(f'<th style="padding:8px;text-align:{"left" if i == 0 else "right"};font-weight:500">{label}</th>' for i,label in enumerate(["Item", "Make", "Expected", "Normal"]))
-        reasons = ''.join(f'<p><b>{html.escape(row["label"])}</b><br>{html.escape(row.get("detail", ""))}</p>' for row in brief["context"]["signals"][:4])
-        actions = ''.join(f'<p><b>{html.escape(row["title"])}</b><br>{html.escape(row["detail"])}</p>' for row in brief.get("priorities", [])[:2])
-        content = f"""<h1 style="font:600 24px/1.3 Arial,sans-serif;margin:16px 0">{html.escape(brief['headline'])}</h1>
-<p><b>Expected sales {_money(summary['expected_revenue'])}</b><br>{_money(brief['comparison']['sales'])} on {html.escape(brief['comparison']['label'])}.</p>
-<p><b>Make {summary['make_units']} items</b><br>{summary['expected_units']} expected to sell.</p>
-<p><b>Busiest hour {html.escape(summary.get('peak_hour') or 'Not available')}</b><br>{summary.get('peak_units',0)} items, about {summary.get('peak_share_percent',0)}% of the day.</p>
-<h2 style="font:600 18px Arial,sans-serif;margin-top:24px">What matters</h2>{actions or '<p>The make list is close to normal.</p>'}
-<h2 style="font:600 18px Arial,sans-serif;margin-top:24px">What to make</h2><table width="100%" cellpadding="0" cellspacing="0" style="font:14px/1.5 Arial,sans-serif"><thead><tr>{heads}</tr></thead><tbody>{''.join(rows)}</tbody></table>
-<h2 style="font:600 18px Arial,sans-serif;margin-top:24px">Why</h2>{reasons or '<p>No clear change from normal.</p>'}"""
-    return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{html.escape(_email_subject(brief))}</title></head>
-<body style="margin:0;background:#f6f7f6;{text_style}"><table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td align="center" style="padding:24px 12px"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:white;border:1px solid #d7dcd9"><tr><td style="padding:24px;{text_style}"><div style="font-weight:600;color:{BRAND_INK}">QUANTIFY</div><p>Morning email<br>{html.escape(location['name'])}<br>{html.escape(brief['date_label'])}</p>{content}<p style="margin-top:24px;padding-top:16px;border-top:1px solid #d7dcd9;font-size:12px">Sent {html.escape(sent)}. Register data runs through {html.escape(brief['data_health']['latest_sale_date'] or 'no sales yet')}. Change the time or turn this off in Settings.</p></td></tr></table></td></tr></table></body></html>"""
+            gap, tone = _delta(item.get("expected", 0), item.get("baseline", 0))
+            cell = f"padding:11px 6px;border-top:1px solid {LINE};font:14px {FONT};{NUM}"
+            rows.append(
+                f'<tr><td style="{cell};color:{INK};text-align:left">{html.escape(item["name"])}</td>'
+                f'<td style="{cell};color:{INK};font-weight:600;text-align:right">{item["make"]}</td>'
+                f'<td style="{cell};color:{INK_2};text-align:right">{item["baseline"]}</td>'
+                f'<td style="{cell};color:{tone};font-weight:600;text-align:right">{gap or DASH}</td></tr>'
+            )
+        heads = "".join(
+            f'<th style="padding:0 6px 8px;font:600 11px {FONT};letter-spacing:.06em;'
+            f'text-transform:uppercase;color:{INK_3};text-align:{"left" if i == 0 else "right"}">{label}</th>'
+            for i, label in enumerate(["Item", "Make", "Normal", "Change"]))
+
+        actions = "".join(
+            f'<p style="margin:0 0 13px;{body_font}"><b style="color:{INK};font-weight:600">'
+            f'{html.escape(row["title"])}</b><br>{html.escape(row["detail"])}</p>'
+            for row in brief.get("priorities", [])[:3])
+        reasons = "".join(
+            f'<p style="margin:0 0 13px;{body_font}"><b style="color:{INK};font-weight:600">'
+            f'{html.escape(row["label"])}</b><br>{html.escape(row.get("detail", ""))}</p>'
+            for row in brief["context"]["signals"][:4])
+        weekday = html.escape(datetime.fromisoformat(brief["date"]).strftime("%A"))
+
+        content = (
+            f'<h1 style="margin:14px 0 20px;font:600 27px/1.2 {FONT};color:{INK};letter-spacing:-.02em">'
+            f'{html.escape(brief["headline"])}</h1>'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>{stats}</tr></table>'
+            + _stock_block(stock or [])
+            + _heading("What to do")
+            + (actions or f'<p style="margin:0;{body_font}">The make list is close to a normal day.</p>')
+            + _heading("What to make")
+            + '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
+            + f"<thead><tr>{heads}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
+            + f'<p style="margin:10px 0 0;font:12px/1.5 {FONT};color:{INK_3}">'
+            + f"Change is against a normal {weekday}. A dash means the day is within two items of normal.</p>"
+            + _heading("Why today looks like this")
+            + (reasons or f'<p style="margin:0;{body_font}">No clear change from normal.</p>')
+        )
+
+    through = brief["data_health"]["latest_sale_date"] or "no sales yet"
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light">
+<meta name="format-detection" content="telephone=no,date=no,address=no,email=no">
+<title>{html.escape(_email_subject(brief))}</title>
+<style>
+/* Apple Mail and iOS turn figures, dates and times into links and paint them
+   blue. Every one of those is a number this email exists to make readable, so
+   they are all forced back to the colour they were given. */
+a[x-apple-data-detectors]{{color:inherit!important;text-decoration:none!important;font-size:inherit!important;font-family:inherit!important;font-weight:inherit!important;line-height:inherit!important}}
+/* The three figures sit in a row on a desktop and stack on a phone, which is
+   where this is actually read, standing up, before service. */
+@media only screen and (max-width:600px){{
+  .sp{{display:block!important;width:100%!important;padding:0 0 18px 0!important}}
+  .pad{{padding-left:20px!important;padding-right:20px!important}}
+}}
+</style></head>
+<body id="body" style="margin:0;padding:0;background:{PAGE};-webkit-text-size-adjust:100%;{body_font}">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0">{html.escape(brief['headline'])}. {html.escape(brief['date_label'])}.</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:{PAGE}"><tr><td align="center" style="padding:28px 12px">
+<table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="width:640px;max-width:100%;background:{CARD};border:1px solid {LINE};border-radius:14px">
+<tr><td class="pad" style="padding:24px 30px 0">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+    <td style="font:600 13px {FONT};letter-spacing:.22em;color:{INK}">QUANTIFY</td>
+    <td align="right" style="font:13px {FONT};color:{INK_3}">{html.escape(location['name'])}</td>
+  </tr></table>
+  <div style="margin-top:4px;font:13px {FONT};color:{INK_3}">{html.escape(brief['date_label'])}</div>
+</td></tr>
+<tr><td class="pad" style="padding:0 30px 28px">{content}</td></tr>
+<tr><td class="pad" style="padding:16px 30px 22px;border-top:1px solid {LINE};font:12px/1.6 {FONT};color:{INK_3}">
+  Sent {html.escape(sent)}. Register data runs through {html.escape(through)}.<br>
+  Change the send time or turn this off in Settings, under Location.
+</td></tr></table></td></tr></table></body></html>"""
 
 
 def render_brief_text(brief: dict[str, Any]) -> str:
@@ -99,9 +245,24 @@ def render_brief_text(brief: dict[str, Any]) -> str:
 
 def build_email(conn: sqlite3.Connection, location_id: str, target_date: date) -> dict[str, Any]:
     brief = daily_brief(conn, location_id, target_date, week_days=7)
+    # The thing with a deadline on it was missing from the morning email
+    # entirely: a line running out today appeared on the screen and nowhere in
+    # the message the owner actually reads. attention() returns nothing at all
+    # until somebody has counted something, so this stays quiet rather than
+    # guessing, and a failure here must never cost anyone their brief.
+    stock: list[dict[str, Any]] = []
+    try:
+        from .supply import attention
+
+        for line in attention(conn, location_id).get("lines", []):
+            cover = line.get("days_of_cover")
+            if line.get("late") or (isinstance(cover, (int, float)) and cover < 1):
+                stock.append(line)
+    except Exception:  # noqa: BLE001 - the email ships with or without stock
+        stock = []
     return {
         "subject": _email_subject(brief),
-        "html": render_brief_html(brief),
+        "html": render_brief_html(brief, stock),
         "text": render_brief_text(brief),
         "brief": brief,
     }

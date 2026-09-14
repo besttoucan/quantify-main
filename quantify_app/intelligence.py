@@ -1460,12 +1460,14 @@ def forecast_day(
     comparable_days = int(round(safe_median([row["evidence"]["weekday_samples"] for row in live]))) if live else 0
     data_health = _data_health(conn, location_id, target_date)
     history_days = data_health["history_days"]
-    recent = conn.execute(
-        "SELECT AVG(accuracy) AS accuracy, COUNT(*) AS days FROM (SELECT accuracy FROM day_accuracy WHERE location_id=? ORDER BY date DESC LIMIT 21)",
-        (location_id,),
-    ).fetchone()
-    measured_accuracy = float(recent["accuracy"]) if recent and recent["accuracy"] is not None else None
-    days_tested = int(recent["days"] or 0) if recent else 0
+    from .transactions import reconciled_score
+    recent = [reconciled_score(conn, dict(row)) for row in conn.execute(
+        "SELECT * FROM day_accuracy WHERE location_id=? AND date<? ORDER BY date DESC LIMIT 21",
+        (location_id, target_date.isoformat()),
+    )]
+    measured = [row["accuracy"] for row in recent if row["accuracy"] is not None]
+    measured_accuracy = sum(measured)/len(measured) if measured else None
+    days_tested = len(measured)
     # Once there are enough closed days, the score people see is grounded in how
     # this location's forecasts have actually landed, not in an estimate
     # of itself. Claiming 95% confidence beside a measured 9% error is the kind
@@ -1754,10 +1756,10 @@ def performance(conn: sqlite3.Connection, location_id: str, as_of: date, days: i
         return empty
 
     def scored_rows() -> dict[str, dict[str, Any]]:
-        from .transactions import normalized_score
+        from .transactions import reconciled_score
         marks = ",".join("?" * len(dates))
         return {
-            row["date"]: normalized_score(dict(row))
+            row["date"]: reconciled_score(conn, dict(row))
             for row in conn.execute(
                 f"SELECT * FROM day_accuracy WHERE location_id=? AND date IN ({marks})",
                 (location_id, *dates),
@@ -1774,7 +1776,7 @@ def performance(conn: sqlite3.Connection, location_id: str, as_of: date, days: i
         runs: list[tuple[date, date]] = []
         for day in missing[1:]:
             current = date.fromisoformat(day)
-            if (current - previous).days > 3:
+            if (current - previous).days > 1:
                 runs.append((start, previous))
                 start = current
             previous = current
@@ -1791,9 +1793,21 @@ def performance(conn: sqlite3.Connection, location_id: str, as_of: date, days: i
     total_actual = 0.0
     total_error = 0.0
     stored_calls = 0
+    from .transactions import score_coverage
     for day in dates:
         row = scored.get(day)
         if row is None:
+            continue
+        daily_rows.append({
+            "date": day,
+            "actual": row["actual_units"],
+            "predicted": row["predicted_units"],
+            "revenue": round(row["actual_sales"], 2) if row["actual_sales"] is not None else None,
+            "accuracy": round(row["accuracy"], 1) if row["accuracy"] is not None else None,
+            "call_source": row.get("call_source") or "reconstructed",
+            **score_coverage(row),
+        })
+        if not row["score_complete"]:
             continue
         try:
             entries = json.loads(row["items_json"] or "[]")
@@ -1815,16 +1829,9 @@ def performance(conn: sqlite3.Connection, location_id: str, as_of: date, days: i
             total_error += abs(actual - predicted)
         if row.get("call_source") == "stored":
             stored_calls += 1
-        daily_rows.append({
-            "date": day,
-            "actual": int(round(float(row["actual_units"] or 0))),
-            "predicted": int(round(float(row["predicted_units"] or 0))),
-            "revenue": round(float(row["actual_sales"] or 0), 2),
-            "accuracy": round(float(row["accuracy"] or 0), 1),
-            "call_source": row.get("call_source") or "reconstructed",
-        })
-    if not daily_rows:
-        return empty
+    evaluated = [row for row in daily_rows if row["accuracy"] is not None]
+    if not evaluated:
+        return empty | {"daily": daily_rows}
 
     wape_total = total_error / max(1.0, total_actual) * 100
     accuracy = round(max(0.0, 100 - wape_total), 1)
@@ -1845,9 +1852,9 @@ def performance(conn: sqlite3.Connection, location_id: str, as_of: date, days: i
         })
     item_errors.sort(key=lambda row: row["wape"], reverse=True)
 
-    values = [row["accuracy"] for row in daily_rows]
-    best = max(daily_rows, key=lambda row: row["accuracy"])
-    worst = min(daily_rows, key=lambda row: row["accuracy"])
+    values = [row["accuracy"] for row in evaluated]
+    best = max(evaluated, key=lambda row: row["accuracy"])
+    worst = min(evaluated, key=lambda row: row["accuracy"])
     within = sum(1 for value in values if value >= 90)
     return {
         "location_id": location_id,
@@ -1857,8 +1864,8 @@ def performance(conn: sqlite3.Connection, location_id: str, as_of: date, days: i
             "forecast_accuracy": accuracy,
             "wape": round(wape_total, 1),
             "average_day_accuracy": round(sum(values) / len(values), 1),
-            "days_evaluated": len(daily_rows),
-            "days_pending": len(dates) - len(daily_rows),
+            "days_evaluated": len(evaluated),
+            "days_pending": len(dates) - len(evaluated),
             "items_evaluated": len(item_errors),
             "days_from_stored_call": stored_calls,
             "window_days": days,
@@ -1869,7 +1876,7 @@ def performance(conn: sqlite3.Connection, location_id: str, as_of: date, days: i
         "trend": {
             "series": [
                 {"date": row["date"], "accuracy": row["accuracy"], "predicted": row["predicted"], "actual": row["actual"]}
-                for row in daily_rows
+                for row in evaluated
             ],
             "average": round(sum(values) / len(values), 1),
             "days": len(values),

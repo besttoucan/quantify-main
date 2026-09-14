@@ -332,13 +332,15 @@ def local_day_review(payload: dict[str, Any]) -> dict[str, Any]:
     actual = payload.get("actual", {})
     predicted = payload.get("predicted", {})
     sold = int(round(float(actual.get("items") or 0)))
-    expected = int(round(float(predicted.get("items") or 0)))
-    unit_gap = sold - expected
-    accuracy = float(payload.get("accuracy_percent") or 0)
+    expected = int(round(float(predicted["items"]))) if predicted.get("items") is not None else None
+    unit_gap = sold - expected if expected is not None else None
+    accuracy = payload.get("accuracy_percent")
     weekday = payload.get("weekday") or "day"
     normal = payload.get("normal_units")
 
-    if unit_gap == 0:
+    if expected is None:
+        headline = f"Sold {plural(sold, 'item')}. " + (payload.get("score_note") or "A whole-day expectation is unavailable.")
+    elif unit_gap == 0:
         headline = f"Sold {plural(sold, 'item')}, exactly the {expected} expected."
     else:
         word = "more" if unit_gap > 0 else "fewer"
@@ -364,7 +366,7 @@ def local_day_review(payload: dict[str, Any]) -> dict[str, Any]:
 
     reason = payload.get("condition_note") or ""
 
-    if accuracy >= 92 or abs(unit_gap) <= 15:
+    if accuracy is not None and unit_gap is not None and (accuracy >= 92 or abs(unit_gap) <= 15):
         matters = "Nothing here would have changed prep."
     elif misses and misses[0].get("sold_out"):
         matters = f"{misses[0]['name']} ran out during service, so that miss cost sales."

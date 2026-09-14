@@ -845,7 +845,9 @@ class QuantifyPlatformTests(unittest.TestCase):
 
     def test_prep_never_contradicts_the_forecast(self) -> None:
         from quantify_app.item_analysis import item_profile
-        with connect(self.db_path) as conn:
+        # This assertion concerns a live forecast. Historical expectations may
+        # be a saved older call or unavailable, independent of today's prep model.
+        with connect(self.db_path) as conn, patch('quantify_app.transactions.last_closed_day', return_value=TODAY-timedelta(days=1)):
             items = [row["id"] for row in conn.execute(
                 "SELECT id FROM menu_items WHERE location_id=?", (LOCATION,)
             )]

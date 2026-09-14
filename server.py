@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import sqlite3
+import sys
 import threading
 import time
 import traceback
@@ -50,6 +51,7 @@ from quantify_app.connectors import (
     refresh_weather,
     save_square_credentials,
     square_status,
+    ConnectorError,
     sync_square_orders,
 )
 from quantify_app.database import connect, initialize
@@ -739,6 +741,22 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                 traceback.print_exc()
             self._drain()
             self.json_response({"error": NOT_UNDERSTOOD}, 400)
+        except ConnectorError as exc:
+            # ConnectorError subclasses RuntimeError, so this branch has to come
+            # first. exc.detail carries the provider's own wording and stays out
+            # of the body on purpose: it belongs in the log, not on a screen in
+            # a kitchen.
+            self._drain()
+            if exc.detail:
+                print(f"connector {exc.reason} ({exc.provider_code or 'no code'}): {exc.detail}", file=sys.stderr)
+            extra = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+            self.json_response({
+                "error": exc.message,
+                "reason": exc.reason,
+                "provider": exc.provider,
+                "explained": exc.explained,
+                "retry_after": exc.retry_after,
+            }, exc.status, extra)
         except RuntimeError as exc:
             self._drain()
             self.json_response({"error": str(exc)}, 502)

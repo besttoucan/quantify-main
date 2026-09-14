@@ -24,6 +24,105 @@ SQUARE_API_VERSION = "2026-07-15"
 WEATHER_DAILY_FIELDS = "temperature_2m_max,temperature_2m_min,precipitation_sum,snowfall_sum,uv_index_max,weather_code"
 
 
+class ConnectorError(RuntimeError):
+    """A provider failure with a reason the interface can act on.
+
+    `message` is the only string an operator ever sees, and it is written for
+    somebody standing in a kitchen, not for a developer. `detail` is the
+    provider's own wording, kept for the log and for a support email, and never
+    rendered on a screen. `explained` is False only when this code genuinely
+    cannot say what happened, which is the single case that earns an offer of
+    support: offering it for a failure we can already explain wastes the one
+    thing a busy operator has, which is attention.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        message: str,
+        *,
+        status: int = 502,
+        provider: str = "Square",
+        detail: str = "",
+        provider_code: str = "",
+        retry_after: int | None = None,
+        explained: bool = True,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+        self.status = status
+        self.provider = provider
+        self.detail = (detail or "")[:1200]
+        self.provider_code = provider_code
+        self.retry_after = retry_after
+        self.explained = explained
+
+
+def _classify_http(code: int, detail: str, headers: Any = None) -> ConnectorError:
+    """Turn a provider HTTP failure into something an operator can act on.
+
+    This only maps what Square actually tells us. Anything it does not
+    recognise stays `explained=False` rather than being given a confident
+    sentence, because a wrong explanation sends somebody to reconnect a
+    perfectly good account.
+    """
+    error: dict[str, Any] = {}
+    try:
+        errors = (json.loads(detail) or {}).get("errors") or []
+        if errors and isinstance(errors[0], dict):
+            error = errors[0]
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        error = {}
+    square_code = str(error.get("code") or "").upper()
+
+    retry_after = None
+    if headers is not None:
+        try:
+            retry_after = int(str(headers.get("Retry-After") or "").strip())
+        except (TypeError, ValueError, AttributeError):
+            retry_after = None
+
+    common = {"detail": detail, "provider_code": square_code}
+
+    if code == 401:
+        return ConnectorError(
+            "token_rejected",
+            "Square is no longer accepting the connection for this location. Reconnect Square in Settings, Location.",
+            status=401, **common,
+        )
+    if code == 403:
+        return ConnectorError(
+            "no_permission",
+            "The Square connection does not have permission to read sales. Reconnect it in Settings, Location and accept every permission asked for.",
+            status=403, **common,
+        )
+    if code == 404:
+        return ConnectorError(
+            "location_not_found",
+            "Square no longer has the location this workspace points at. Choose the right one in Settings, Location.",
+            status=404, **common,
+        )
+    if code == 429:
+        wait = f" Try again in about {retry_after} seconds." if retry_after else " Try again in a few minutes."
+        return ConnectorError(
+            "rate_limited",
+            "Square is asking Quantify to slow down." + wait + " Nothing is wrong with the connection.",
+            status=429, retry_after=retry_after, **common,
+        )
+    if code >= 500:
+        return ConnectorError(
+            "provider_down",
+            "Square is having trouble at their end. Nothing here needs changing, and the next sync will pick up where this one stopped.",
+            status=502, **common,
+        )
+    return ConnectorError(
+        "unknown",
+        "The resync stopped and Quantify cannot tell why. Nothing has changed, and trying again is safe.",
+        status=502, explained=False, **common,
+    )
+
+
 def _request_json(
     url: str,
     *,
@@ -46,11 +145,22 @@ def _request_json(
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1200]
-        raise RuntimeError(f"Provider returned HTTP {exc.code}: {detail}") from exc
+        raise _classify_http(exc.code, detail, getattr(exc, "headers", None)) from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"Could not reach provider: {exc.reason}") from exc
+        # No HTTP response at all. This is the network between here and the
+        # provider, and it is worth saying so plainly, because the cure is
+        # usually waiting a minute rather than touching any setting.
+        raise ConnectorError(
+            "unreachable",
+            "Could not reach Square. This is usually the connection here or at Square, not a setting. Try again in a minute.",
+            status=503, detail=str(exc.reason),
+        ) from exc
     except json.JSONDecodeError as exc:
-        raise RuntimeError("Provider returned an unreadable response") from exc
+        raise ConnectorError(
+            "unreadable",
+            "Square replied with something Quantify could not read. Nothing has changed, and trying again is safe.",
+            detail=str(exc), explained=False,
+        ) from exc
 
 
 def _location(conn: sqlite3.Connection, location_id: str) -> sqlite3.Row:
@@ -620,7 +730,13 @@ def square_status(conn: sqlite3.Connection, location_id: str) -> dict[str, Any]:
 def _square_context(conn: sqlite3.Connection | None = None, location_id: str | None = None) -> tuple[str, dict[str, str], str]:
     credentials = _square_credentials(conn, location_id)
     if credentials is None:
-        raise RuntimeError(SQUARE_NOT_CONNECTED)
+        # 502 is kept rather than the more accurate 409 because two tests and
+        # any caller already depend on this status. The status is invisible to
+        # an operator; the sentence is not, and that is what changes here.
+        raise ConnectorError(
+            "not_connected",
+            "Square is not connected for this location yet, so there is nothing to resync. Connect it in Settings, Location.",
+        )
     base = "https://connect.squareupsandbox.com" if credentials["environment"] == "sandbox" else "https://connect.squareup.com"
     headers = {
         "Authorization": f"Bearer {credentials['token']}",

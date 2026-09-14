@@ -1250,7 +1250,15 @@
     const s = b.summary, cmp = b.comparison;
     const past = isPast();
     const cls = demandClass(s.demand_level);
-    const synced = b.data_health && b.data_health.latest_sale_date;
+    // These are two different facts and the screen used to print one under the
+    // other's name. `latest_sale_date` is the newest sale on file.
+    // `pos_last_sync` is when a sync last finished. They come apart exactly
+    // when it matters: if Square stops returning tickets, a sync can succeed
+    // every morning while the newest sale stays weeks old.
+    const health = b.data_health || {};
+    const through = health.latest_sale_date;
+    const lastSync = health.pos_last_sync;
+    const lag = Number(health.pos_lag_days);
     const sold = b.past_day;
     const figure = (value, label, under) =>
       `<div class="figure"><b>${e(value)}</b> <span class="flabel">${e(label)}</span><span class="under">${e(under)}</span></div>`;
@@ -1277,7 +1285,7 @@
       <div class="headline-main">
         <div class="headline-meta">
           <span class="tag ${cls} ${cls === "plain" ? "" : "dot"}">${e(s.demand_level)}</span>
-          ${registerCurrent(b) || !synced ? "" : `<button class="tag warn dot" data-stab="location">Register last synced ${e(dShort(synced))}</button>`}
+          ${registerCurrent(b) || !through ? "" : `<button class="tag warn dot" data-sync="pos" data-sync-label="Resync" title="Resync the register now">Sales run through ${e(dShort(through))}${Number.isFinite(lag) && lag > 0 ? `, ${e(num(lag))} days behind` : ""}</button>`}
         </div>
         <h2 id="day-headline">${e(title)}</h2>
         <div class="figures">${figures.join("")}</div>
@@ -5069,7 +5077,7 @@
 
   async function runSync(target) {
     const provider = target.dataset.sync;
-    const label = target.textContent;
+    const label = target.dataset.syncLabel || target.textContent;
     const location = S.locationId, view = S.view, tab = S.settingsTab;
     target.disabled = true;
     target.textContent = "Working";
@@ -5083,7 +5091,13 @@
       S.pulse.pending = true;
       if (view !== "settings") { S.data = null; await loadView(true); }
     } catch (error) {
-      if (location === S.locationId && view === S.view && tab === S.settingsTab && target.isConnected) toast(plainError(error), "error");
+      // A failed sync is something the operator has to read and act on, so it
+      // holds with its own dismiss instead of clearing itself after four
+      // seconds. The server sends a sentence written for a kitchen; the
+      // provider's own wording stays in the log.
+      if (location === S.locationId && view === S.view && tab === S.settingsTab && target.isConnected) {
+        toast(plainError(error), "error", true);
+      }
     } finally {
       if (target.isConnected) { target.disabled = false; target.textContent = label; }
     }

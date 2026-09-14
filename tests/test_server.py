@@ -295,7 +295,9 @@ class ServerTests(unittest.TestCase):
         self.assertIn("access token", data["error"])
         response, data = self.one.call("POST", "/api/integrations/pos/sync?location_id=loc-one", {})
         self.assertEqual(response.status, 502)
-        self.assertEqual(data["error"], "Connect Square in Settings > Location first")
+        # The operator-facing sentence, not the developer shorthand it replaced.
+        self.assertIn("Square is not connected", data["error"])
+        self.assertEqual(data["reason"], "not_connected")
         response, data = self.one.call("POST", "/api/integrations/pos/credentials?location_id=loc-one",
                                        {"access_token": "EAAAl-sandbox-token-1234567890", "location_id": "LOC12345", "environment": "sandbox"})
         self.assertEqual(response.status, 200, data)

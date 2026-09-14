@@ -509,8 +509,8 @@ SQUARE_SETTING_KEYS = ("square_access_token", "square_location_id", "square_envi
 def _square_credentials(conn: sqlite3.Connection | None, location_id: str | None) -> dict[str, str] | None:
     """The Square credentials for one location: what was saved in Settings first, the environment second.
 
-    Every Square call goes through here, so a location connected from the
-    screen and one connected from the server's configuration behave the same.
+    Every Square call goes through here. Server credentials belong only to
+    the explicitly mapped internal location, never to a new workspace.
     """
     if conn is not None and location_id:
         rows = conn.execute(
@@ -525,6 +525,10 @@ def _square_credentials(conn: sqlite3.Connection | None, location_id: str | None
                 "environment": (stored.get("square_environment") or "production").lower(),
                 "source": "settings",
             }
+    if conn is not None:
+        mapped_location = os.getenv("QUANTIFY_SQUARE_INTERNAL_LOCATION", "").strip()
+        if not location_id or not mapped_location or location_id != mapped_location:
+            return None
     token = os.getenv("SQUARE_ACCESS_TOKEN")
     square_location_id = os.getenv("SQUARE_LOCATION_ID")
     if token and square_location_id:

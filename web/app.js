@@ -126,6 +126,7 @@
     close: '<path d="M18 6 6 18M6 6l12 12"/>',
     check: '<path d="M20 6 9 17l-5-5"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 16v-5M12 8h.01"/>',
+    mail: '<path d="M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z"/><path d="m3.5 6.5 8.5 6 8.5-6"/>',
     prev: '<path d="M15 18l-6-6 6-6"/>',
     next: '<path d="M9 6l6 6-6 6"/>',
     copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
@@ -1233,7 +1234,11 @@
         ${todayPane(b)}
       </section>
     </div>`;
-    root.innerHTML = shell(dLong(S.date), subtitle, dateTools(), body);
+    // The morning email is the thing the owner actually reads each day, and it
+    // already previews whichever day is on screen. Only its doorway was in the
+    // wrong room, three screens away under Settings, Location.
+    const tools = `${dateTools()}<button class="btn sm ghost" type="button" data-do="preview-email">${icon("mail")}<span>Morning email</span></button>`;
+    root.innerHTML = shell(dLong(S.date), subtitle, tools, body);
     if (isPast() && !b.past_day) fillPastHeadline(b);
   }
 
@@ -3312,7 +3317,7 @@
           <label class="check"><input name="enabled" type="checkbox" ${p.enabled ? "checked" : ""}>
             <span><b>Send it every day</b><small>Goes out at the time above, on this location's clock.</small></span></label>
           <div class="btn-row">
-            <button class="btn" type="button" data-do="preview-email">Preview</button>
+            <button class="btn" type="button" data-do="preview-email" data-date="today">Preview</button>
             <button class="btn" type="button" data-do="send-test" ${mail ? "" : "disabled"}>Send a test</button>
           </div>
           ${mail ? "" : `<p class="form-note">Email is not connected on this account yet.</p>`}
@@ -4854,7 +4859,7 @@
         else if (line) line.querySelectorAll("input").forEach((node) => { node.value = ""; });
         return;
       }
-      case "preview-email": return previewEmail();
+      case "preview-email": return previewEmail(target.dataset.date);
       case "send-test": return sendTest();
       case "adjust":
         try { return openAdjust(target); }
@@ -5103,7 +5108,10 @@
     }
   }
 
-  async function previewEmail() {
+  // `which` is "today" from Settings, where the control is about the email that
+  // will be sent, and undefined from Today, where it is about the day on screen.
+  async function previewEmail(which) {
+    const date = which === "today" ? todayISO() : S.date;
     openLayer(`<div class="scrim" data-do="close-layer"></div>
       <div class="modal-wrap"><div class="modal wide" role="dialog" aria-modal="true" aria-label="Morning email">
         <button class="modal-close" data-do="close-layer" aria-label="Close">${icon("close")}</button>
@@ -5111,7 +5119,7 @@
         <div class="modal-body"><div class="skel" style="height:60vh;border-radius:10px"></div></div></div></div>`);
     const token = openLayer._seq, location = S.locationId;
     try {
-      const result = await API.get(`/api/email/preview?location_id=${encodeURIComponent(S.locationId)}&date=${S.date}`);
+      const result = await API.get(`/api/email/preview?location_id=${encodeURIComponent(S.locationId)}&date=${date}`);
       if (token !== openLayer._seq || location !== S.locationId) return;
       openLayer(`<div class="scrim" data-do="close-layer"></div>
         <div class="modal-wrap"><div class="modal wide" role="dialog" aria-modal="true" aria-label="Morning email">

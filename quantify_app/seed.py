@@ -704,7 +704,7 @@ def seed_workspace(
         geo = {"status": "owner", "source": "Coordinates entered for this location", "key": ""}
     if open_hour is not None and close_hour is not None:
         opens = max(0, min(23, int(open_hour)))
-        closes = max(1, min(28, int(close_hour)))
+        closes = max(0, min(47, int(close_hour)))
         if closes <= opens:
             closes += 24
         if closes - opens > 24:

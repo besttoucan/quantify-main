@@ -121,7 +121,7 @@ def _int(value: Any, default: int | None, low: int, high: int, label: str) -> in
         number = float(str(value).strip().replace(",", ""))
     except (TypeError, ValueError):
         raise ValueError(f"{label} must be a whole number between {low} and {high}") from None
-    if number != number or number != int(number) or not (low <= number <= high):
+    if not (low <= number <= high) or number != int(number):
         raise ValueError(f"{label} must be a whole number between {low} and {high}")
     return int(number)
 
@@ -295,20 +295,12 @@ def _trading_hours(data: dict[str, Any]) -> tuple[int, int]:
     stays a plain subtraction. A bar open 11 to 2 is a fifteen hour day, and
     nothing downstream needs a special case for it.
     """
-    try:
-        opens = int(data.get("open_hour", 7))
-    except (TypeError, ValueError):
-        opens = 7
-    try:
-        closes = int(data.get("close_hour", 21))
-    except (TypeError, ValueError):
-        closes = 21
-    opens = max(0, min(14, opens))
-    closes = max(0, min(28, closes))
+    opens = _int(data.get("open_hour"), 7, 0, 23, "Opening hour")
+    closes = _int(data.get("close_hour"), 21, 0, 47, "Closing hour")
     if closes <= opens:
         closes += 24
     if closes - opens > 24:
-        closes = opens + 24
+        raise ValueError("Closing hour must be within 24 hours of opening")
     return opens, closes
 
 
@@ -557,6 +549,8 @@ class QuantifyHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(content_length))
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "same-origin")
         self.send_header("X-Frame-Options", "SAMEORIGIN")
@@ -648,6 +642,23 @@ class QuantifyHandler(BaseHTTPRequestHandler):
         if not token or not expected or not hmac.compare_digest(token, expected):
             raise PermissionError("Your session expired. Refresh the page and try again")
 
+    def _request_length(self) -> int:
+        """Reject ambiguous framing before any route can read or change data."""
+        lengths = self.headers.get_all("Content-Length", [])
+        if self.headers.get_all("Transfer-Encoding") or len(lengths) > 1:
+            # This server consumes fixed-length bodies only. Never interpret
+            # bytes differently from an upstream server on a reused socket.
+            self.close_connection = True
+            raise ValueError("That request was not understood. Try again")
+        raw_length = lengths[0].strip() if lengths else "0"
+        if not raw_length or any(char not in "0123456789" for char in raw_length):
+            self.close_connection = True
+            raise ValueError("That request was not understood. Try again")
+        if len(raw_length) > 10 or int(raw_length) > MAX_BODY_BYTES:
+            self.close_connection = True
+            raise ValueError("That request is too large")
+        return int(raw_length)
+
     def _read_raw(self) -> bytes:
         """The request body, read once. Later calls get the same bytes.
 
@@ -657,15 +668,11 @@ class QuantifyHandler(BaseHTTPRequestHandler):
         """
         if self._body is not None:
             return self._body
-        try:
-            length = int(self.headers.get("Content-Length", "0") or "0")
-        except ValueError as exc:
-            self.close_connection = True
-            raise ValueError("Invalid request length") from exc
-        if length < 0 or length > MAX_BODY_BYTES:
-            self.close_connection = True
-            raise ValueError("That request is too large")
+        length = self._request_length()
         self._body = self.rfile.read(length) if length else b""
+        if len(self._body) != length:
+            self.close_connection = True
+            raise ValueError("That request was incomplete. Try again")
         return self._body
 
     def _drain(self) -> None:
@@ -709,6 +716,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         self._body = None
         try:
+            self._request_length()
             if path == "/api/health":
                 self.json_response({"ok": True, "version": VERSION, "time": datetime.now(timezone.utc).isoformat(timespec="seconds")})
                 return
@@ -999,6 +1007,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
             company = str(data.get("company", "")).strip()
             if len(company) < 2:
                 raise ValueError("Tell us the name of the business")
+            opens, closes = _trading_hours(data)
             billing.ensure_subscription(conn, organization_id)
             place = str(data.get("place", "")).strip()
             resolved = timezones.resolve(place) if place else timezones.resolve("")
@@ -1036,8 +1045,7 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                         str(data.get("postal_code", ""))[:16],
                         latitude, longitude,
                         resolved["timezone"],
-                        _int(data.get("open_hour"), 7, 0, 23, "Opening hour"),
-                        _int(data.get("close_hour"), 21, 0, 28, "Closing hour"),
+                        opens, closes,
                         geo["status"], geo["source"], geo["key"],
                     ),
                 )
@@ -1056,7 +1064,6 @@ class QuantifyHandler(BaseHTTPRequestHandler):
                 "SELECT 1 FROM locations WHERE organization_id=? AND active=1 LIMIT 1", (organization_id,)
             ).fetchone()
             sample_location = None
-            opens, closes = _trading_hours(data)
             if not has_location:
                 billing.require_location_capacity(conn, organization_id)
                 sample_location = seed_workspace(

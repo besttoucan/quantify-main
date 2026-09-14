@@ -341,8 +341,8 @@ def build_context(
     long_weekend = int(bool(occasion and occasion[1] == "holiday") or bool(tomorrow_occasion and target.weekday() in {4, 5}) or bool(yesterday_occasion and target.weekday() in {0, 1}))
 
     normal_high, normal_low = _seasonal_weather_norm(weather_history or {}, target)
-    temp_high = float(weather_row.get("temp_high") or normal_high)
-    temp_low = float(weather_row.get("temp_low") or normal_low)
+    temp_high = float(weather_row["temp_high"]) if weather_row.get("temp_high") is not None else normal_high
+    temp_low = float(weather_row["temp_low"]) if weather_row.get("temp_low") is not None else normal_low
     precipitation = max(0.0, float(weather_row.get("precipitation_mm") or 0.0))
     condition = str(weather_row.get("condition") or "Unknown")
     snowfall_cm = max(0.0, float(weather_row.get("snowfall_cm") or 0.0))

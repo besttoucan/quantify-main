@@ -284,9 +284,9 @@ def seasonality(history: list[Any]) -> list[dict[str, Any]]:
 def hourly_shape(conn: sqlite3.Connection, location_id: str, item_id: str, target: date) -> dict[str, Any]:
     rows = conn.execute(
         """SELECT hour, SUM(quantity) AS units, COUNT(DISTINCT date) AS days
-           FROM sales_hourly WHERE location_id=? AND item_id=? AND date>=?
+           FROM sales_hourly WHERE location_id=? AND item_id=? AND date>=? AND date<?
            GROUP BY hour ORDER BY hour""",
-        (location_id, item_id, (target - timedelta(days=180)).isoformat()),
+        (location_id, item_id, (target - timedelta(days=180)).isoformat(), target.isoformat()),
     ).fetchall()
     total = sum(float(row["units"] or 0) for row in rows) or 1.0
     hours = []
@@ -447,12 +447,13 @@ def prep_advice(
     }
 
 
-def item_accuracy(conn: sqlite3.Connection, location_id: str, item_id: str) -> dict[str, Any]:
+def item_accuracy(conn: sqlite3.Connection, location_id: str, item_id: str,
+                  as_of: date | None = None) -> dict[str, Any]:
     import json
 
     rows = conn.execute(
-        "SELECT date, items_json FROM day_accuracy WHERE location_id=? ORDER BY date DESC LIMIT 60",
-        (location_id,),
+        "SELECT date, items_json FROM day_accuracy WHERE location_id=? AND date<? ORDER BY date DESC LIMIT 60",
+        (location_id, (as_of or date.max).isoformat()),
     ).fetchall()
     called: list[float] = []
     sold: list[float] = []
@@ -499,21 +500,21 @@ def related_items(
         return []
     residuals, dates, _model = residualised
     mine = dict(zip((d.isoformat() for d in dates), residuals))
-
+    start, end = min(dates).isoformat(), max(dates).isoformat()
     others = conn.execute(
         """SELECT m.id, m.name FROM menu_items m
-           WHERE m.location_id=? AND m.active=1 AND m.id<>?""",
-        (location_id, item_id),
+           WHERE m.location_id=? AND m.id<>? AND EXISTS (
+               SELECT 1 FROM sales s WHERE s.item_id=m.id AND s.date>=? AND s.date<=?)""",
+        (location_id, item_id, start, end),
     ).fetchall()
     if not others:
         return []
 
-    start = min(dates).isoformat()
     candidates: list[dict[str, Any]] = []
     for other in others:
         rows = conn.execute(
-            "SELECT date, quantity FROM sales WHERE location_id=? AND item_id=? AND date>=? ORDER BY date",
-            (location_id, other["id"], start),
+            "SELECT date, quantity FROM sales WHERE location_id=? AND item_id=? AND date>=? AND date<=? ORDER BY date",
+            (location_id, other["id"], start, end),
         ).fetchall()
         if len(rows) < 60:
             continue
@@ -637,27 +638,28 @@ def item_profile(conn: sqlite3.Connection, location_id: str, item_id: str, targe
         comparable_days(history, target, context, forecast["expected"]) if history else {"days": 0}
     )
     price = float(item["price"])
+    first, cutoff = (target - timedelta(days=90)).isoformat(), target.isoformat()
     totals = conn.execute(
         """SELECT SUM(revenue) AS revenue, SUM(quantity) AS units FROM sales
-           WHERE location_id=? AND date>=?""",
-        (location_id, (target - timedelta(days=90)).isoformat()),
+           WHERE location_id=? AND date>=? AND date<?""",
+        (location_id, first, cutoff),
     ).fetchone()
     mine = conn.execute(
         """SELECT SUM(revenue) AS revenue, SUM(quantity) AS units, COUNT(*) AS days,
                   MIN(date) AS first, MAX(date) AS last
-           FROM sales WHERE location_id=? AND item_id=? AND date>=?""",
-        (location_id, item_id, (target - timedelta(days=90)).isoformat()),
+           FROM sales WHERE location_id=? AND item_id=? AND date>=? AND date<?""",
+        (location_id, item_id, first, cutoff),
     ).fetchone()
     rank_row = conn.execute(
         """SELECT COUNT(*) + 1 AS rank FROM (
               SELECT item_id, SUM(revenue) AS r FROM sales
-              WHERE location_id=? AND date>=? GROUP BY item_id
+              WHERE location_id=? AND date>=? AND date<? GROUP BY item_id
            ) WHERE r > (SELECT COALESCE(SUM(revenue), 0) FROM sales
-                        WHERE location_id=? AND item_id=? AND date>=?)""",
-        (location_id, (target - timedelta(days=90)).isoformat(), location_id, item_id, (target - timedelta(days=90)).isoformat()),
+                        WHERE location_id=? AND item_id=? AND date>=? AND date<?)""",
+        (location_id, first, cutoff, location_id, item_id, first, cutoff),
     ).fetchone()
     item_count = int(conn.execute(
-        "SELECT COUNT(*) AS n FROM menu_items WHERE location_id=? AND active=1", (location_id,)
+        "SELECT COUNT(DISTINCT item_id) AS n FROM sales WHERE location_id=? AND date>=? AND date<?", (location_id, first, cutoff)
     ).fetchone()["n"])
 
     revenue_share = 0.0
@@ -668,7 +670,7 @@ def item_profile(conn: sqlite3.Connection, location_id: str, item_id: str, targe
         "SELECT summary, confidence, components_json FROM item_composition WHERE menu_item_id=?", (item_id,)
     ).fetchone()
     last_sale = conn.execute(
-        "SELECT MAX(date) AS last FROM sales WHERE location_id=? AND item_id=?", (location_id, item_id)
+        "SELECT MAX(date) AS last FROM sales WHERE location_id=? AND item_id=? AND date<?", (location_id, item_id, cutoff)
     ).fetchone()
     last_sale_date = last_sale["last"] if last_sale else None
     new_item = bool(forecast.get("new_item"))
@@ -728,7 +730,7 @@ def item_profile(conn: sqlite3.Connection, location_id: str, item_id: str, targe
         "hourly": hourly_shape(conn, location_id, item_id, target),
         "distribution": {key: value for key, value in distribution.items() if key != "values"},
         "prep": prep_advice(distribution, price, cost_share_for(conn, location_id, item_id)),
-        "accuracy": item_accuracy(conn, location_id, item_id),
+        "accuracy": item_accuracy(conn, location_id, item_id, target),
         "related": related_items(conn, location_id, item_id, history) if history else [],
         "unusual": unusual_days(history) if history else [],
         "composition": {

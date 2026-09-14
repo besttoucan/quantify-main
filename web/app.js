@@ -80,12 +80,19 @@
     const d = dObj(iso); d.setDate(d.getDate() + n);
     return localISO(d);
   };
-  // "Today" is the location's own date, sent by /api/bootstrap and refreshed by
-  // /api/pulse. The browser clock is only a fallback before the first answer.
+  // Match the server's trading date: after-midnight hours before closing
+  // still belong to the previous service, in this location's time zone.
   const todayISO = () => {
-    const timezone = S.boot?.locations?.find(row => row.id === S.locationId)?.timezone;
-    if (timezone) {
-      try { return new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()); }
+    const location = S.boot?.locations?.find(row => row.id === S.locationId);
+    if (location?.timezone) {
+      try {
+        const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: location.timezone,
+          year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23" })
+          .formatToParts(new Date()).map(part => [part.type, part.value]));
+        const calendar = `${parts.year}-${parts.month}-${parts.day}`;
+        const closes = Number(location.close_hour);
+        return closes > 24 && Number(parts.hour) < closes - 24 ? addDays(calendar, -1) : calendar;
+      }
       catch (_) { /* Fall back to the server date until the timezone is corrected. */ }
     }
     return S.boot?.today || localISO(new Date());
@@ -1793,10 +1800,12 @@
     }
     const acc = day.accuracy === null || day.accuracy === undefined ? null : Number(day.accuracy);
     const cls = acc === null ? "" : acc < 70 ? "low" : acc < 80 ? "mid" : "";
+    const scoreNote = Number(day.unscored_item_count) > 0
+      ? `${noun(day.unscored_item_count, "item")} without an expectation` : "No complete expectation";
     const c = day.costs;
     return `<button class="dayrow" data-day-detail="${e(day.date)}">
       <span class="when"><b>${e(dShort(day.date))}</b><small>${e(weekday(day.date))}</small></span>
-      <span class="cell" data-label="Sold"><b>${money(day.sales)}</b><small>${noun(day.orders, "ticket")}</small></span>
+      <span class="cell" data-label="Sold"><b>${money(day.sales)}</b><small>${day.orders == null ? "Ticket count unavailable" : noun(day.orders, "ticket")}</small></span>
       ${withCosts
         ? `<span class="cell" data-label="Left after costs">${c && c.complete !== false && c.left_after_costs != null
           ? `<b>${money(c.left_after_costs)}</b><small>${Math.round(Number(c.margin_percent || 0))}% of sales</small>`
@@ -1804,7 +1813,7 @@
         : `<span class="cell" data-label="Items"><b>${num(day.units)}</b><small>${noun(day.distinct_items, "different item")}</small></span>`}
       <span class="accmeter" data-label="Accuracy">
         ${acc === null
-          ? `<span class="top"><b class="muted">Not scored yet</b><small>scored overnight</small></span>`
+          ? `<span class="top"><b class="muted">${day.score_complete === false ? "Not scored" : "Not scored yet"}</b><small>${e(scoreNote)}</small></span>`
           : `<span class="top"><b>${Math.round(acc)}%</b><small>${num(day.predicted_units)} expected, ${num(day.units)} sold</small></span>
              <span class="line"><i class="${cls}" style="width:${Math.max(4, Math.min(100, acc))}%"></i></span>`}
       </span>
@@ -1844,27 +1853,30 @@
     const summary = d.summary || {};
     const n = Number(summary.days_evaluated || 0);
     if (!n) {
-      return `<div class="stack"><section class="card">${emptyState("No closed days yet", "The first day appears the morning after the first full day of sales.")}</section></div>`;
+      const pending = Number(summary.days_pending || 0) > 0;
+      return `<div class="stack"><section class="card">${emptyState(pending ? "No complete days to score" : "No closed days yet",
+        pending ? "Sales are recorded, but a complete expectation is unavailable. Scoring needs saved expectations or enough earlier sales to compare."
+          : "The first day appears the morning after the first full day of sales.")}</section></div>`;
     }
     const trend = d.trend || {};
     const series = (trend.series || []).slice(-n);
-    const scored = series.map((r) => Number(r.accuracy)).filter((v) => !Number.isNaN(v));
+    const scored = series.filter((r) => has(r.accuracy)).map((r) => Number(r.accuracy));
     const within = scored.filter((v) => v >= 90).length;
     const best = scored.length ? Math.round(Math.max(...scored)) : null;
     const worst = scored.length ? Math.round(Math.min(...scored)) : null;
-    const basis = `Over the last ${noun(n, "closed day")}`;
-    const acc = Math.round(Number(summary.forecast_accuracy || 0));
+    const basis = `Over ${noun(n, "scored day")} in this window`;
+    const acc = has(summary.forecast_accuracy) ? `${Math.round(Number(summary.forecast_accuracy))}%` : "Not scored";
     const previous = summary.previous_accuracy;
-    const daily = d.daily || [];
+    const daily = (d.daily || []).filter((row) => has(row.actual) && has(row.predicted));
     const gaps = daily.map((r) => Math.abs(Number(r.actual) - Number(r.predicted)));
     const typicalGap = gaps.length ? Math.round(gaps.reduce((a, b) => a + b, 0) / gaps.length) : 0;
-    const items = d.item_accuracy || [];
+    const items = (d.item_accuracy || []).filter((row) => has(row.accuracy));
     const shown = items.slice(0, 8);
     const rest = items.length - shown.length;
     const restFloor = rest > 0 ? Math.round(Math.min(...items.slice(8).map((r) => Number(r.accuracy)))) : null;
     return `<div class="stack">
       <section class="tiles two">
-        ${tile("Right, item by item", `${acc}%`,
+        ${tile("Right, item by item", acc,
           previous !== undefined && previous !== null
             ? `${Math.round(Number(previous))}% the ${noun(n, "day")} before.`
             : scored.length ? `Best day ${best}%, worst ${worst}%.` : `A day within 10% counts as right.`,
@@ -1873,6 +1885,8 @@
           scored.length ? `${within} of ${noun(scored.length, "day")}.` : `Scores fill in as days close.`,
           scored.length && scored.length !== n ? `Over the last ${noun(scored.length, "scored day")}` : basis)}
       </section>
+
+      ${Number(summary.days_pending || 0) > 0 ? `<p class="small muted">${noun(summary.days_pending, "day")} in this window ${Number(summary.days_pending) === 1 ? "has" : "have"} no complete expectation and ${Number(summary.days_pending) === 1 ? "is" : "are"} left out of these scores.</p>` : ""}
 
       <section class="card">
         <div class="card-head"><div><h2>Expected against sold</h2>
@@ -1901,6 +1915,7 @@
   // SVG only draws the lines. HTML labels keep their fixed type size when
   // the plot narrows, and non-scaling strokes stay two screen pixels wide.
   function lineChart(rows) {
+    rows = (rows || []).filter((row) => has(row.actual) && has(row.predicted));
     if (!rows || !rows.length) return `<p class="muted small">No closed days in this window yet.</p>`;
     const W = 900, H = 200;
     const max = Math.max(...rows.flatMap((r) => [Number(r.actual), Number(r.predicted)]), 1) * 1.08;
@@ -3830,12 +3845,15 @@
     const t = p.today || {}, prep = p.prep || {}, dist = p.distribution || {}, standing = p.standing || {};
     const fresh = p.new_item === true || (Number(standing.history_days) || 0) < 7 || !Number(dist.days)
       || prep.quantity === undefined || prep.quantity === null;
-    if (fresh) return `<section class="isec"><p class="lede">New item. No number yet; after a week of sales it gets one.</p></section>`;
+    if (fresh) return `<section class="isec"><p class="lede">${t.call_source === "stored" && has(t.expected)
+      ? `Recorded opening call: ${num(t.expected)} on ${e(dShort(p.date))}.`
+      : "New item. No number yet; after a week of sales it gets one."}</p></section>`;
 
     const day = p.weekday || weekday(p.date);
     const brief = ((S.data && S.data.items) || []).find((row) => row.item_id === p.item.id);
     const override = t.override && t.override.quantity !== undefined && t.override.quantity !== null ? t.override : null;
-    const expected = Math.round(Number(t.model_expected ?? (brief && brief.model_expected) ?? t.expected ?? 0));
+    const expectedValue = t.model_expected !== undefined ? t.model_expected : t.expected !== undefined ? t.expected : brief && brief.model_expected;
+    const expected = has(expectedValue) ? Math.round(Number(expectedValue)) : null;
     const suggested = Math.round(Number(prep.quantity ?? expected));
     const make = override ? Math.round(Number(override.quantity)) : suggested;
     const normal = Math.round(Number(t.normal ?? 0));
@@ -3843,7 +3861,9 @@
     const high = Math.round(Number(dist.today_high ?? t.high ?? 0));
     const canAdjust = p.date >= todayISO();
     const when = p.date === todayISO() ? "today" : `on ${dShort(p.date)}`;
-    const callSentence = `${canAdjust ? "Expected" : e(t.call_label || "Reconstructed expectation")}: ${num(expected)} ${e(when)}.`;
+    const callSentence = expected === null
+      ? `${t.forecast_reason === "not_enough_history" ? "Not enough earlier sales for an expectation" : "No saved expectation"} ${e(when)}.`
+      : `${canAdjust ? "Expected" : e(t.call_label || "Reconstructed expectation")}: ${num(expected)} ${e(when)}.`;
     const share = Number(prep.cost_share_percent);
     const price = Number(p.item.price || 0);
     const costs = Number.isFinite(share) && price > 0
@@ -4347,7 +4367,7 @@
       const d = await API.get(`/api/history/day?location_id=${encodeURIComponent(location)}&date=${dateISO}`);
       if (token !== openLayer._seq || location !== S.locationId) return;
       const closed = d.closed === true || (!Number(d.units) && !Number(d.orders));
-      const sub = closed ? "Not open" : `${money(d.sales)} · ${noun(d.orders, "ticket")}`;
+      const sub = closed ? "Not open" : `${money(d.sales)} · ${d.orders == null ? "Ticket count unavailable" : noun(d.orders, "ticket")}`;
       openLayer(daySheetShell(dateISO, sub, closed
         ? `<section class="isec"><p class="lede">Nothing was recorded on this day.</p></section>`
         : daySheetBody(d, dateISO)));
@@ -4369,7 +4389,7 @@
         ? `, about the same as a normal ${day}.`
         : `, about ${money(Math.abs(diff))} ${diff > 0 ? "more" : "less"} than a normal ${day}.`;
     } else {
-      sold += ` on ${noun(d.orders, "ticket")}.`;
+      sold += d.orders == null ? "." : ` on ${noun(d.orders, "ticket")}.`;
     }
     const items = d.predicted_units !== null && d.predicted_units !== undefined
       ? `${num(d.units)} items sold against ${num(d.predicted_units)} expected.`
@@ -4380,12 +4400,14 @@
       : `Wages and money kept need your actual pay and employer costs. <a href="/app" data-stab="costs">Add them in Settings > Costs</a>.`;
     const went = `<section class="isec"><h2>How the day went</h2>
       <p class="lede">${e(sold)} ${e(items)}</p>
+      ${d.score_complete === false ? `<p class="small muted isec-note">${e(d.score_note || "A complete expectation is unavailable, so this day has no accuracy score.")}</p>` : ""}
       ${kept ? `<p class="lede isec-note">${kept}</p>` : ""}
       ${r.matters ? `<p class="lede isec-note">${e(r.matters)}</p>` : ""}
     </section>`;
 
     const scores = Array.isArray(d.item_scores) ? d.item_scores : [];
-    const scored = scores.map((row) => {
+    const unscored = scores.filter((row) => !has(row.predicted));
+    const scored = scores.filter((row) => has(row.predicted)).map((row) => {
       const predicted = Math.round(Number(row.predicted) || 0), actual = Math.round(Number(row.actual) || 0);
       return { ...row, predicted, actual, gap: actual - predicted };
     });
@@ -4401,8 +4423,15 @@
           <td class="num right ${row.gap > 0 ? "up" : row.gap < 0 ? "down" : ""}">${row.gap > 0 ? "+" : ""}${num(row.gap)}</td></tr>`).join("")}
         </tbody></table>
         ${rest > 0 ? `<p class="small muted">The other ${noun(rest, "item")} ${rest === 1 ? "was" : "were"} within 4.</p>` : ""}`
-        : `<p class="lede">Every item landed within 4 of expected.</p>`}
+        : `<p class="lede">${unscored.length ? "Each scored item" : "Every item"} landed within 4 of expected.</p>`}
     </section>` : "";
+
+    const unscoredPart = unscored.length ? `<section class="isec"><h2>Items without an expectation</h2>
+      <table class="dt tight"><thead><tr><th>Item</th><th class="num right">Sold</th></tr></thead><tbody>
+        ${unscored.map((row) => `<tr class="clickable" tabindex="0" data-item-sheet="${e(row.item_id)}" data-name="${e(row.name)}" data-date="${e(dateISO)}">
+          <td class="name"><b>${e(row.name)}</b><small>${row.forecast_reason === "missing_historical_expectation" ? "No saved expectation" : "Not enough history"}</small></td>
+          <td class="num right">${num(row.actual)}</td></tr>`).join("")}
+      </tbody></table></section>` : "";
 
     const busiest = d.busiest_hour;
     const busyPart = busiest && busiest.label ? `<section class="isec"><h2>Busiest hour</h2>
@@ -4413,7 +4442,7 @@
       <div class="fold-body">${paragraphs.map((text) => `<p>${text}</p>`).join("")}</div></details>` : "";
 
     const tickets = `<details class="fold" data-tickets="${e(dateISO)}"><summary>Tickets</summary><div class="fold-body"></div></details>`;
-    return went + missedPart + busyPart + more + tickets;
+    return went + missedPart + unscoredPart + busyPart + more + tickets;
   }
 
   // Where the tickets came from, as a share of tickets, in one sentence.
@@ -4469,10 +4498,10 @@
       const skip = cursor ? Number(cursor.skip) || 0 : 0;
       const page = await API.get(`/api/history/orders?location_id=${encodeURIComponent(S.locationId)}&start=${date}&before=${before}&skip=${skip}&limit=20`);
       if (more) more.closest(".btn-row").remove();
-      const rows = (page.orders || []).map(ticketRow).join("");
+      const rows = (page.orders || []).filter(order => order.source === "register").map(ticketRow).join("");
       if (rows) body.insertAdjacentHTML("beforeend", rows);
-      else if (!body.querySelector(".ticket")) body.insertAdjacentHTML("beforeend", `<p class="small muted">No tickets were recorded for this day.</p>`);
-      if (page.has_more && page.next_before_date) {
+      else if (!body.querySelector(".ticket")) body.insertAdjacentHTML("beforeend", `<p class="small muted">Individual tickets are unavailable. Only sales totals were provided for this day.</p>`);
+      if (rows && page.has_more && page.next_before_date) {
         body.insertAdjacentHTML("beforeend", `<div class="btn-row"><button class="btn sm" data-tickets-more data-before="${e(page.next_before_date)}" data-skip="${Number(page.next_skip) || 0}">Show 20 more</button></div>`);
       } else if (rows) {
         body.insertAdjacentHTML("beforeend", `<p class="small muted">Totals include tax.</p>`);

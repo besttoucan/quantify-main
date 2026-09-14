@@ -7,6 +7,7 @@ controlled failure responses, and no external services.
 from __future__ import annotations
 
 import os
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import tempfile
 import threading
@@ -15,6 +16,8 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 import server
+from quantify_app import localtime
+from quantify_app.intraday import trading_date
 from quantify_app.database import connect, initialize
 
 
@@ -122,3 +125,125 @@ class BrowserNavigationTests(unittest.TestCase):
             self.page.locator('.nav-item[data-view="ordering"]').click()
         self.settled()
         self.assertEqual(parse_qs(urlparse(request.value.url).query)["start"], [today])
+
+    def test_incomplete_history_keeps_sales_without_inventing_expected_zero(self):
+        target = date(2026, 8, 1)
+        with connect(self.db) as conn:
+            for identifier, name in [("coverage-old", "House coffee"), ("coverage-new", "New pastry")]:
+                conn.execute("INSERT INTO menu_items(id,location_id,name,category,price) VALUES(?,'loc-a',?,'Cafe',10)", (identifier, name))
+            for offset in range(7):
+                day = (target - timedelta(days=offset)).isoformat()
+                conn.execute("INSERT INTO sales(location_id,item_id,date,quantity,revenue) VALUES('loc-a','coverage-new',?,7,70)", (day,))
+            conn.execute("INSERT INTO sales(location_id,item_id,date,quantity,revenue) VALUES('loc-a','coverage-old',?,10,100)", (target.isoformat(),))
+            conn.execute("""INSERT INTO forecast_calls(location_id,date,item_id,expected,lower,upper,price,model_version,locked_at,locked_local)
+                VALUES('loc-a',?,'coverage-old',10,5,15,10,'fixture','2026-08-01T05:00:00Z','05:00')""", (target.isoformat(),))
+            conn.commit()
+        # Read the real earlier calendar page directly, then use that response
+        # for the browser's first History page to avoid many pagination taps.
+        response = self.context.request.get(self.base + "/api/history/days?location_id=loc-a&before=2026-08-02&limit=14")
+        self.assertEqual(response.status, 200)
+        payload = response.json()
+        self.page.route("**/api/history/days?*", lambda route: route.fulfill(json=payload))
+        self.page.locator('.nav-item[data-view="history"]').click()
+        self.settled()
+        row = self.page.locator('[data-day-detail="2026-08-01"]')
+        self.assertIn("Not scored", row.inner_text())
+        self.assertNotIn("0 expected", row.inner_text())
+        self.assertIn("Ticket count unavailable", row.inner_text())
+        row.click()
+        self.page.get_by_role("heading", name="How the day went", exact=True).wait_for()
+        sheet = self.page.locator(".sheet-body")
+        self.assertIn("17 items sold.", sheet.inner_text())
+        self.assertNotIn("against 0 expected", sheet.inner_text())
+        self.assertNotIn("0 tickets", self.page.locator(".sheet.day").inner_text())
+        self.assertIn("Ticket count unavailable", self.page.locator(".sheet-head").inner_text())
+        self.assertEqual(sheet.get_by_role("heading", name="Busiest hour", exact=True).count(), 0)
+        section = sheet.locator("section").filter(has=self.page.get_by_role("heading", name="Items without an expectation", exact=True))
+        self.assertIn("New pastry", section.inner_text())
+        self.assertIn("Not enough history", section.inner_text())
+        self.assertIn("7", section.inner_text())
+        self.page.keyboard.press("Escape")
+        self.page.locator('[data-htab="accuracy"]').click()
+        self.settled()
+        self.assertTrue(self.page.get_by_role("heading", name="No complete days to score", exact=True).count()
+            or self.page.get_by_text("No complete days to score", exact=True).count())
+        self.assertEqual(self.page.locator(".linechart").count(), 0)
+
+    def test_today_uses_the_same_overnight_trading_date_as_the_server(self):
+        cases = [
+            ("America/New_York", 26, "2026-09-14T02:30:00+00:00"),
+            ("America/New_York", 26, "2026-09-14T05:30:00+00:00"),
+            ("America/New_York", 26, "2026-09-14T06:00:00+00:00"),
+            ("America/New_York", 24, "2026-09-14T04:30:00+00:00"),
+            ("America/Denver", 47, "2026-09-14T20:00:00+00:00"),
+            ("America/Los_Angeles", 21, "2026-09-14T02:00:00+00:00"),
+        ]
+        for zone, closes, timestamp in cases:
+            with self.subTest(zone=zone, closes=closes, timestamp=timestamp):
+                moment = datetime.fromisoformat(timestamp)
+                expected = trading_date({"close_hour": closes}, moment.astimezone(localtime.zone(zone))).isoformat()
+
+                def bootstrap(route):
+                    response = route.fetch()
+                    payload = response.json()
+                    for location in payload["locations"]:
+                        if location["id"] == "loc-a":
+                            location.update(timezone=zone, open_hour=23 if closes == 47 else 17, close_hour=closes)
+                    payload["today"] = expected
+                    route.fulfill(json=payload)
+
+                self.page.route("**/api/bootstrap*", bootstrap)
+                self.page.clock.set_fixed_time(moment)
+                self.page.goto(self.base + "/app")
+                self.page.locator("#f-location").wait_for()
+                self.page.locator('.nav-item[data-view="today"]').click()
+                self.settled()
+                self.assertEqual(self.page.locator("#date-picker").input_value(), expected)
+                self.assertEqual(self.page.get_by_role("button", name="Back to today", exact=True).count(), 0)
+                self.page.unroute("**/api/bootstrap*", bootstrap)
+
+    def test_rebuilt_baskets_are_not_shown_as_register_tickets(self):
+        with connect(self.db) as conn:
+            conn.execute("INSERT INTO menu_items(id,location_id,name,category,price) VALUES('ticket-item','loc-b','Bread','Cafe',10)")
+            conn.execute("INSERT INTO sales(location_id,item_id,date,quantity,revenue) VALUES('loc-b','ticket-item','2026-08-02',10,100)")
+            conn.execute("INSERT INTO sales_hourly(location_id,item_id,date,hour,quantity,revenue) VALUES('loc-b','ticket-item','2026-08-02',10,10,100)")
+            conn.commit()
+        response = self.context.request.get(self.base + "/api/history/orders?location_id=loc-b&start=2026-08-02&before=2026-08-02&limit=20")
+        self.assertEqual(response.status, 200)
+        baskets = response.json()["orders"]
+        self.assertTrue(baskets)
+        self.assertTrue(all(row["source"] == "rebuilt" for row in baskets))
+        payload = self.context.request.get(self.base + "/api/history/days?location_id=loc-b&before=2026-08-03&limit=14").json()
+        self.page.locator('[data-do="switch-location"]:visible').first.click()
+        self.page.locator('[data-pick-location="loc-b"]').click()
+        self.settled()
+        self.page.route("**/api/history/days?*", lambda route: route.fulfill(json=payload))
+        self.page.locator('.nav-item[data-view="history"]').click()
+        self.settled()
+        self.page.locator('[data-day-detail="2026-08-02"]').click()
+        self.page.get_by_role("heading", name="How the day went", exact=True).wait_for()
+        self.page.locator('details[data-tickets] summary').click()
+        self.page.wait_for_function("() => document.querySelector('details[data-tickets]')?.dataset.loaded === '1'")
+        drawer = self.page.locator('details[data-tickets]')
+        self.assertIn("Individual tickets are unavailable", drawer.inner_text())
+        self.assertEqual(drawer.locator(".ticket").count(), 0)
+        self.assertNotIn("Totals include tax", drawer.inner_text())
+        with connect(self.db) as conn:
+            conn.execute("""INSERT INTO pos_orders(provider_order_id,location_id,provider,order_number,sale_date,
+                sale_time,sale_hour,channel,payment_type,subtotal,tax,total,updated_at)
+                VALUES('receipt-1','loc-b','square','#R1','2026-08-02','10:20:00',10,'Counter','Cash',100,8,108,'2026-08-02')""")
+            conn.execute("""INSERT INTO pos_order_lines(provider,location_id,provider_order_id,provider_line_id,
+                item_id,sale_date,sale_hour,quantity,revenue,channel,order_state,payload_hash,updated_at)
+                VALUES('square','loc-b','receipt-1','line-1','ticket-item','2026-08-02',10,10,100,'Counter','COMPLETED','fixture','2026-08-02')""")
+            conn.commit()
+        self.page.keyboard.press("Escape")
+        self.page.locator('[data-day-detail="2026-08-02"]').click()
+        self.page.get_by_role("heading", name="How the day went", exact=True).wait_for()
+        self.page.locator('details[data-tickets] summary').click()
+        self.page.wait_for_function("() => document.querySelector('details[data-tickets]')?.dataset.loaded === '1'")
+        drawer = self.page.locator('details[data-tickets]')
+        self.assertEqual(drawer.locator(".ticket").count(), 1)
+        self.assertIn("#R1", drawer.inner_text())
+        self.assertIn("Bread x10", drawer.inner_text())
+        self.assertIn("$108.00", drawer.inner_text())
+        self.assertNotIn("Individual tickets are unavailable", drawer.inner_text())

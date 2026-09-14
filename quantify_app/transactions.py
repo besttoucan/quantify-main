@@ -438,7 +438,12 @@ def score_range(conn: sqlite3.Connection, location_id: str, start: date, end: da
     if start > end:
         return 0
     location = _load_location(conn, location_id)
-    items = conn.execute("SELECT * FROM menu_items WHERE location_id=? AND active=1", (location_id,)).fetchall()
+    # Today's active menu must not erase what was sold or called in the past.
+    items = conn.execute("""SELECT * FROM menu_items WHERE location_id=? AND (
+        active=1 OR id IN (SELECT item_id FROM sales WHERE location_id=? AND date>=? AND date<=?)
+        OR id IN (SELECT item_id FROM forecast_calls WHERE location_id=? AND date>=? AND date<=?))""",
+        (location_id, location_id, start.isoformat(), end.isoformat(),
+         location_id, start.isoformat(), end.isoformat())).fetchall()
     if not items:
         return 0
 
@@ -455,18 +460,29 @@ def score_range(conn: sqlite3.Connection, location_id: str, start: date, end: da
     # revision made during service has already watched part of the day, so
     # scoring it as a forecast of that day would flatter the record.
     calls = opening_calls(conn, location_id, start, end)
+    recorded_days = {row["date"] for row in conn.execute(
+        "SELECT DISTINCT date FROM sales WHERE location_id=? AND date>=? AND date<=?",
+        (location_id, start.isoformat(), end.isoformat()),
+    )}
 
     for item in items:
         training, weather_map, events_map = _history_for_item(conn, location, item["id"], start)
         coefficients, calibration = _fit_model_bundle(training)
         available = training[:]
         first_date = available[0].target_date if available else start - timedelta(days=365)
-        actual_rows = conn.execute(
+        actual_rows = {row["date"]: dict(row) for row in conn.execute(
             """SELECT date,quantity,revenue,stockout_minutes FROM sales
                WHERE location_id=? AND item_id=? AND date>=? AND date<=? ORDER BY date""",
             (location_id, item["id"], start.isoformat(), end.isoformat()),
-        ).fetchall()
-        for actual in actual_rows:
+        ).fetchall()}
+        # A called item that sold none still has an error. Only infer its zero
+        # on dates with a register record for this location; a missing whole
+        # day's feed remains unknown and is not scored as zero sales.
+        for day_key, called_item in calls:
+            if called_item == item["id"] and day_key in recorded_days:
+                actual_rows.setdefault(day_key, {"date": day_key, "quantity": 0,
+                                                "revenue": 0.0, "stockout_minutes": 0})
+        for actual in sorted(actual_rows.values(), key=lambda row: row["date"]):
             target = date.fromisoformat(actual["date"])
             context = build_context(location, target, weather_map.get(actual["date"]), events_map.get(actual["date"], []), weather_map)
             x = feature_vector(context, target, first_date)

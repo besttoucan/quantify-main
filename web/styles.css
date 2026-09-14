@@ -449,6 +449,12 @@ input:disabled, textarea:disabled { background: var(--surface-3); color: var(--i
 .dt td.name b { font-weight: 600; font-size: var(--t-md); }
 .dt td.name small { display: block; margin-top: 2px; font-size: var(--t-sm); color: var(--ink-4); }
 .dt .plan { font-size: var(--t-lg); font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+
+/* The difference against normal shares the number's line. A block element here
+   made one row taller than its neighbours, which pushed Make and Expected out
+   of line with the rows above and below. On a day where most rows carry a
+   difference, the whole table stepped. */
+.dt .delta { margin-left: 6px; font-size: var(--t-sm); font-variant-numeric: tabular-nums; }
 .dt .right { text-align: right; }
 .dt.make { table-layout: fixed; width: 100%; }
 .dt.make th:not(:first-child) { width: 104px; }
@@ -462,7 +468,7 @@ input:disabled, textarea:disabled { background: var(--surface-3); color: var(--i
   padding: 7px 14px; font-size: var(--t-sm); font-weight: 600;
   color: var(--ink-2); background: var(--surface-2); border-bottom: 1px solid var(--line);
 }
-.dt td.name .tag { margin-left: 8px; vertical-align: middle; }
+.dt td.name .tag { margin-left: 8px; vertical-align: middle; white-space: nowrap; }
 /* On a phone the make list is not a table: the name on one line, then the
    three numbers with their labels and the Adjust button on the next. */
 @media (max-width: 620px) {
@@ -481,7 +487,7 @@ input:disabled, textarea:disabled { background: var(--surface-3); color: var(--i
     content: attr(data-label); display: block; margin-bottom: 2px;
     font-size: var(--t-sm); font-weight: 500; color: var(--ink-2);
   }
-  .dt.make tbody td .small { display: inline; margin-left: 4px; }
+  .dt.make tbody td .delta { margin-left: 4px; }
   .dt.make tbody tr.clickable:hover td { background: transparent; }
 }
 

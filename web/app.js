@@ -900,7 +900,7 @@
     // The Today button says which day is open when it is not today.
     const navLabel = (key, label) => (key === "today" && S.date !== todayISO() ? dShort(S.date) : label);
     const where = `<span><b>${e(location.name || "Choose a location")}</b><span>${e([location.city, location.region].filter(Boolean).join(", "))}</span></span>`;
-    return `<div class="app">
+    return `<div class="app" data-location="${e(S.locationId)}" data-context="${e(viewKey())}">
       <aside class="rail">
         <div class="rail-head">${wordmark()}</div>
         <nav class="rail-nav">
@@ -979,10 +979,16 @@
   // open with nothing on screen shows a placeholder.
   async function loadView(silent = false) {
     clearTimeout(menuPollTimer);
-    const first = !root.querySelector(".app");
-    const cached = S.cache[viewKey()];
-    if (first) root.innerHTML = shell(viewTitle(), "", "", skeleton());
+    const app = root.querySelector(".app");
+    const first = !app;
+    const context = viewKey();
+    const sameContext = app && app.dataset.context === context;
+    const cached = S.cache[context];
+    // A location change must remove the last location's editable forms at once.
+    // Other navigation can keep its old content visible, but cannot act on it.
+    if (first || app.dataset.location !== S.locationId) root.innerHTML = shell(viewTitle(), e(currentLocation().name), "", skeleton());
     else if (!silent && cached) { Object.assign(S, cached); render(); silent = true; }
+    else if (!sameContext) root.querySelector(".content").inert = true;
     const token = (loadView._seq = (loadView._seq || 0) + 1);
     const q = `location_id=${encodeURIComponent(S.locationId)}`;
     progress(true);
@@ -1042,9 +1048,18 @@
     } catch (error) {
       if (token !== loadView._seq) return;
       if (error.status === 403) return boot();
-      if (first) fatal(error); else toast(plainError(error), "error");
+      if (first) fatal(error);
+      else if (!sameContext) {
+        root.innerHTML = shell(viewTitle(), e(currentLocation().name), "", `<section class="card" role="alert">${emptyState(
+          "Could not load this page", plainError(error),
+          `<button class="btn" data-view="${e(S.view)}">Try again</button>`)}</section>`);
+      } else toast(plainError(error), "error");
     } finally {
-      if (token === loadView._seq) progress(false);
+      if (token === loadView._seq) {
+        progress(false);
+        const content = root.querySelector(".content");
+        if (content) content.inert = false;
+      }
     }
   }
 
@@ -4575,6 +4590,10 @@
       // A second tap on the same button while it is still loading does nothing.
       if (S.view === target.dataset.view && root.querySelector(".progress.on")) return;
       S.view = target.dataset.view;
+      if (S.view === "ordering" && S.date < todayISO()) {
+        S.date = todayISO();
+        S.order.edits = {};
+      }
       store.set("quantify.view", S.view);
       window.scrollTo(0, 0);
       return loadView();

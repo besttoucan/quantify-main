@@ -1,0 +1,50 @@
+{
+  "captured_on": "2026-09-13",
+  "source_run": "scratchpad/codex-design/followup-history-final-v2",
+  "fixture": "Temporary SQLite database accessed through the real local API. Alpha Cafe, 17 units and $170 on August 1. Deliberate test data, not customer business data.",
+  "source_state": "Captured from the root codex-design working tree after the ticket/hour fix and compact Days-row explanation; that source was committed unchanged as source_commit.",
+  "source_report_sha256": "787047716309266e50ec3415d65f5847337932848218ec9c1131b423b568fc91",
+  "images": [
+    {
+      "file": "390-incomplete-days.png",
+      "source_file": "390-incomplete-days.png",
+      "width": 390,
+      "height": 844,
+      "bytes": 44663,
+      "sha256": "df70325817afac8ee95ae6c9fb9a0c0118f5c23733643c52c5ccddb93827f525",
+      "visually_inspected": true,
+      "modified": false
+    },
+    {
+      "file": "1024-incomplete-days.png",
+      "source_file": "1024-incomplete-days.png",
+      "width": 1024,
+      "height": 768,
+      "bytes": 67443,
+      "sha256": "2d88116aede49c92ee9a136e6d7cea2585bfe1c11e62b2291bd439354a16267b",
+      "visually_inspected": true,
+      "modified": false
+    },
+    {
+      "file": "390-incomplete-day.png",
+      "source_file": "390-incomplete-day.png",
+      "width": 390,
+      "height": 844,
+      "bytes": 29192,
+      "sha256": "1609b637a225aa0dbcd33f721ad05d8a504144caa93c5e91d9a3b98fae12c3cb",
+      "visually_inspected": true,
+      "modified": false
+    },
+    {
+      "file": "1024-incomplete-track-record.png",
+      "source_file": "1024-incomplete-track-record.png",
+      "width": 1024,
+      "height": 768,
+      "bytes": 30060,
+      "sha256": "c0287353cdfe790df5c62cf32d63282dc785ac37cf5c867a1a62ed595d4ce9ff",
+      "visually_inspected": true,
+      "modified": false
+    }
+  ],
+  "source_commit": "cebca54f4919898a67a3696cba479bca490a33df"
+}

@@ -4,7 +4,9 @@ Contracts reviewed September 13, 2026.
 
 The five browser destinations are Today, Order, History, Updates, and Settings. Their transport routes retain descriptive API names; for example, Today uses `/api/brief`.
 
-JSON requests use Content-Type: application/json. Authenticated state-changing requests require the session's X-CSRF-Token header. Workspace access requires confirmed email. Location routes also require location_id in the query and verify that it belongs to the session's organization. Dates default to the selected location's local date where stated. Errors return an error message with a non-success HTTP status.
+JSON requests use Content-Type: application/json. Authenticated state-changing requests require the session's X-CSRF-Token header. Workspace access requires confirmed email. Location routes also require location_id in the query and verify that it belongs to the session's organization. Dates default to the selected location's trading date where stated. Errors return an error message with a non-success HTTP status.
+
+Request bodies use a single Content-Length header. Unsupported Transfer-Encoding and duplicate Content-Length headers are rejected before dispatch, and the connection closes. Malformed or nonfinite numeric input returns HTTP 400 with a readable error.
 
 ## Public and authentication routes
 
@@ -32,7 +34,7 @@ The remaining account routes require a session:
 | POST | `/api/auth/mfa/disable` | Disable TOTP after verification |
 | POST | `/api/auth/recovery-codes` | Replace recovery codes |
 | POST | `/api/auth/password/change` | Change password |
-| POST | `/api/auth/profile` | Save name and account email |
+| POST | `/api/auth/profile` | Save display_name; account email is unchanged |
 | POST | `/api/auth/logout` | Revoke the current session |
 
 Email confirmation is required; TOTP is optional. When email is unconfigured locally, code responses identify the preview mode. A configured provider failure does not expose a code as a fallback.
@@ -47,6 +49,10 @@ Email confirmation is required; TOTP is optional. When email is unconfigured loc
 | POST | `/api/locations` | Create an empty location within the current plan's capacity |
 
 POST `/api/locations` accepts name, concept, place, region, optional timezone, open_hour, and close_hour. It returns HTTP 201 with location and geography_status. A place match is not street-address verification. Unsupported geography must remain explicit, even if a valid time zone is selected. Creation does not copy another location's sales, menu, forecasts, or context.
+
+Onboarding, location creation, and POST/PUT `/api/location` accept an integer open_hour from 0 through 23 and close_hour from 0 through 47. A close at or before opening is normalized by adding 24. The stored close must be greater than open and no more than open+24. Thus `17,2` and `17,26` both store a 5 PM to 2 AM service; `23,47` stores a full 24-hour service. Invalid values or longer spans return HTTP 400 rather than being clamped. Onboarding validates hours before changing workspace state.
+
+The bootstrap/pulse today value is the location's trading date. For a service closing after midnight, local times before its next-day closing hour belong to the previous date; at closing, the default advances to the current calendar date. The browser uses the same rule when entering Today or Order.
 
 ## Forecast and history
 
@@ -67,7 +73,17 @@ The old `/api/results` route is not part of this API. History uses `/api/history
 
 Item fields distinguish expected/model_expected (predicted sales), baseline (normal sales), and make (preparation). new_item=true means fewer than seven selling days; the client must display "No number yet" and not interpret placeholder zeros as measured demand. These items are excluded from forecast totals and ingredient demand.
 
-The item endpoint's `today` object also includes `call_source` (`live`, `stored`, or `reconstructed`), `call_label`, `call_recorded_at`, and `recomputed_expected`. For closed dates, `expected` and `model_expected` use the recorded opening call or the rounded scored History value when available. `recomputed_expected` preserves the current reanalysis separately. Make, preparation analysis, and a saved quantity override remain separate from that historical Expected.
+The item endpoint's `today` object also includes `call_source` (`live`, `stored`, `reconstructed`, or `unavailable`), `call_label`, `call_recorded_at`, `forecast_reason`, and `recomputed_expected`. For closed dates, `expected` and `model_expected` use the recorded opening call or an eligible rounded historical reconstruction. Without a usable historical expectation, `expected`, `model_expected`, `difference`, and `revenue` are null. `recomputed_expected` preserves the current reanalysis separately; it must not fill the historical gap. Make, preparation analysis, and a saved quantity override also remain separate from historical Expected.
+
+History reconciles saved scores when reading them, using immutable opening calls and recorded actuals. Saved reconstructed expectations remain eligible only with at least seven prior item sales records; a missing expectation stays unknown. Reconciling an existing row does not refit a model, apply current menu prices, or overwrite the saved historical row. Aggregate predicted_units, predicted_sales, and accuracy are null if any item's expectation is unavailable, while recorded actual units and sales remain visible. Incomplete days do not enter whole-day accuracy averages.
+
+Day/list coverage fields are scoring_version (currently 2), score_complete, score_note, scored_item_count, unscored_item_count, scored_actual_units, total_actual_units, and hourly_expected_available. Item score rows carry nullable predicted and gap, forecastable, and forecast_reason. Reasons include not_enough_history, missing_historical_expectation, and missing_actuals. Clients must preserve null as unknown. When hourly_expected_available is false, timing's expected values are null; this also suppresses an old hourly expectation whose corrected day membership or totals no longer match.
+
+score_complete describes unit-expectation coverage. Expected revenue can still be unknown when historical reconstructed item prices were not saved. The public API performs this reconciliation. Direct SQL reads of day_accuracy numeric aggregate columns can still encounter schema-compatible placeholders for incomplete records; use nullable item/coverage data or the API instead of treating a placeholder as a complete forecast.
+
+For days with sales but no complete register-ticket coverage, orders and average_order are null. orders_available, order_count_source (`register`, `partial_register`, `no_sales`, or `unavailable`), recorded_orders, and order_count_note explain the available evidence. recorded_orders may identify a partial set and must not be presented as the whole day's count. Register counts are accepted when their available totals reconcile with daily sales; this does not certify that a provider has finished sending data. Rebuilt baskets are not observed tickets, and the Tickets drawer omits them. Each order's source distinguishes `register` from `rebuilt`.
+
+Missing individual hours remain null in hourly.actual. hourly_actual_available means at least one actual hourly record exists, not that every hour is covered; it is false only when none exist. busiest_hour is null without positive recorded support. An observed zero remains valid data but cannot establish a busy hour. Channel percentages are omitted when ticket coverage is unavailable. Actual sales/units, ticket coverage, hourly observations, and forecast coverage are separate facts; clients must not infer one from another.
 
 When location-matched weather is unavailable, the brief's `context.weather` has `available:false` with `null` conditions and numeric measurements. Clients must show the missing context rather than substituting a temperature. Event attendance and distance likewise require provenance; missing values remain `null`.
 
@@ -216,6 +232,8 @@ Email preferences derive the time zone from the location; a separate submitted z
 | POST | `/api/integrations/events/sync?location_id=` | Refresh matched local events/context |
 | POST | `/api/webhooks/square?location_id=` | Public webhook authenticated by Square signature |
 | POST | `/api/webhooks/stripe` | Public webhook authenticated by Stripe signature |
+
+For the credentials route, the query location_id is the authorized Quantify location and the body's location_id is the Square merchant location. Credentials saved for that Quantify location take priority. Environment credentials apply to a location only when `QUANTIFY_SQUARE_INTERNAL_LOCATION` explicitly matches its Quantify ID; missing or unrelated mappings leave the location disconnected. No access token is included in setup or credential-save responses. Saving credentials makes no provider request; synchronization verifies access. See [Live setup](LIVE_SETUP.md#square).
 
 Sync bodies accept days and, for context, backfill_days within route limits. Provider credentials and data retention still apply. Unsupported geography prevents weather/event lookup rather than querying default coordinates. Supplier website links do not create a provider sync or ordering API.
 

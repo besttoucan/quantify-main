@@ -38,7 +38,17 @@ QUANTIFY_SQUARE_INTERNAL_LOCATION=<internal-location-id>
 
 The access token and Square location ID must belong to the restaurant's authorized merchant account. The local package supports a directly configured merchant connection. A marketplace product must implement per-merchant OAuth, encrypted refreshable credentials, revocation, and installation state.
 
+Server credentials require `QUANTIFY_SQUARE_INTERNAL_LOCATION` to name the matching Quantify location ID, such as the ID returned by `/api/bootstrap`. This is different from `SQUARE_LOCATION_ID`, which identifies the location at Square. Without the internal mapping, location-scoped setup and synchronization treat the server credentials as unavailable. Other workspaces cannot inherit this merchant connection.
+
+Credentials saved through Settings for a particular location take priority over the server configuration. Saving them configures the connection; Sync now makes the provider request that verifies access and imports sales. Neither path returns the access token to the browser.
+
 The notification URL must exactly match the URL registered with Square because it is part of signature verification.
+
+## Trading hours
+
+Onboarding, Add location, and Location settings share the same hours contract. Opening hour is an integer from 0 through 23. Closing hour is stored as an absolute hour after opening and at most 24 hours later, with a maximum stored value of 47. For example, 5 PM to 2 AM is `open_hour:17, close_hour:26`; a full day beginning at 11 PM is `23,47`.
+
+The API also accepts a closing clock hour at or before opening and adds 24, so `17,2` is stored as `17,26`. Invalid numbers, out-of-range hours, and spans longer than 24 hours return HTTP 400 instead of being clamped. Onboarding validates hours before changing the workspace. Sample locations retain the same hours contract.
 
 ## Weather
 

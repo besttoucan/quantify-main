@@ -33,6 +33,15 @@
   --warn: #8a5a12;
   --warn-soft: #fbf2e2;
 
+  /* Level 3 of the urgency ladder. Not a direction of change, so not --down:
+     this is a deadline that has already arrived and the work is today. Darker
+     and more saturated than --down (8.3:1 on white against 6.2:1) so a signed
+     number and a hazard mark sitting in the same row still read as two
+     different things. Never used without the mark and a written label. */
+  --stop: #8c2f1c;
+  --stop-soft: #f7e4e0;
+  --stop-line: #e0b8ae;
+
   /* 3. Series identity on a chart. Hue says which thing, never how good it is.
      Seeded from the categorical scale that was already written for ingredient
      roles and never rendered once. */
@@ -1211,8 +1220,19 @@ input.mini { width: 74px; text-align: right; padding: 6px 8px; margin: 0; }
 .updates-card h2 { font-size: var(--t-lg); line-height: 1.4; margin: 8px 0; }
 .updates-card-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; font-size: var(--t-sm); color: var(--ink-2); }
 .updates-card-meta time { margin-left: auto; font-variant-numeric: tabular-nums; }
-.updates-priority { color: var(--warn); font-weight: 600; font-size: var(--t-sm); }
-.updates-state, .updates-read { color: var(--ink-2); }
+/* The status word is the first thing read when scanning a list of these, so it
+   carries the weight. Plain updates stay quiet on purpose: if every card shouts,
+   the one that matters is no longer findable. */
+.updates-level { display: inline-flex; align-items: center; color: var(--ink-2); font-size: var(--t-sm); }
+.updates-level.warn { color: var(--warn); font-weight: 700; font-size: var(--t-base); }
+.updates-level.stop { color: var(--stop); font-weight: 700; font-size: var(--t-base); }
+.updates-read { color: var(--ink-2); }
+
+/* One edge, not a whole red card. The words carry the state; this only makes
+   the card findable while scrolling the list. */
+.updates-card.stop { border-color: var(--stop-line); box-shadow: inset 3px 0 0 var(--stop); }
+.updates-notice.stop { border-color: var(--stop-line); }
+.updates-nav-count.stop { background: var(--stop); }
 .updates-unread { color: var(--ink); font-weight: 600; }
 .updates-body { font-size: var(--t-md); max-width: 76ch; white-space: pre-line; }
 .updates-evidence { margin-top: 12px; font-size: var(--t-base); color: var(--ink-2); }
@@ -1557,7 +1577,13 @@ body.tour-on { overflow: hidden; }
 .lowrow b { font-weight: 600; color: var(--ink); }
 .lowrow > span { color: var(--ink-2); }
 .lowrow .when { color: var(--warn); font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.lowrow.late .when { color: var(--down); }
+.lowrow.warn .runs { color: var(--warn); }
+.lowrow.stop .runs { color: var(--stop); font-weight: 600; }
+.lowrow.stop .when { color: var(--stop); }
+
+/* The hazard mark. Inline, currentColor, and never rendered on its own: every
+   site that emits it names the state in words in the same element. */
+.hz { width: 13px; height: 13px; flex: 0 0 auto; margin-right: 5px; vertical-align: -2px; }
 @media (max-width: 620px) { .lowrow { grid-template-columns: 1fr; gap: 3px; } .lowrow .when { white-space: normal; } }
 
 /* The adjust modal: the number with -5 -1 +1 +5 around it. */
@@ -1632,7 +1658,7 @@ body.tour-on { overflow: hidden; }
 .sline .lbl { display: none; }
 .sline b { font-size: var(--t-md); font-weight: 600; font-variant-numeric: tabular-nums; }
 .sline small { display: block; font-size: var(--t-sm); color: var(--ink-2); margin-top: 2px; line-height: 1.45; }
-.sline small.down, .sline b.down { color: var(--down); }
+.sline small.stop, .sline b.stop { color: var(--stop); }
 .sline small.warn, .sline b.warn { color: var(--warn); }
 .sline.extra { background: var(--surface-2); }
 .supply-group > .sline:last-child, .sfold .sline:last-child { border-bottom: 0; }

@@ -135,6 +135,29 @@
   const icon = (name, cls = "ico") =>
     `<svg class="ico ${cls}" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 
+  // Level 3 of the urgency ladder, and only level 3. A filled triangle with the
+  // bar and dot punched through by fill-rule, so it reads on any background
+  // without a knockout colour. It never appears without text beside it naming
+  // the state, because nothing here may rest on colour alone.
+  const HAZARD = '<svg class="hz" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" fill-rule="evenodd" d="M8.72 1.56a.83.83 0 0 0-1.44 0L.6 13.1a.83.83 0 0 0 .72 1.25h13.36a.83.83 0 0 0 .72-1.25ZM7.2 5.5h1.6v4.3H7.2ZM7.2 11h1.6v1.6H7.2Z"/></svg>';
+
+  // The one urgency ladder, shared by the Today card and the Order rows so the
+  // two screens cannot drift apart. "stop" is a deadline that has already
+  // arrived, so the work is today. "warn" is the day before that. A line with
+  // no supplier at all is stop only once it is genuinely close, because not
+  // having chosen a supplier for something with a week of cover is not urgent.
+  // Takes a Today attention row or an Order line; both carry the same keys.
+  function stockLevel(row) {
+    if (!row) return "";
+    const days = Number(row.days_of_cover);
+    const order = row.order || row;
+    if (!Number.isFinite(days)) return "";
+    if (days < 1 || order.late) return "stop";
+    if ((row.no_supplier || !row.supplier_id) && days < 2) return "stop";
+    if (days < 2) return "warn";
+    return "";
+  }
+
   // `hold` is for messages somebody has to actually read and act on, like being
   // told a person is going to call them. Those stay up long enough to be read
   // twice and carry their own dismiss.
@@ -1314,8 +1337,9 @@
       else if (r.late || /^now$/i.test(r.order_by_label || "")) action = `order now${lands}`;
       else if (r.order_by_label) action = `order ${/ by /.test(r.order_by_label) ? "" : "by "}${r.order_by_label}${lands}`;
       else action = `from ${r.supplier}`;
-      return `<div class="lowrow ${r.late || r.no_supplier ? "late" : ""}">
-        <b>${e(r.name)}</b><span>${e(runs)}</span><span class="when">${e(action)}</span>
+      const level = stockLevel(r);
+      return `<div class="lowrow ${level}">
+        <b>${e(r.name)}</b><span class="runs">${level === "stop" ? HAZARD : ""}${e(runs)}</span><span class="when">${e(action)}</span>
       </div>`;
     });
     const more = lines.length > 3 ? ` ${num(lines.length - 3)} more on the Order page.` : "";
@@ -2432,17 +2456,17 @@
     const days = line.days_of_cover;
     if (days === null || days === undefined) return `<span class="lbl">Runs out</span><small>Not used in this window</small>`;
     const o = line.order || {};
-    const tone = days < 1 ? "down" : days < 2 ? "warn" : "";
-    const when = `<b class="${tone}">${e(cap(line.runs_out_label || whenLabel(line.runs_out_on)))}</b>`;
+    const level = stockLevel(line);
+    const when = `<b class="${level}">${level === "stop" ? HAZARD : ""}${e(cap(line.runs_out_label || whenLabel(line.runs_out_on)))}</b>`;
     const onOrder = Number(line.on_order || 0);
     let note = "";
     if (onOrder > 0) {
       const unit = line.on_order_unit || line.suggested.unit;
       note = `<small>${fmtQty(onOrder)} ${e(plural(onOrder, unit))} on order${line.arrives ? `, lands ${e(whenShort(line.arrives))}` : ""}</small>`;
     } else if (line.no_supplier || !line.supplier_id) {
-      note = `<small>Choose a supplier</small>`;
+      note = `<small class="${level}">Choose a supplier</small>`;
     } else if (o.late) {
-      note = `<small class="down">Order now${o.arrives ? `, lands ${e(whenShort(o.arrives))}` : ""}</small>`;
+      note = `<small class="stop">Order now${o.arrives ? `, lands ${e(whenShort(o.arrives))}` : ""}</small>`;
     } else if (o.order_by_label && (Number(line.suggested.quantity || 0) > 0 || orderQty(line) > 0)) {
       note = `<small>Order ${e(orderByShort(o.order_by_label))}</small>`;
     }

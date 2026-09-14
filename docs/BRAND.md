@@ -17,6 +17,12 @@ The word Quantify is the interface mark, set with wide letter spacing. Use the e
 | `--down` | `#a4402c` | Lower than comparison, with a signed number |
 | `--up` | `#17694f` | Higher than comparison, with a signed number |
 | `--warn` | `#8a5a12` | A condition that needs attention |
+| `--stop` | `#8c2f1c` | A deadline that has already arrived, with the hazard mark and a text label |
+
+Red appears in two jobs and they are never mixed. `--down` is a number that moved
+down, and it always carries its sign. `--stop` is a deadline that has arrived, and it
+always carries the hazard mark and a written label. `--warn` is the rung below
+`--stop`: something to look at before it becomes today's work, never a negative change.
 
 Expected and sold lines also differ by dash pattern. Every series has a written key. Hourly bars use solid blue for expected demand and green for the peak; actual sales use dark ink. Pale border tokens are for decoration, never the only visible data mark. More sales is not automatically good: describe the change.
 

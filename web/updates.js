@@ -12,6 +12,11 @@ window.QuantifyUpdates = (() => {
   const visible = node => !!node && !!node.getClientRects().length;
   const nodeId = id => `update-note-${encodeURIComponent(String(id))}`;
 
+  // Level 3 of the urgency ladder. A filled triangle with the bar and dot
+  // punched through by fill-rule, so it reads on any background without a
+  // knockout colour. It never appears without the status text beside it.
+  const HAZARD = '<svg class="hz" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" fill-rule="evenodd" d="M8.72 1.56a.83.83 0 0 0-1.44 0L.6 13.1a.83.83 0 0 0 .72 1.25h13.36a.83.83 0 0 0 .72-1.25ZM7.2 5.5h1.6v4.3H7.2ZM7.2 11h1.6v1.6H7.2Z"/></svg>';
+
   function create(options) {
     const { getContext, get, post, onUnread = () => {}, onNavigate = () => {}, onRender = () => {} } = options;
     let contextKey = "", epoch = 0, sequence = 0, running = false;
@@ -55,6 +60,17 @@ window.QuantifyUpdates = (() => {
       return note.state === "active" ? "active" : "resolved";
     }
     function isLive(note) { return note && stateOf(note) === "active"; }
+
+    // Severity on its own overstates the case. updates.py marks a 25 percent
+    // revenue swing "important" as well, and a busier day than usual is not
+    // today's emergency. Only a stock note already inside one day of cover is
+    // work that has to happen today, so only that earns the mark.
+    function levelOf(note) {
+      if (!note || stateOf(note) !== "active" || note.severity !== "important") return "";
+      if (note.kind === "stock") return "stop";
+      if (note.kind === "register") return "warn";
+      return "";
+    }
     function unreadCount() {
       // The server owns unread state. Locally elapsed notes cannot keep a stale badge alive.
       const expiredUnread = (feed?.notes || []).filter(note => note.unread && ["expired", "resolved"].includes(stateOf(note))).length;
@@ -104,12 +120,13 @@ window.QuantifyUpdates = (() => {
       if (!running || !note || !isLive(note) || shown.has(String(note.id)) || note.seen_at || popup) return;
       if (blocked() || busy) { noticeTimer = setTimeout(tryNotice, 2500); return; }
       const holder = document.createElement("aside");
-      holder.className = "updates-notice";
+      const level = levelOf(note);
+      holder.className = "updates-notice" + (level ? ` ${level}` : "");
       holder.dataset.updatePopup = String(note.id);
       holder.setAttribute("role", "status");
       holder.setAttribute("aria-live", "polite");
       holder.setAttribute("aria-atomic", "true");
-      holder.innerHTML = `<div class="updates-notice-head"><span class="${note.severity === "important" ? "updates-priority" : "updates-state"}">${note.severity === "important" ? "Needs a look" : "Sales pattern"}</span>
+      holder.innerHTML = `<div class="updates-notice-head"><span class="updates-level ${level}">${level === "stop" ? HAZARD : ""}${level === "stop" ? "Act today" : level === "warn" ? "Needs a look" : "Sales pattern"}</span>
         <button type="button" class="updates-dismiss" data-update-dismiss aria-label="Dismiss update"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
         <h2>${escape(note.title)}</h2><p>${escape(note.body)}</p>
         <button type="button" class="btn" data-update-view="${escape(note.id)}">View update</button>`;
@@ -180,14 +197,16 @@ window.QuantifyUpdates = (() => {
     }
     function card(note) {
       const state = stateOf(note), current = state === "active", ended = state === "expired" || state === "resolved";
-      const status = state === "expired" ? "Ended" : state === "resolved" ? "Resolved" : state === "scheduled" ? "Upcoming" : note.severity === "important" ? "Needs a look" : "Update";
+      const level = levelOf(note);
+      const status = state === "expired" ? "Ended" : state === "resolved" ? "Resolved" : state === "scheduled" ? "Upcoming"
+        : level === "stop" ? "Act today" : level === "warn" ? "Needs a look" : "Update";
       const source = typeof note.evidence === "string" ? note.evidence : note.evidence ? JSON.stringify(note.evidence) : "";
       const action = note.action && ["today", "ordering", "settings"].includes(note.action.view) ? note.action : null;
       const starts = dateText(note.starts_at), expires = dateText(note.expires_at);
       const window = ended ? `Earlier update${starts ? ` from ${starts}` : ""}${expires ? ` through ${expires}` : ""}` :
         `${starts ? `From ${starts}` : "Applies now"}${expires ? ` until ${expires}` : "; until the details change"}`;
-      return `<article class="updates-card${ended ? " updates-ended" : ""}" id="${escape(nodeId(note.id))}" tabindex="-1" data-update-note="${escape(note.id)}">
-        <div class="updates-card-meta"><span class="${current && note.severity === "important" ? "updates-priority" : "updates-state"}">${status}</span>
+      return `<article class="updates-card${level ? ` ${level}` : ""}${ended ? " updates-ended" : ""}" id="${escape(nodeId(note.id))}" tabindex="-1" data-update-note="${escape(note.id)}">
+        <div class="updates-card-meta"><span class="updates-level ${level}">${level === "stop" ? HAZARD : ""}${status}</span>
           ${note.unread ? '<span class="updates-unread">Unread</span>' : '<span class="updates-read">Read</span>'}
           ${note.created_at ? `<time datetime="${escape(note.created_at)}">${escape(dateText(note.created_at))}</time>` : ""}</div>
         <h2>${escape(note.title)}</h2><p class="updates-body">${escape(note.body)}</p>

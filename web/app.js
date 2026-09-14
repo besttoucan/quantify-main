@@ -633,6 +633,27 @@
     return out;
   }
 
+  function closingHourOptions(opens, selected) {
+    const first = Number(opens) + 1;
+    let closes = Number(selected);
+    while (closes < first) closes += 24;
+    while (closes > first + 23) closes -= 24;
+    return hourOptions(closes, first, first + 23);
+  }
+
+  document.addEventListener("change", (event) => {
+    const input = event.target.closest('#f-onb select[name="open_hour"], #f-location select[name="open_hour"], #f-new-location select[name="open_hour"]');
+    if (!input) return;
+    const form = input.closest("form"), closes = form.querySelector('[name="close_hour"]');
+    if (!closes) return;
+    closes.innerHTML = closingHourOptions(input.value, closes.value);
+    if (form.id === "f-onb") {
+      S.onboarding.values.open_hour = input.value;
+      S.onboarding.values.close_hour = closes.value;
+      saveOnboarding();
+    }
+  });
+
   function renderOnboarding() {
     const { step, values, tz, suggestions } = S.onboarding;
     const progress = ((step + 1) / ONB_STEPS.length) * 100;
@@ -689,9 +710,9 @@
           </div>
           <div class="field pair">
             <label><span>What time do you open?</span>
-              <select name="open_hour">${hourOptions(values.open_hour ?? 7, 0, 14)}</select></label>
+              <select name="open_hour">${hourOptions(values.open_hour ?? 7, 0, 23)}</select></label>
             <label><span>What time do you close?</span>
-              <select name="close_hour">${hourOptions(values.close_hour ?? 21, 14, 28)}</select></label>
+              <select name="close_hour">${closingHourOptions(values.open_hour ?? 7, values.close_hour ?? 21)}</select></label>
           </div>
           <p class="field-note">Only open hours are planned, so an hour either side matters. This can change later in Settings.</p>
           <label class="field"><span>What register do you run?</span>
@@ -3162,8 +3183,8 @@
             <div id="tz-hint" data-tz-hint></div>
             <small>A town, a state, a ZIP code, or a time zone.</small></label>
           <div class="form-grid two">
-            <label class="field"><span>Opens</span><select name="open_hour">${hourOptions(l.open_hour, 0, 14)}</select></label>
-            <label class="field"><span>Closes</span><select name="close_hour">${hourOptions(l.close_hour, 14, 28)}</select></label>
+            <label class="field"><span>Opens</span><select name="open_hour">${hourOptions(l.open_hour, 0, 23)}</select></label>
+            <label class="field"><span>Closes</span><select name="close_hour">${closingHourOptions(l.open_hour, l.close_hour)}</select></label>
           </div>
           <p class="form-note">Past midnight is fine. A bar open 11 AM to 2 AM is a fifteen hour day.</p>
         </div>
@@ -3550,8 +3571,8 @@
           </div>
           <details><summary class="btn ghost">Set the time zone yourself</summary><label class="field"><span>Time zone</span><input name="timezone" placeholder="Mountain time"></label></details>
           <div class="form-grid two">
-            <label class="field"><span>Opens</span><select name="open_hour">${hourOptions(7, 0, 14)}</select></label>
-            <label class="field"><span>Closes</span><select name="close_hour">${hourOptions(21, 14, 28)}</select></label>
+            <label class="field"><span>Opens</span><select name="open_hour">${hourOptions(7, 0, 23)}</select></label>
+            <label class="field"><span>Closes</span><select name="close_hour">${closingHourOptions(7, 21)}</select></label>
           </div>
           <p class="small muted">Weather and nearby events wait until this place is matched.</p>
           <p class="form-error" id="new-location-error"></p>
@@ -3656,13 +3677,20 @@
     const holder = pick.closest(".typeahead");
     const field = holder && holder.querySelector("[data-typeahead]");
     if (!field || field.name !== "city") return;
-    API.get(`/api/timezone?q=${encodeURIComponent(pick.dataset.place)}`).then((r) => {
-      if (!r.match || !r.match.confident) return;
-      const text = document.getElementById("tz-input");
-      const hidden = document.querySelector("#f-location input[name=timezone]");
+    const form = field.closest("form"), location = S.locationId, place = pick.dataset.place;
+    const text = form.querySelector("#tz-input"), hidden = form.querySelector("input[name=timezone]");
+    const region = form.querySelector('[name="region"]');
+    const previousText = text?.value, previousZone = hidden?.value, previousRegion = region?.value;
+    const sequence = form._cityLookup = (form._cityLookup || 0) + 1;
+    API.get(`/api/timezone?q=${encodeURIComponent(place)}`).then((r) => {
+      if (!r.match?.confident || !form.isConnected || location !== S.locationId || sequence !== form._cityLookup) return;
+      if (field.value.trim() !== place.trim() || text?.value !== previousText || hidden?.value !== previousZone) return;
+      if (region?.value !== previousRegion) return;
+      if (r.match.city) field.value = r.match.city;
+      if (region && r.match.region) region.value = r.match.region;
       if (text) text.value = r.match.label || r.match.timezone;
       if (hidden) hidden.value = r.match.timezone;
-      const hint = document.getElementById("tz-hint");
+      const hint = form.querySelector("#tz-hint");
       if (hint) hint.innerHTML = "";
     }).catch(() => {});
   });
@@ -4923,19 +4951,22 @@
   async function runSync(target) {
     const provider = target.dataset.sync;
     const label = target.textContent;
+    const location = S.locationId, view = S.view, tab = S.settingsTab;
     target.disabled = true;
     target.textContent = "Working";
     try {
-      await API.send(`/api/integrations/${provider}/sync?location_id=${encodeURIComponent(S.locationId)}`, "POST",
+      await API.send(`/api/integrations/${provider}/sync?location_id=${encodeURIComponent(location)}`, "POST",
         { days: provider === "pos" ? 1095 : provider === "events" ? 90 : 16, backfill_days: 1095 });
+      if (location !== S.locationId || view !== S.view || tab !== S.settingsTab || !target.isConnected) return;
       toast("Synced");
-      // The connection rows carry the sync time, so setup is read again.
-      S.data = null;
-      await loadView(true);
+      // Settings may contain a draft even after its fields lose focus. The
+      // next view reads fresh data without replacing this form underneath it.
+      S.pulse.pending = true;
+      if (view !== "settings") { S.data = null; await loadView(true); }
     } catch (error) {
-      toast(plainError(error), "error");
-      target.disabled = false;
-      target.textContent = label;
+      if (location === S.locationId && view === S.view && tab === S.settingsTab && target.isConnected) toast(plainError(error), "error");
+    } finally {
+      if (target.isConnected) { target.disabled = false; target.textContent = label; }
     }
   }
 

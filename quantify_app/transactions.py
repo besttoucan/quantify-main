@@ -30,13 +30,13 @@ from typing import Any, Iterator
 from . import localtime
 from .intelligence import (
     HistoryRow,
+    NEW_ITEM_DAYS,
     hour_label,
     location_hour_curve,
     opening_calls,
     service_slots,
     _baseline_prediction,
     _analog_prediction,
-    _cold_start_estimate,
     _fit_model_bundle,
     _history_for_item,
     _learned_hour_curve,
@@ -270,15 +270,7 @@ def day_list(
     ).fetchall()
     has_more = oldest > earliest
     dates = [row["date"] for row in rows]
-    for day in dates:
-        ensure_day_scored(conn, location_id, date.fromisoformat(day))
-    scored = {
-        row["date"]: normalized_score(dict(row))
-        for row in conn.execute(
-            f"SELECT * FROM day_accuracy WHERE location_id=? AND date IN ({','.join('?' * len(dates))})",
-            (location_id, *dates),
-        ).fetchall()
-    }
+    scored = {day: ensure_day_scored(conn, location_id, date.fromisoformat(day)) for day in dates}
     # Dates inside the covered span with no sales at all. The register recorded
     # nothing, so the honest reading is that the place was shut. Saying so beats
     # a gap in the list that makes somebody think data went missing.
@@ -318,10 +310,11 @@ def day_list(
             "orders": order_count,
             "average_order": round(gross / order_count, 2),
             "distinct_items": int(row["items"] or 0),
-            "accuracy": round(float(score["accuracy"]), 1) if score else None,
-            "predicted_units": int(round(float(score["predicted_units"]))) if score else None,
-            "predicted_sales": round(float(score["predicted_sales"]), 2) if score else None,
-            "scored": bool(score),
+            "accuracy": round(score["accuracy"], 1) if score and score["accuracy"] is not None else None,
+            "predicted_units": score["predicted_units"] if score else None,
+            "predicted_sales": round(score["predicted_sales"], 2) if score and score["predicted_sales"] is not None else None,
+            "scored": bool(score and score["score_complete"]),
+            **score_coverage(score),
             "closed": False,
             "note": "",
             "costs": None,
@@ -451,8 +444,8 @@ def score_range(conn: sqlite3.Connection, location_id: str, start: date, end: da
     per_day: dict[str, dict[str, Any]] = {}
 
     # What Quantify actually said before each of these days opened. Where a call
-    # exists it is the thing being scored, manager override included, because
-    # that is the number the kitchen prepped to. Where none exists the
+    # exists its Expected is scored. A manager's Make override is a separate
+    # preparation decision and never replaces Expected. Where none exists the
     # prediction is rebuilt from sales up to the day before, and the day is
     # labelled so the two are never confused.
     #
@@ -470,7 +463,7 @@ def score_range(conn: sqlite3.Connection, location_id: str, start: date, end: da
         coefficients, calibration = _fit_model_bundle(training)
         available = training[:]
         first_date = available[0].target_date if available else start - timedelta(days=365)
-        actual_rows = {row["date"]: dict(row) for row in conn.execute(
+        actual_rows = {row["date"]: dict(row) | {"recorded": True} for row in conn.execute(
             """SELECT date,quantity,revenue,stockout_minutes FROM sales
                WHERE location_id=? AND item_id=? AND date>=? AND date<=? ORDER BY date""",
             (location_id, item["id"], start.isoformat(), end.isoformat()),
@@ -486,7 +479,7 @@ def score_range(conn: sqlite3.Connection, location_id: str, start: date, end: da
             target = date.fromisoformat(actual["date"])
             context = build_context(location, target, weather_map.get(actual["date"]), events_map.get(actual["date"], []), weather_map)
             x = feature_vector(context, target, first_date)
-            baseline = _baseline_prediction(available, target) if available else _cold_start_estimate(conn, item, target)
+            baseline = _baseline_prediction(available, target) if available else 0.0
             analog, _peers = _analog_prediction(available, target, context) if available else (baseline, [])
             ridge = max(0.0, math.expm1(dot(x, coefficients))) if len(available) >= 28 else baseline
             predicted = _blend(baseline, ridge, analog, calibration["weights"])
@@ -495,6 +488,7 @@ def score_range(conn: sqlite3.Connection, location_id: str, start: date, end: da
             if called is not None:
                 predicted = max(0.0, float(called["expected"]))
                 unit_price = float(called["price"])
+            forecastable = called is not None or len(available) >= NEW_ITEM_DAYS
             quantity = float(actual["quantity"])
 
             bucket = per_day.setdefault(actual["date"], {
@@ -503,34 +497,45 @@ def score_range(conn: sqlite3.Connection, location_id: str, start: date, end: da
                 "error": 0.0, "items": [], "condition": context,
                 "from_call": 0, "from_rebuild": 0, "overridden": 0,
             })
-            predicted = int(round(predicted))
-            bucket["predicted_units"] += predicted
+            predicted = int(round(predicted)) if forecastable else None
+            bucket["predicted_units"] += predicted or 0
             bucket["actual_units"] += quantity
-            bucket["predicted_sales"] += predicted * unit_price
+            bucket["predicted_sales"] += (predicted or 0) * unit_price
             bucket["actual_sales"] += float(actual["revenue"])
-            bucket["error"] += abs(quantity - predicted)
-            bucket["from_call" if called is not None else "from_rebuild"] += 1
+            bucket["error"] += abs(quantity - predicted) if forecastable else 0
+            if forecastable:
+                bucket["from_call" if called is not None else "from_rebuild"] += 1
             bucket["overridden"] += 1 if (called is not None and int(called["overridden"] or 0)) else 0
             bucket["items"].append({
                 "item_id": item["id"],
                 "name": item["name"],
                 "predicted": predicted,
                 "actual": int(round(quantity)),
-                "gap": int(round(quantity - predicted)),
+                "gap": int(round(quantity - predicted)) if forecastable else None,
+                "forecastable": forecastable,
+                "forecast_reason": None if forecastable else "not_enough_history",
+                "call_source": "stored" if called else "reconstructed" if forecastable else "unavailable",
+                "predicted_sales": predicted * unit_price if forecastable else None,
                 "sold_out": bool(int(actual["stockout_minutes"] or 0) > 0),
                 "overridden": bool(called is not None and int(called["overridden"] or 0)),
             })
-            available.append(HistoryRow(
-                target_date=target, quantity=quantity, revenue=float(actual["revenue"]),
-                stockout_minutes=int(actual["stockout_minutes"] or 0), context=context, x=x,
-            ))
+            if actual.get("recorded"):
+                available.append(HistoryRow(
+                    target_date=target, quantity=quantity, revenue=float(actual["revenue"]),
+                    stockout_minutes=int(actual["stockout_minutes"] or 0), context=context, x=x,
+                ))
 
     stored = 0
     for day_key, bucket in per_day.items():
         target = date.fromisoformat(day_key)
         actual_units = bucket["actual_units"]
         accuracy = max(0.0, 100.0 - (bucket["error"] / max(1.0, actual_units) * 100.0))
-        items_detail = sorted(bucket["items"], key=lambda row: abs(row["gap"]), reverse=True)
+        items_detail = sorted(bucket["items"], key=lambda row: abs(row["gap"] or 0), reverse=True)
+        complete = all(item["forecastable"] for item in items_detail)
+        # Existing numeric columns are NOT NULL. Coverage and nullable item
+        # predictions are authoritative; all public readers reconcile below.
+        if not complete:
+            accuracy = 0.0
         actual_by_item = {row["item_id"]: float(row["actual"]) for row in bucket["items"]}
         review = _revision_review(conn, location_id, day_key, actual_by_item)
         call_source = "stored" if bucket["from_call"] >= bucket["from_rebuild"] else "reconstructed"
@@ -557,7 +562,7 @@ def score_range(conn: sqlite3.Connection, location_id: str, start: date, end: da
                 "hour": slot % 24,
                 "slot": slot,
                 "label": hour_label(slot),
-                "predicted": round(bucket["predicted_units"] * curve.get(slot, 0.0), 1),
+                "predicted": round(bucket["predicted_units"] * curve.get(slot, 0.0), 1) if complete else None,
                 "actual": round(actual_slots.get(slot, 0.0), 1),
             }
             for slot in slots
@@ -581,6 +586,8 @@ def score_range(conn: sqlite3.Connection, location_id: str, start: date, end: da
                 json.dumps(items_detail, separators=(",", ":")),
                 json.dumps(hourly, separators=(",", ":")),
                 json.dumps({
+                    "scoring_version": 2,
+                    "score_complete": complete,
                     "geography_key": bucket["condition"].get("geography", {}).get("key", ""),
                     "weather_available": bucket["condition"].get("weather_available", False),
                     "weather": bucket["condition"]["weather_condition"] if bucket["condition"].get("weather_available") else None,
@@ -712,31 +719,124 @@ def ensure_day_scored(conn: sqlite3.Connection, location_id: str, target: date) 
         row = conn.execute(
             "SELECT * FROM day_accuracy WHERE location_id=? AND date=?", (location_id, target.isoformat())
         ).fetchone()
-    return dict(row) if row else None
+    return reconciled_score(conn, dict(row)) if row else None
+
+
+def reconciled_score(conn: sqlite3.Connection, score: dict[str, Any]) -> dict[str, Any]:
+    """Versioned read repair without changing the saved historical record.
+
+    Opening calls and register actuals are authoritative. Saved reconstructions
+    remain usable only when the item could have been forecast on that date.
+    Missing expectations stay unknown: no refit, current price or Make override
+    is used to fill a hole in the record.
+    """
+    location_id, day_key = score["location_id"], score["date"]
+    target = date.fromisoformat(day_key)
+    original = {item["item_id"]: item for item in json.loads(score.get("items_json") or "[]")}
+    actuals = {row["item_id"]: dict(row) for row in conn.execute(
+        """SELECT s.item_id,m.name,s.quantity,s.revenue,s.stockout_minutes FROM sales s
+           JOIN menu_items m ON m.id=s.item_id WHERE s.location_id=? AND s.date=?""",
+        (location_id, day_key))}
+    calls = {row["item_id"]: dict(row) for row in conn.execute(
+        """SELECT f.*,m.name FROM forecast_calls f JOIN menu_items m ON m.id=f.item_id
+           WHERE f.location_id=? AND f.date=?""", (location_id, day_key))}
+    prior = {row["item_id"]: int(row["days"]) for row in conn.execute(
+        """SELECT item_id,COUNT(*) AS days FROM sales
+           WHERE location_id=? AND date>=? AND date<? GROUP BY item_id""",
+        (location_id, (target-timedelta(days=1095)).isoformat(), day_key))}
+    entries = []
+    for item_id in sorted(original.keys() | actuals.keys() | calls.keys()):
+        saved, actual, call = original.get(item_id, {}), actuals.get(item_id, {}), calls.get(item_id)
+        eligible = call is not None or prior.get(item_id, 0) >= NEW_ITEM_DAYS
+        expected = call["expected"] if call else saved.get("predicted") if eligible else None
+        if not actuals:  # A missing whole register date cannot be interpreted as zero sales.
+            expected = None
+        expected = int(round(float(expected))) if expected is not None else None
+        quantity = int(round(float(actual.get("quantity") or 0)))
+        reason = None if expected is not None else (
+            "missing_actuals" if not actuals else "not_enough_history" if not eligible
+            else "missing_historical_expectation")
+        entries.append(saved | {
+            "item_id": item_id, "name": actual.get("name") or (call or {}).get("name") or saved.get("name", item_id),
+            "predicted": expected, "actual": quantity, "gap": quantity-expected if expected is not None else None,
+            "forecastable": expected is not None, "forecast_reason": reason,
+            "call_source": "stored" if call and expected is not None else "reconstructed" if expected is not None else "unavailable",
+            "predicted_sales": expected*float(call["price"]) if call and expected is not None else saved.get("predicted_sales") if expected is not None else None,
+            "sold_out": bool(actual.get("stockout_minutes")),
+            "overridden": bool(call and call.get("overridden")),
+        })
+    entries.sort(key=lambda item: abs(item["gap"] or 0), reverse=True)
+    unchanged = set(original) == {item["item_id"] for item in entries} and all(
+        item["predicted"] is not None and original[item["item_id"]].get("predicted") is not None
+        and item["predicted"] == int(round(float(original[item["item_id"]]["predicted"])))
+        for item in entries)
+    # Old rows did not save revenue per reconstructed item. Preserve their
+    # aggregate only when its prediction membership and quantities are intact.
+    predicted_sales = (sum(item["predicted_sales"] for item in entries)
+                       if entries and all(item["predicted_sales"] is not None for item in entries)
+                       else score.get("predicted_sales") if unchanged else None)
+    result = normalized_score(score | {
+        "items_json": json.dumps(entries, separators=(",", ":")),
+        "predicted_sales": predicted_sales,
+        "actual_sales": sum(float(row["revenue"] or 0) for row in actuals.values()),
+        "scoring_version": 2,
+    })
+    sources = {item["call_source"] for item in entries if item["forecastable"]}
+    result["call_source"] = next(iter(sources)) if len(sources) == 1 else "mixed" if sources else "unavailable"
+    hourly = json.loads(score.get("hourly_json") or "[]")
+    # An old hourly shape is not an immutable per-item forecast. If corrected
+    # membership/Expected changes the day, suppress its stale expected line.
+    if not result["score_complete"] or not unchanged:
+        hourly = [hour | {"predicted": None} for hour in hourly]
+    result["hourly_json"] = json.dumps(hourly, separators=(",", ":"))
+    result["hourly_expected_available"] = bool(hourly) and all(hour.get("predicted") is not None for hour in hourly)
+    if not actuals:
+        result.update(actual_units=None, actual_sales=None, total_actual_units=None,
+                      score_note="No register totals are available for this date.")
+    return result
 
 
 def normalized_score(score: dict[str, Any]) -> dict[str, Any]:
-    """Present older fractional scores using the same whole items as new scores."""
+    """Round item units and expose incomplete comparisons as unknown."""
     items = json.loads(score.get("items_json") or "[]")
-    if not items:
-        return score
     for item in items:
-        item["predicted"] = int(round(float(item.get("predicted") or 0)))
+        item["predicted"] = int(round(float(item["predicted"]))) if item.get("predicted") is not None else None
         item["actual"] = int(round(float(item.get("actual") or 0)))
-        item["gap"] = item["actual"] - item["predicted"]
+        item["forecastable"] = item["predicted"] is not None
+        item["gap"] = item["actual"] - item["predicted"] if item["forecastable"] else None
     actual = sum(item["actual"] for item in items)
+    known = [item for item in items if item["forecastable"]]
+    complete = bool(items) and len(known) == len(items)
+    reasons = {item.get("forecast_reason") for item in items if not item["forecastable"]}
+    note = ""
+    if not complete:
+        if reasons == {"not_enough_history"}:
+            note = "Some items had fewer than 7 prior selling days and no recorded opening call. The whole day cannot be scored."
+        else:
+            note = "Some items have no usable historical expectation. The whole day cannot be scored."
     return score | {
-        "predicted_units": sum(item["predicted"] for item in items),
-        "accuracy": max(0.0, 100 - sum(abs(item["gap"]) for item in items) / max(1, actual) * 100),
+        "predicted_units": sum(item["predicted"] for item in known) if complete else None,
+        "predicted_sales": score.get("predicted_sales") if complete else None,
+        "actual_units": actual,
+        "accuracy": max(0.0, 100 - sum(abs(item["gap"]) for item in known) / max(1, actual) * 100) if complete else None,
+        "score_complete": complete, "score_note": note,
+        "scored_item_count": len(known), "unscored_item_count": len(items)-len(known),
+        "scored_actual_units": sum(item["actual"] for item in known), "total_actual_units": actual,
         "items_json": json.dumps(items, separators=(",", ":")),
     }
+
+
+def score_coverage(score: dict[str, Any] | None) -> dict[str, Any]:
+    """Small shared API contract for full-day comparison coverage."""
+    return {key: (score or {}).get(key) for key in (
+        "scoring_version", "score_complete", "score_note", "scored_item_count",
+        "unscored_item_count", "scored_actual_units", "total_actual_units",
+        "hourly_expected_available")}
 
 
 def day_detail(conn: sqlite3.Connection, location_id: str, target: date) -> dict[str, Any]:
     """Everything about one closed day: what sold, and how close the call was."""
     score = ensure_day_scored(conn, location_id, target)
-    if score:
-        score = normalized_score(score)
     orders = day_orders(conn, location_id, target)
     totals = _day_totals(conn, location_id, target, target).get(target.isoformat(), {"units": 0.0, "revenue": 0.0})
 
@@ -794,9 +894,10 @@ def day_detail(conn: sqlite3.Connection, location_id: str, target: date) -> dict
             for name, value in sorted(channels.items(), key=lambda row: -row[1]["sales"])
         ],
         "top_items": sorted(top_items.values(), key=lambda row: -row["units"])[:8],
-        "accuracy": round(float(score["accuracy"]), 1) if score else None,
-        "predicted_units": int(round(float(score["predicted_units"]))) if score else None,
-        "predicted_sales": round(float(score["predicted_sales"]), 2) if score else None,
+        "accuracy": round(score["accuracy"], 1) if score and score["accuracy"] is not None else None,
+        "predicted_units": score["predicted_units"] if score else None,
+        "predicted_sales": round(score["predicted_sales"], 2) if score and score["predicted_sales"] is not None else None,
+        **score_coverage(score),
         "costs": day_costs(conn, location_id, target, orders, totals["revenue"]),
         "item_scores": items_detail,
         "hourly": hourly,
@@ -808,9 +909,10 @@ def day_detail(conn: sqlite3.Connection, location_id: str, target: date) -> dict
 def review_payload(detail: dict[str, Any]) -> dict[str, Any]:
     """The record handed to the writing layer for a closed day."""
     conditions = detail.get("conditions") or {}
-    misses = [row for row in detail.get("item_scores", []) if abs(int(row.get("gap") or 0)) >= 5 or row.get("sold_out")][:5]
+    comparable = [row for row in detail.get("item_scores", []) if row.get("predicted") is not None]
+    misses = [row for row in comparable if abs(int(row.get("gap") or 0)) >= 5 or row.get("sold_out")][:5]
     named = {row.get("item_id") for row in misses[:3]}
-    remaining = [abs(int(row.get("gap") or 0)) for row in detail.get("item_scores", []) if row.get("item_id") not in named]
+    remaining = [abs(int(row.get("gap") or 0)) for row in comparable if row.get("item_id") not in named]
     note = None
     if conditions.get("occasion"):
         note = f"{conditions['occasion']} fell on this date."
@@ -826,9 +928,10 @@ def review_payload(detail: dict[str, Any]) -> dict[str, Any]:
         "actual": {"items": detail.get("units"), "sales": detail.get("sales"), "orders": detail.get("orders")},
         "predicted": {"items": detail.get("predicted_units"), "sales": detail.get("predicted_sales")},
         "accuracy_percent": detail.get("accuracy"),
+        **score_coverage(detail),
         "item_misses": misses,
         "all_items": detail.get("item_scores", []),
-        "others_within": max(remaining, default=0),
+        "others_within": max(remaining, default=0) if detail.get("score_complete", detail.get("accuracy") is not None) else None,
         "condition_note": note,
         "conditions": conditions,
     }
@@ -836,11 +939,12 @@ def review_payload(detail: dict[str, Any]) -> dict[str, Any]:
 
 def accuracy_trend(conn: sqlite3.Connection, location_id: str, days: int = 45) -> dict[str, Any]:
     rows = conn.execute(
-        """SELECT date, accuracy, predicted_units, actual_units, predicted_sales, actual_sales
+        """SELECT *
            FROM day_accuracy WHERE location_id=? ORDER BY date DESC LIMIT ?""",
         (location_id, max(7, min(180, days))),
     ).fetchall()
-    series = [dict(row) for row in reversed(rows)]
+    reconciled = [reconciled_score(conn, dict(row)) for row in reversed(rows)]
+    series = [row for row in reconciled if row["accuracy"] is not None]
     if not series:
         return {"series": [], "average": None, "days": 0, "best": None, "worst": None, "within_ten": None}
     values = [float(row["accuracy"]) for row in series]
@@ -876,6 +980,13 @@ def iter_scoring_targets(conn: sqlite3.Connection, chunk: int = 21) -> Iterator[
            WHERE l.active=1 ORDER BY scored ASC, l.id"""
     ).fetchall()
     for row in rows:
-        pending = unscored_days(conn, row["id"], limit=chunk)
-        if pending:
-            yield row["id"], min(pending), max(pending)
+        pending = sorted(unscored_days(conn, row["id"], limit=chunk))
+        if not pending:
+            continue
+        first = previous = pending[0]
+        for target in pending[1:]:
+            if (target-previous).days > 1:
+                yield row["id"], first, previous
+                first = target
+            previous = target
+        yield row["id"], first, previous

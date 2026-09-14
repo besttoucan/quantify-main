@@ -452,19 +452,20 @@ def item_accuracy(conn: sqlite3.Connection, location_id: str, item_id: str,
     import json
 
     rows = conn.execute(
-        "SELECT date, items_json FROM day_accuracy WHERE location_id=? AND date<? ORDER BY date DESC LIMIT 60",
+        "SELECT * FROM day_accuracy WHERE location_id=? AND date<? ORDER BY date DESC LIMIT 60",
         (location_id, (as_of or date.max).isoformat()),
     ).fetchall()
     called: list[float] = []
     sold: list[float] = []
     sold_out_days = 0
+    from .transactions import reconciled_score
     for row in rows:
         try:
-            entries = json.loads(row["items_json"] or "[]")
+            entries = json.loads(reconciled_score(conn, dict(row))["items_json"] or "[]")
         except (ValueError, TypeError):
             continue
         for entry in entries:
-            if entry.get("item_id") == item_id:
+            if entry.get("item_id") == item_id and entry.get("predicted") is not None:
                 called.append(float(entry.get("predicted") or 0))
                 sold.append(float(entry.get("actual") or 0))
                 sold_out_days += 1 if entry.get("sold_out") else 0
@@ -599,7 +600,7 @@ def unusual_days(history: list[Any], limit: int = 3) -> list[dict[str, Any]]:
 def _profile_call(conn: sqlite3.Connection, location_id: str, item_id: str,
                   target: date, forecast: dict[str, Any]) -> dict[str, Any]:
     """Read the same historical Expected as History, never the quantity to make."""
-    from .transactions import ensure_day_scored, last_closed_day, normalized_score
+    from .transactions import ensure_day_scored, last_closed_day
     if target > last_closed_day(conn, location_id):
         return {"expected": forecast["expected"], "source": "live", "label": "Expected", "recorded_at": None}
     opening = conn.execute(
@@ -611,13 +612,19 @@ def _profile_call(conn: sqlite3.Connection, location_id: str, item_id: str,
                 "label": "Recorded opening call", "recorded_at": opening["locked_at"]}
     score = ensure_day_scored(conn, location_id, target)
     if score:
-        entries = json.loads(normalized_score(score)["items_json"] or "[]")
+        entries = json.loads(score["items_json"] or "[]")
         saved = next((entry for entry in entries if entry.get("item_id") == item_id), None)
         if saved is not None:
-            return {"expected": saved["predicted"], "source": "reconstructed",
-                    "label": "Reconstructed expectation", "recorded_at": score["scored_at"]}
-    return {"expected": forecast["expected"], "source": "reconstructed",
-            "label": "Reconstructed expectation", "recorded_at": None}
+            if saved["predicted"] is not None:
+                return {"expected": saved["predicted"], "source": "reconstructed",
+                        "label": "Reconstructed expectation", "recorded_at": score["scored_at"]}
+            reason = saved["forecast_reason"]
+        else:
+            reason = "missing_historical_expectation"
+    else:
+        reason = "not_enough_history" if forecast.get("new_item") else "missing_historical_expectation"
+    return {"expected": None, "source": "unavailable", "forecast_reason": reason,
+            "label": "Not enough history" if reason == "not_enough_history" else "No saved expectation", "recorded_at": None}
 
 
 def item_profile(conn: sqlite3.Connection, location_id: str, item_id: str, target: date) -> dict[str, Any]:
@@ -701,8 +708,9 @@ def item_profile(conn: sqlite3.Connection, location_id: str, item_id: str, targe
             "call_source": call["source"],
             "call_label": call["label"],
             "call_recorded_at": call["recorded_at"],
+            "forecast_reason": call.get("forecast_reason"),
             "normal": forecast["baseline"],
-            "difference": call["expected"] - forecast["baseline"],
+            "difference": call["expected"] - forecast["baseline"] if call["expected"] is not None else None,
             "low": forecast["lower"],
             "high": forecast["upper"],
             "make": forecast["make"],
@@ -710,7 +718,7 @@ def item_profile(conn: sqlite3.Connection, location_id: str, item_id: str, targe
             "normal_make": forecast.get("normal_make", forecast["baseline"]),
             "sell_out_percent": forecast.get("sell_out_percent"),
             "confidence": forecast["confidence"],
-            "revenue": round(call["expected"] * price, 2),
+            "revenue": round(call["expected"] * price, 2) if call["expected"] is not None else None,
             "override": forecast["override"],
         },
         "standing": {

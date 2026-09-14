@@ -292,11 +292,14 @@ def _location_sigma(conn: sqlite3.Connection, location_id: str) -> float:
     pace is trying to detect is a whole day moving.
     """
     rows = conn.execute(
-        """SELECT predicted_units, actual_units FROM day_accuracy
-           WHERE location_id=? AND actual_units>0 AND predicted_units>0
+        """SELECT * FROM day_accuracy
+           WHERE location_id=?
            ORDER BY date DESC LIMIT 45""",
         (location_id,),
     ).fetchall()
+    from .transactions import reconciled_score
+    rows = [reconciled_score(conn, dict(row)) for row in rows]
+    rows = [row for row in rows if row["score_complete"] and row["actual_units"] > 0 and row["predicted_units"] > 0]
     if len(rows) < 7:
         return 0.16
     total = sum(

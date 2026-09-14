@@ -228,6 +228,46 @@ def day_orders(conn: sqlite3.Connection, location_id: str, target: date) -> list
     return stored if stored else rebuild_day_orders(conn, location_id, target)
 
 
+def _ticket_summary(orders: list[dict[str, Any]], units: float, revenue: float) -> dict[str, Any]:
+    """Count real tickets only when their available totals cover the day.
+
+    Rebuilt baskets explain the sample's shape, but are not observed tickets.
+    Matching register totals detects partial header coverage; it cannot certify
+    that a provider has finished sending every order.
+    """
+    recorded = bool(orders) and all(order["source"] == "register" for order in orders)
+    lines = [line for order in orders for line in order["lines"]] if recorded else []
+    recorded_revenue = sum(line["line_total"] for line in lines) if lines else sum(order["subtotal"] for order in orders)
+    complete = recorded and math.isclose(recorded_revenue, revenue, abs_tol=0.02)
+    if lines:
+        complete = complete and round(sum(line["quantity"] for line in lines)) == round(units)
+    empty = not orders and units == 0 and revenue == 0
+    count = len(orders) if complete else 0 if empty else None
+    return {
+        "orders": count,
+        "average_order": round(sum(order["total"] for order in orders)/count, 2) if count else 0.0 if empty else None,
+        "orders_available": count is not None,
+        "order_count_source": "register" if complete else "partial_register" if recorded else "no_sales" if empty else "unavailable",
+        "recorded_orders": len(orders) if recorded else None,
+        "order_count_note": ("" if complete or empty else "Recorded orders do not cover the day's aggregate totals."
+                             if recorded else "The register supplied no complete ticket record for this date."),
+    }
+
+
+def _actual_hours(conn: sqlite3.Connection, location_id: str, target: date,
+                  slots: list[int]) -> dict[int, float]:
+    """Recorded quantities by service slot, leaving absent hours unknown."""
+    observed = {}
+    for row in conn.execute(
+        """SELECT date,hour,SUM(quantity) AS units FROM sales_hourly
+           WHERE location_id=? AND date IN (?,?) GROUP BY date,hour""",
+        (location_id, target.isoformat(), (target+timedelta(days=1)).isoformat())):
+        slot = (date.fromisoformat(row["date"])-target).days*24+int(row["hour"])
+        if slot in slots:
+            observed[slot] = float(row["units"] or 0)
+    return observed
+
+
 # ---------------------------------------------------------------------------
 # Day summaries
 # ---------------------------------------------------------------------------
@@ -298,8 +338,6 @@ def day_list(
         revenue = float(row["revenue"] or 0)
         # Read the same orders the detail view reads, so the two never disagree.
         orders = day_orders(conn, location_id, day)
-        order_count = max(1, len(orders))
-        gross = sum(order["total"] for order in orders) or revenue
         score = scored.get(row["date"])
         priced[row["date"]] = {"orders": orders, "revenue": revenue}
         days.append({
@@ -307,8 +345,7 @@ def day_list(
             "weekday": day.strftime("%A"),
             "sales": round(revenue, 2),
             "units": int(round(units)),
-            "orders": order_count,
-            "average_order": round(gross / order_count, 2),
+            **_ticket_summary(orders, units, revenue),
             "distinct_items": int(row["items"] or 0),
             "accuracy": round(score["accuracy"], 1) if score and score["accuracy"] is not None else None,
             "predicted_units": score["predicted_units"] if score else None,
@@ -788,8 +825,15 @@ def reconciled_score(conn: sqlite3.Connection, score: dict[str, Any]) -> dict[st
     # membership/Expected changes the day, suppress its stale expected line.
     if not result["score_complete"] or not unchanged:
         hourly = [hour | {"predicted": None} for hour in hourly]
+    if not hourly:
+        hourly = [{"hour": slot % 24, "slot": slot, "label": hour_label(slot), "predicted": None}
+                  for slot in service_slots(_load_location(conn, location_id))]
+    actual_hours = _actual_hours(conn, location_id, target, [hour.get("slot", hour["hour"]) for hour in hourly])
+    hourly = [hour | {"actual": round(actual_hours[hour.get("slot", hour["hour"])], 1)
+                      if hour.get("slot", hour["hour"]) in actual_hours else None} for hour in hourly]
     result["hourly_json"] = json.dumps(hourly, separators=(",", ":"))
     result["hourly_expected_available"] = bool(hourly) and all(hour.get("predicted") is not None for hour in hourly)
+    result["hourly_actual_available"] = bool(actual_hours)
     if not actuals:
         result.update(actual_units=None, actual_sales=None, total_actual_units=None,
                       score_note="No register totals are available for this date.")
@@ -831,7 +875,7 @@ def score_coverage(score: dict[str, Any] | None) -> dict[str, Any]:
     return {key: (score or {}).get(key) for key in (
         "scoring_version", "score_complete", "score_note", "scored_item_count",
         "unscored_item_count", "scored_actual_units", "total_actual_units",
-        "hourly_expected_available")}
+        "hourly_expected_available", "hourly_actual_available")}
 
 
 def day_detail(conn: sqlite3.Connection, location_id: str, target: date) -> dict[str, Any]:
@@ -839,9 +883,12 @@ def day_detail(conn: sqlite3.Connection, location_id: str, target: date) -> dict
     score = ensure_day_scored(conn, location_id, target)
     orders = day_orders(conn, location_id, target)
     totals = _day_totals(conn, location_id, target, target).get(target.isoformat(), {"units": 0.0, "revenue": 0.0})
+    tickets = _ticket_summary(orders, totals["units"], totals["revenue"])
 
     channels: dict[str, dict[str, float]] = defaultdict(lambda: {"orders": 0, "sales": 0.0})
     for order in orders:
+        if order["source"] != "register":
+            continue
         entry = channels[order["channel"]]
         entry["orders"] += 1
         entry["sales"] += order["total"]
@@ -884,15 +931,15 @@ def day_detail(conn: sqlite3.Connection, location_id: str, target: date) -> dict
         "closed": not bool(totals["units"]),
         "normal_sales": round(normal_sales, 2) if normal_sales is not None else None,
         "normal_units": int(round(normal_units)) if normal_units is not None else None,
-        "orders": len(orders),
-        "average_order": round(order_total / len(orders), 2) if orders else 0.0,
-        "busiest_hour": max(hourly, key=lambda row: row["actual"], default=None),
+        **tickets,
+        "busiest_hour": max((row for row in hourly if row.get("actual") is not None and row["actual"] > 0),
+                            key=lambda row: row["actual"], default=None),
         "channels": [
             {"channel": name, "orders": int(value["orders"]), "sales": round(value["sales"], 2),
              "ticket_share_percent": round(value["orders"] / max(1, len(orders)) * 100, 1),
              "sales_share_percent": round(value["sales"] / max(1, order_total) * 100, 1)}
             for name, value in sorted(channels.items(), key=lambda row: -row[1]["sales"])
-        ],
+        ] if tickets["orders_available"] else [],
         "top_items": sorted(top_items.values(), key=lambda row: -row["units"])[:8],
         "accuracy": round(score["accuracy"], 1) if score and score["accuracy"] is not None else None,
         "predicted_units": score["predicted_units"] if score else None,

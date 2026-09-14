@@ -185,7 +185,9 @@ def test_history_and_accuracy_share_integer_predictions(sample):
         assert all(isinstance(row["predicted"], int) for row in detail["item_scores"])
         assert detail["normal_sales"] > 0 and detail["normal_units"] > 0
         assert len(score["daily"]) == len(score["trend"]["series"]) == score["summary"]["days_evaluated"] == 30
-        assert abs(sum(row["ticket_share_percent"] for row in detail["channels"]) - 100) <= 0.2
+        # The sample has hourly item totals, not observed ticket channels.
+        assert detail['orders'] is None and day['orders'] is None
+        assert detail['channels'] == []
 
 
 def test_http_bad_numbers_and_recipe_shape_are_friendly(http):

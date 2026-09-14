@@ -748,7 +748,11 @@ class QuantifyPlatformTests(unittest.TestCase):
         # Every channel share is a share of the same total the rows are drawn
         # from, so they can never sum past the whole.
         gross = sum(row["sales"] for row in detail["channels"])
-        self.assertGreater(gross, 0)
+        # Sample hourly baskets have no observed ticket/channel record.
+        if detail['orders_available']:
+            self.assertGreater(gross, 0)
+        else:
+            self.assertEqual(detail['channels'], [])
         for row in detail["channels"]:
             self.assertLessEqual(row["sales"], gross + 0.01)
 

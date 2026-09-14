@@ -213,6 +213,66 @@ class CoreFollowupTests(unittest.TestCase):
             after = dict(conn.execute("SELECT * FROM day_accuracy WHERE date=?",(middle.isoformat(),)).fetchone())
             self.assertEqual(before,after)
 
+    def test_aggregate_sales_do_not_invent_tickets_or_a_busiest_hour(self):
+        target = date(2026,8,1)
+        with connect(self.path) as conn:
+            conn.execute("INSERT INTO menu_items(id,location_id,name,category,price) VALUES('item','loc','Sandwich','Lunch',10)")
+            conn.execute("INSERT INTO sales(location_id,item_id,date,quantity,revenue) VALUES('loc','item',?,17,170)",(target.isoformat(),))
+            for row in [transactions.day_detail(conn,'loc',target),
+                        transactions.day_list(conn,'loc',before=target+timedelta(days=1),limit=1)['days'][0]]:
+                self.assertEqual((row['units'],row['sales']),(17,170))
+                self.assertIsNone(row['orders'])
+                self.assertIsNone(row['average_order'])
+                self.assertFalse(row['orders_available'])
+                self.assertEqual(row['order_count_source'],'unavailable')
+            detail = transactions.day_detail(conn,'loc',target)
+            self.assertIsNone(detail['busiest_hour'])
+            self.assertFalse(detail['hourly_actual_available'])
+            self.assertTrue(all(hour['actual'] is None for hour in detail['hourly']))
+            self.assertEqual(detail['channels'],[])
+
+            # Hourly items support a peak, but generated baskets are not tickets.
+            conn.execute("INSERT INTO sales_hourly(location_id,item_id,date,hour,quantity,revenue) VALUES('loc','item',?,9,17,170)",(target.isoformat(),))
+            self.assertTrue(transactions.day_orders(conn,'loc',target))
+            detail = transactions.day_detail(conn,'loc',target)
+            self.assertTrue(detail['hourly_actual_available'])
+            self.assertEqual((detail['busiest_hour']['hour'],detail['busiest_hour']['actual']),(9,17))
+            self.assertIsNone(detail['orders'])
+            self.assertIsNone(detail['average_order'])
+            self.assertEqual(detail['channels'],[])
+            self.assertEqual(sum(hour['actual'] or 0 for hour in detail['hourly']),17)
+
+            # An observed zero is valid data but cannot identify a busy hour.
+            conn.execute("UPDATE sales_hourly SET quantity=0,revenue=0 WHERE location_id='loc'")
+            detail = transactions.day_detail(conn,'loc',target)
+            self.assertTrue(detail['hourly_actual_available'])
+            self.assertIsNone(detail['busiest_hour'])
+
+    def test_real_ticket_count_requires_reconcilable_register_coverage(self):
+        target = date(2026,8,1)
+        with connect(self.path) as conn:
+            conn.execute("INSERT INTO menu_items(id,location_id,name,category,price) VALUES('item','loc','Sandwich','Lunch',10)")
+            conn.execute("INSERT INTO sales(location_id,item_id,date,quantity,revenue) VALUES('loc','item',?,17,170)",(target.isoformat(),))
+            conn.execute("""INSERT INTO pos_orders(provider_order_id,location_id,sale_date,sale_time,sale_hour,
+                subtotal,total,updated_at) VALUES('one','loc',?,'09:00:00',9,100,110,'test')""",(target.isoformat(),))
+            partial = transactions.day_detail(conn,'loc',target)
+            self.assertIsNone(partial['orders'])
+            self.assertEqual(partial['recorded_orders'],1)
+            self.assertEqual(partial['order_count_source'],'partial_register')
+            self.assertEqual(partial['channels'],[])
+            conn.execute("""INSERT INTO pos_orders(provider_order_id,location_id,sale_date,sale_time,sale_hour,
+                channel,subtotal,total,updated_at) VALUES('two','loc',?,'10:00:00',10,'Pickup',70,75,'test')""",(target.isoformat(),))
+            detail = transactions.day_detail(conn,'loc',target)
+            listing = transactions.day_list(conn,'loc',before=target+timedelta(days=1),limit=1)['days'][0]
+            for row in [detail,listing]:
+                self.assertEqual(row['orders'],2)
+                self.assertEqual(row['average_order'],92.5)
+                self.assertTrue(row['orders_available'])
+                self.assertEqual(row['order_count_source'],'register')
+            self.assertAlmostEqual(sum(channel['ticket_share_percent'] for channel in detail['channels']),100)
+            self.assertAlmostEqual(sum(channel['sales_share_percent'] for channel in detail['channels']),100)
+            self.assertIsNone(detail['busiest_hour'])
+
 
 if __name__ == '__main__':
     unittest.main()
